@@ -1,0 +1,7 @@
+{
+  "mode": "test",
+  "test_root": "/Volumes/Server/Students/CRM_TEST",
+  "production_root": "/Volumes/Server/Students/2026",
+  "production_enabled": false
+}
+

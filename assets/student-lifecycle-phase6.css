@@ -1,0 +1,210 @@
+.student-lifecycle-current,
+.student-lifecycle-schools,
+.student-lifecycle-history { margin-top: 18px; }
+.lifecycle-current-facts,
+.lifecycle-case-summary-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.lifecycle-current-facts > div,
+.lifecycle-case-summary-grid > div {
+  background: rgba(49, 91, 239, .045);
+  border: 1px solid rgba(49, 91, 239, .12);
+  border-radius: 10px;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px 12px;
+}
+.lifecycle-current-facts span,
+.lifecycle-case-summary-grid span {
+  color: var(--detail-premium-muted, #667085);
+  font-size: .78rem;
+  font-weight: 700;
+}
+.lifecycle-current-facts strong,
+.lifecycle-case-summary-grid strong { overflow-wrap: anywhere; }
+.lifecycle-profile-operations {
+  align-items: stretch;
+  margin-top: 12px;
+}
+.lifecycle-profile-operations .button-link { white-space: normal; }
+.lifecycle-case-summary {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.lifecycle-case-summary > .panel { margin: 0; }
+.lifecycle-case-summary-hero .notice { margin-top: 14px; }
+.lifecycle-case-summary-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 14px;
+}
+.lifecycle-case-audit {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.lifecycle-case-audit li {
+  border-bottom: 1px solid var(--border, #dfe5ef);
+  display: grid;
+  gap: 3px;
+  padding: 9px 0;
+}
+.lifecycle-case-audit span,
+.lifecycle-case-audit small {
+  color: var(--detail-premium-muted, #667085);
+  overflow-wrap: anywhere;
+}
+.lifecycle-school-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.lifecycle-school-card { padding: 14px; border: 1px solid var(--border, #dfe5ef); border-radius: 12px; }
+.lifecycle-drafts,
+.student-lifecycle-history ul,
+.student-lifecycle-schools ul { display: grid; gap: 8px; padding-left: 20px; }
+.student-lifecycle-history li { display: grid; gap: 3px; }
+.lifecycle-record-context { margin: 8px 0; padding: 7px 9px; border-radius: 8px; background: #eef4ff; color: #294b91; font-size: .82rem; }
+.lifecycle-record-context--legacy { background: #fff6df; color: #76550c; }
+.student-lifecycle-type { display: block; margin-bottom: 4px; font-weight: 700; color: #315bef; }
+.student-transfer-record-list,
+.student-progression-record-list {
+  display: grid;
+  gap: 7px;
+  list-style: none;
+  margin: 4px 0 0;
+  min-width: 0;
+  padding: 0;
+}
+.student-transfer-record-list a,
+.student-progression-record-list a {
+  background: rgba(49, 91, 239, .045);
+  border: 1px solid rgba(49, 91, 239, .12);
+  border-radius: 9px;
+  color: inherit;
+  display: grid;
+  gap: 3px 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 8px 9px;
+  text-decoration: none;
+}
+.student-progression-record-list a {
+  background: rgba(53, 175, 203, .045);
+  border-color: rgba(53, 175, 203, .15);
+}
+.student-transfer-record-list a:hover,
+.student-progression-record-list a:hover,
+.student-transfer-record-list a:focus-visible,
+.student-progression-record-list a:focus-visible {
+  border-color: #315bef;
+  box-shadow: 0 0 0 2px rgba(49, 91, 239, .12);
+  outline: 0;
+}
+.student-transfer-record-list strong,
+.student-progression-record-list strong,
+.student-transfer-record-list span,
+.student-progression-record-list span,
+.student-transfer-record-list small,
+.student-progression-record-list small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.student-transfer-record-list span,
+.student-progression-record-list span { text-align: right; }
+.student-transfer-record-list small,
+.student-progression-record-list small {
+  color: var(--detail-premium-muted, #667085);
+  font-size: 11px;
+  grid-column: 1 / -1;
+  line-height: 1.45;
+}
+.lifecycle-module-business-control {
+  border-top: 1px solid var(--border, #dfe5ef);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+.lifecycle-module-business-control summary {
+  color: #315bef;
+  cursor: pointer;
+  font-weight: 750;
+}
+.lifecycle-module-business-control form {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  min-width: 0;
+}
+.lifecycle-module-business-control label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.lifecycle-module-business-control select,
+.lifecycle-module-business-control textarea,
+.lifecycle-module-business-control button {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
+}
+.lifecycle-module-business-control button { width: auto; }
+.lifecycle-module-business-control [hidden] { display: none !important; }
+.lifecycle-stage-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.lifecycle-stage-filters .active { background: #315bef; color: #fff; }
+.dashboard-lifecycle-active-cards {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 14px 0;
+}
+.dashboard-lifecycle-active-card {
+  align-items: center;
+  background: linear-gradient(135deg, rgba(49, 91, 239, .11), rgba(49, 91, 239, .03));
+  border: 1px solid rgba(49, 91, 239, .2);
+  border-radius: 12px;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  gap: 2px 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 12px 14px;
+  text-align: left;
+}
+.dashboard-lifecycle-active-card--progression {
+  background: linear-gradient(135deg, rgba(53, 175, 203, .12), rgba(53, 175, 203, .03));
+  border-color: rgba(53, 175, 203, .22);
+}
+.dashboard-lifecycle-active-card strong {
+  font-size: 1.55rem;
+  grid-row: 1 / span 2;
+  grid-column: 2;
+}
+.dashboard-lifecycle-active-card small {
+  color: var(--detail-premium-muted, #667085);
+  font-weight: 650;
+}
+.dashboard-lifecycle-active-card:hover,
+.dashboard-lifecycle-active-card:focus-visible,
+.dashboard-lifecycle-active-card.active {
+  border-color: #315bef;
+  box-shadow: 0 0 0 2px rgba(49, 91, 239, .12);
+  outline: 0;
+}
+[data-lifecycle-stage-distribution] [data-lifecycle-type][hidden] { display: none !important; }
+@media (max-width: 760px) {
+  .lifecycle-current-facts,
+  .lifecycle-case-summary-grid { grid-template-columns: minmax(0, 1fr); }
+  .lifecycle-profile-operations { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .lifecycle-case-summary .table-wrap { overflow-x: auto; }
+  .lifecycle-school-grid { grid-template-columns: 1fr; }
+  .lifecycle-stage-filters { width: 100%; margin-top: 10px; }
+  .student-transfer-record-list a,
+  .student-progression-record-list a { grid-template-columns: minmax(0, 1fr); }
+  .student-transfer-record-list span,
+  .student-progression-record-list span { text-align: left; }
+  .dashboard-lifecycle-active-cards { grid-template-columns: 1fr; }
+  .lifecycle-module-business-control button { width: 100%; }
+}

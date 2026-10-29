@@ -1,0 +1,12 @@
+{
+  "schema_version": "accurate-ground-truth-v1",
+  "sample_id": "synthetic-invalid-machine",
+  "is_ground_truth": true,
+  "machine_generated": true,
+  "media": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "duration_ms": 1000, "source_type": "synthetic_test_only", "rights_confirmed": true},
+  "coverage_tags": [],
+  "human_verified_transcript": "机器文本不能成为 Ground Truth",
+  "segments": [],
+  "ambiguous_regions": [],
+  "verification": {"status": "PENDING", "first_pass_completed": false, "second_pass_completed": false, "verified_at": "", "verification_method": "provider_output"}
+}

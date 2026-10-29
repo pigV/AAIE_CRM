@@ -1,0 +1,138 @@
+[data-student-detail-status-card] .student-detail-stage {
+  overflow-wrap: anywhere;
+}
+
+[data-student-detail-status-card] .student-detail-created-date {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+[data-student-detail-school-card] .student-detail-school-final {
+  display: inline-flex;
+  margin-top: 7px;
+  color: var(--success, #15805f);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+[data-student-detail-school-card] .student-detail-school-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+  min-width: 0;
+}
+
+[data-student-detail-school-card] .student-detail-school-list li {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+[data-student-detail-school-card] .student-detail-school-more,
+[data-student-detail-school-card] .student-detail-school-empty {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+[data-student-detail-followup-card] .student-detail-followup-preview p {
+  display: -webkit-box;
+  margin: 8px 0 6px;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.45;
+}
+
+[data-student-detail-followup-card] .student-detail-followup-preview time {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--surface, #fff);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+[data-student-detail-followup-card] .student-detail-followup-empty {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+[data-student-detail-school-card] .student-detail-card-link,
+[data-student-detail-followup-card] .student-detail-card-link {
+  display: inline-flex;
+  margin-top: 9px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+[data-student-detail-followup-card] .student-detail-quick-add {
+  margin-top: 8px;
+}
+
+[data-student-detail-followup-card] .student-detail-quick-add summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+[data-student-detail-followup-card] .student-detail-quick-add form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, .75fr);
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
+}
+
+[data-student-detail-followup-card] .student-detail-quick-add label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+[data-student-detail-followup-card] .student-detail-quick-add label:first-of-type {
+  grid-column: 1 / -1;
+}
+
+[data-student-detail-followup-card] .student-detail-quick-add textarea,
+[data-student-detail-followup-card] .student-detail-quick-add input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+[data-student-detail-followup-card] .student-detail-quick-add textarea {
+  min-height: 58px;
+  resize: vertical;
+}
+
+[data-student-detail-followup-card] .student-detail-quick-add button {
+  justify-self: start;
+}
+
+@media (max-width: 640px) {
+  [data-student-detail-followup-card] .student-detail-quick-add form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  [data-student-detail-followup-card] .student-detail-quick-add label:first-of-type {
+    grid-column: auto;
+  }
+}

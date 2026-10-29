@@ -1,0 +1,124 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pycache*/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS metadata
+.DS_Store
+._*
+**/._*
+
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+config/*.env
+!config/*.env.example
+**/._*
+config/field_encryption.key
+secure_assets/
+
+# SQLite databases and live data
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-shm
+*.db-wal
+database/*.db
+database/*.db-shm
+database/*.db-wal
+database/*.db.*
+database/*.db.*-shm
+database/*.db.*-wal
+database/backups/
+
+# Logs, pid files, and runtime locks
+logs/
+*.log
+*.pid
+*.lock
+*.jsonl
+
+# Generated/runtime folders
+backups/
+cache/
+tmp/
+reports/
+system_restore_points/
+import_reports/
+redbook_scripts/
+contract_preview/
+upload_staging/
+school_library_files/
+
+# Local tool/browser caches
+.codex_pycache/
+.codex_tools/
+.fontconfig-cache/
+.selenium-cache/
+.selenium-home/
+vendor/
+.superpowers/
+
+# Git worktrees must never be tracked inside this repo.
+.worktrees/
+worktrees/
+
+# Task-local evidence and migration rehearsal copies (never commit).
+SAFEBOX/contract-template-editor-v1-20260818/
+SAFEBOX/contract-template-editor-025-security-hardening-post024-20260819/
+SAFEBOX/transfer-progression-real-e2e-20260820/
+SAFEBOX/transfer-progression-post026-final-integration-20260821/
+SAFEBOX/transfer-progression-027-final-authority-reconciliation-20260821/
+SAFEBOX/transfer-progression-027-f2-final-integration-20260821/
+SAFEBOX/lifecycle-multi-cycle-convergence-20260824/
+SAFEBOX/revenue-commission-v1-20260829/
+SAFEBOX/revenue-production-authority-integration-20260829/
+SAFEBOX/revenue-ui-ux-integration-20260829/
+SAFEBOX/revenue-ui-current-production-integration-20260830/
+SAFEBOX/revenue-operational-integration-20260830/
+
+# Large local source datasets and manual imports
+data/
+school_data_sources/
+
+# SAFEBOX 181 private accuracy corpus and generated benchmark outputs
+benchmark_data/accurate_transcript/media/
+benchmark_data/accurate_transcript/private_ground_truth/
+benchmark_data/accurate_transcript/runs/
+benchmark_data/accurate_transcript/review/
+benchmark_data/accurate_transcript/quick_review/
+
+# One-off local scratch files
+codex_write_test.txt
+manual_terminal_write_test.txt
+dsfasdf.docx
+CRM_Test_Student_003_Transcript.pdf
+adjustment.updated.docx
+adjustment.updated.txt
+
+# Local Staging authority, never a code release artifact
+STAGING_DATA/
+
+# Never publish local environments, business data, or internal audit exports.
+STAGING_DATA/
+SAFEBOX/
+PROJECT_CONTROL/
+exports/
+*.pem
+*.key
+*.p12
+*.pfx
+TEST_LOGIN.txt
+**/service.token
+**/credentials*.json
+**/client_secret*.json
+*.zip
+*.tar
+*.gz

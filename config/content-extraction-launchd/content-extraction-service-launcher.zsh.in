@@ -1,0 +1,78 @@
+#!/bin/zsh
+set -eu
+unsetopt BG_NICE
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+readonly VOLUME_ROOT="__VOLUME_ROOT__"
+readonly APP_DIR="__PRODUCTION_ROOT__"
+readonly -a EXPECTED_HEADS=(
+__EXPECTED_HEADS__
+)
+readonly PRODUCTION_PYTHON="$APP_DIR/cache/content_extractions/runtime/venv/bin/python"
+readonly SERVICE_SOURCE="$APP_DIR/content_extraction_service.py"
+readonly RUNTIME_MANIFEST="$APP_DIR/cache/content_extractions/runtime/production-runtime-manifest.json"
+readonly DATABASE_PATH="$APP_DIR/database/aaie_crm.db"
+readonly ENVIRONMENT_PATH="$APP_DIR/.env.production"
+readonly ENTRY_PATH="__SUPPORT_DIR__/content_extraction_launchd_entry.py"
+readonly LOG_DIR="__LOG_DIR__"
+readonly LAUNCHER_LOG="$LOG_DIR/launcher.log"
+
+/bin/mkdir -p "$LOG_DIR"
+
+log_line() {
+  /usr/bin/printf '%s | service=content_extraction | %s\n' \
+    "$(/bin/date '+%Y-%m-%dT%H:%M:%S%z')" "$1" >> "$LAUNCHER_LOG"
+}
+
+fail_transient() {
+  log_line "preflight_transient code=$1"
+  exit 75
+}
+
+fail_permanent() {
+  log_line "preflight_permanent code=$1 explicit_restart_required=true"
+  exit 0
+}
+
+log_line "preflight_started"
+[[ -d "$VOLUME_ROOT" ]] || fail_transient "volume_not_ready"
+volume_device=$(/usr/bin/stat -f '%d' "$VOLUME_ROOT" 2>> "$LAUNCHER_LOG") \
+  || fail_transient "volume_device_unreadable"
+parent_device=$(/usr/bin/stat -f '%d' "${VOLUME_ROOT:h}" 2>> "$LAUNCHER_LOG") \
+  || fail_transient "volume_parent_device_unreadable"
+[[ "$volume_device" != "$parent_device" ]] || fail_transient "volume_not_mounted"
+[[ -d "$APP_DIR" ]] || fail_transient "production_root_not_ready"
+[[ -x "$PRODUCTION_PYTHON" ]] || fail_permanent "production_python_unavailable"
+[[ -f "$SERVICE_SOURCE" && ! -L "$SERVICE_SOURCE" ]] || fail_permanent "service_entrypoint_invalid"
+[[ -f "$RUNTIME_MANIFEST" && ! -L "$RUNTIME_MANIFEST" ]] || fail_permanent "runtime_manifest_invalid"
+[[ -f "$DATABASE_PATH" && ! -L "$DATABASE_PATH" ]] || fail_permanent "database_path_invalid"
+[[ -r "$ENVIRONMENT_PATH" && ! -L "$ENVIRONMENT_PATH" ]] || fail_permanent "production_environment_invalid"
+[[ -f "$ENTRY_PATH" && ! -L "$ENTRY_PATH" ]] || fail_permanent "installed_entry_invalid"
+
+observed_head=$(/usr/bin/git -C "$APP_DIR" rev-parse HEAD 2>> "$LAUNCHER_LOG") \
+  || fail_permanent "git_head_unreadable"
+head_allowed=false
+for expected_head in "${EXPECTED_HEADS[@]}"; do
+  if [[ "$observed_head" == "$expected_head" ]]; then
+    head_allowed=true
+    break
+  fi
+done
+[[ "$head_allowed" == true ]] || fail_permanent "production_head_mismatch"
+/usr/bin/git -C "$APP_DIR" diff --quiet HEAD -- 2>> "$LAUNCHER_LOG" \
+  || fail_permanent "production_tracked_changes"
+/usr/bin/git -C "$APP_DIR" diff --cached --quiet 2>> "$LAUNCHER_LOG" \
+  || fail_permanent "production_index_changes"
+
+cd "$APP_DIR" || fail_transient "production_chdir_failed"
+
+unset PYTHONPATH PYTHONHOME VIRTUAL_ENV
+unset CODEX_CI CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_PERMISSION_PROFILE
+unset CODEX_SANDBOX_NETWORK_DISABLED CODEX_SESSION_ID CODEX_SHELL CODEX_THREAD_ID
+export PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE=1
+
+log_line "exec_approved head=$observed_head host=127.0.0.1 port=8792"
+exec "$PRODUCTION_PYTHON" "$ENTRY_PATH" --production-root "$APP_DIR"

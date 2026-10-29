@@ -1,0 +1,118 @@
+{
+  "fixture_version": 1,
+  "fixture_name": "funasr_whisper_accepted_real_smoke",
+  "source": "accepted_real_smoke_results",
+  "created_without_provider_execution": true,
+  "is_ground_truth": false,
+  "ground_truth": null,
+  "allowed_uses": [
+    "alignment",
+    "asr_fusion",
+    "conflict_detection",
+    "regression_tests"
+  ],
+  "prohibited_uses": [
+    "ground_truth",
+    "provider_accuracy_claim",
+    "new_smoke_run_evidence"
+  ],
+  "audio": {
+    "source_audio_id": "funasr-smoke.wav",
+    "audio_hash": "1ad67796b7e7a84d3c092bb5491ab67aa4428b28a9a65cce825c4e5ab3722dea",
+    "duration_ms": 27000,
+    "sample_rate_hz": 16000,
+    "channels": 1,
+    "pcm_format": "PCM16"
+  },
+  "providers": {
+    "funasr": {
+      "provider": "funasr",
+      "source": "real_smoke",
+      "acceptance_status": "accepted",
+      "source_record": "ASR Phase 1 accepted smoke report; the original provider response was not persisted as a runtime JSON file",
+      "model": "SenseVoiceSmall",
+      "model_version": "q8",
+      "engine_version": "runtime-llamacpp-v0.1.9+funasr-v1.4.1",
+      "model_hash": "4ae45c94422de949b387e2e0fb10d7e14e4c42c69db30c3444ecc7d4b844b7c5",
+      "audio_hash": "1ad67796b7e7a84d3c092bb5491ab67aa4428b28a9a65cce825c4e5ab3722dea",
+      "duration_ms": 27000,
+      "status": "completed",
+      "language": "zh",
+      "raw_transcript": "多孩子呢听不懂，作业写不出来。老师讲什么呢？也不是特别的明白。ESL课要是高二还没过的话呢，很多主课是根本选不了的。主课修不了，意味着学分拿不到，不是不能上大学，而是连高中可能都配不了业，然后是课程压力。加拿大呢是典型的前松后紧式的教务，欢乐的小学初中一过，高中立马来个下马威，开始拼选课，拼GPS。",
+      "segments": [],
+      "words": [],
+      "confidence": null,
+      "punctuation": "native",
+      "timestamp_granularity": "none",
+      "timestamp_quality": "none",
+      "timestamp_provenance": {
+        "source": "unavailable",
+        "native_boundaries_available": false,
+        "vad_segment_count_only": true,
+        "start_end_boundaries_available": false
+      },
+      "accepted_observations": [
+        "EAL was recognized as ESL",
+        "GPA was recognized as GPS",
+        "raw transcript contains 多孩子",
+        "raw transcript contains 配不了业",
+        "raw transcript contains 教务"
+      ]
+    },
+    "whispercpp": {
+      "provider": "whispercpp",
+      "source": "real_smoke",
+      "acceptance_status": "accepted",
+      "source_record": "cache/content_extractions/runtime/asr/whispercpp/state/whisper-728499a3eadc4c1b837245dd0dbc2e85.json",
+      "model": "medium",
+      "model_version": "q5_0",
+      "engine_version": "1.9.2",
+      "model_hash": "19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f",
+      "audio_hash": "1ad67796b7e7a84d3c092bb5491ab67aa4428b28a9a65cce825c4e5ab3722dea",
+      "duration_ms": 27000,
+      "status": "completed",
+      "language": "zh",
+      "raw_transcript": "很多孩子听不懂作业写不出来老师讲什么也不是特别的明白ESL课要是高二还没过的话很多主课是根本选不了的主课修不了意味着学分拿不到不是不能上大学而是连高中可能都可以养业然后是课程压力加拿大是典型的前松后紧式的教育欢乐的小学初中一过高中立马来个下马威开始拼选课 拼GPA",
+      "segments": [
+        {"start_ms": 0, "end_ms": 1120, "text": "很多孩子听不懂", "timestamp_quality": "native"},
+        {"start_ms": 1120, "end_ms": 2240, "text": "作业写不出来", "timestamp_quality": "native"},
+        {"start_ms": 2240, "end_ms": 4520, "text": "老师讲什么也不是特别的明白", "timestamp_quality": "native"},
+        {"start_ms": 4520, "end_ms": 7720, "text": "ESL课要是高二还没过的话", "timestamp_quality": "native"},
+        {"start_ms": 7720, "end_ms": 10040, "text": "很多主课是根本选不了的", "timestamp_quality": "native"},
+        {"start_ms": 10040, "end_ms": 11360, "text": "主课修不了", "timestamp_quality": "native"},
+        {"start_ms": 11360, "end_ms": 13160, "text": "意味着学分拿不到", "timestamp_quality": "native"},
+        {"start_ms": 13160, "end_ms": 14720, "text": "不是不能上大学", "timestamp_quality": "native"},
+        {"start_ms": 14720, "end_ms": 17280, "text": "而是连高中可能都可以养业", "timestamp_quality": "native"},
+        {"start_ms": 17280, "end_ms": 18560, "text": "然后是课程压力", "timestamp_quality": "native"},
+        {"start_ms": 18560, "end_ms": 22080, "text": "加拿大是典型的前松后紧式的教育", "timestamp_quality": "native"},
+        {"start_ms": 22080, "end_ms": 23680, "text": "欢乐的小学初中一过", "timestamp_quality": "native"},
+        {"start_ms": 23680, "end_ms": 25280, "text": "高中立马来个下马威", "timestamp_quality": "native"},
+        {"start_ms": 25280, "end_ms": 27280, "text": "开始拼选课 拼GPA", "timestamp_quality": "native"}
+      ],
+      "confidence": null,
+      "punctuation": "absent",
+      "timestamp_granularity": "segment",
+      "timestamp_quality": "native",
+      "timestamp_provenance": {
+        "source": "whispercpp",
+        "native_segment_boundaries_available": true,
+        "raw_last_end_ms": 27280,
+        "audio_duration_ms": 27000,
+        "duration_clamp_not_applied_to_fixture": true,
+        "token_timestamps_retained_in_raw_source_only": true,
+        "token_timestamps_are_semantic_word_authority": false
+      },
+      "accepted_observations": [
+        "EAL was recognized as ESL",
+        "GPA was recognized as GPA",
+        "raw transcript contains 可以养业",
+        "raw transcript contains 教育"
+      ]
+    }
+  },
+  "reference_policy": {
+    "provider_outputs_are_immutable": true,
+    "expected_or_reference_data_must_be_separate": true,
+    "fusion_output_must_not_be_written_back_into_provider_results": true
+  }
+}

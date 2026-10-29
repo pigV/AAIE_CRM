@@ -1,0 +1,262 @@
+.ui-premium-v2 #dashboard-business-trend-chart {
+  box-sizing: border-box;
+  margin: 16px 0;
+  padding: 15px 18px 16px;
+  border: 1px solid rgba(88, 111, 149, .16);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, .95);
+  box-shadow: 0 8px 20px rgba(35, 56, 92, .07);
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 48px;
+  margin: 0 0 10px;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__header h2 {
+  margin: 0;
+  color: #17233a;
+  font-size: 18px;
+  line-height: 1.18;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__header p {
+  margin: 4px 0 0;
+  color: #66758d;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__period-tabs {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid rgba(88, 111, 149, .14);
+  border-radius: 999px;
+  background: #f3f6fb;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__period-tabs a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  color: #52627a;
+  font-size: 12px;
+  font-weight: 760;
+  text-decoration: none;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__period-tabs a:hover,
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__period-tabs a:focus-visible {
+  color: #315bef;
+  background: rgba(49, 91, 239, .08);
+  outline: none;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__period-tabs a.is-active {
+  color: #fff;
+  background: #315bef;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metrics {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-height: 104px;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric {
+  min-width: 0;
+  padding: 0 18px;
+  border-left: 1px solid rgba(88, 111, 149, .12);
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric:last-child {
+  padding-right: 0;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 6px;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric-head span {
+  color: #5f6f87;
+  font-size: 12.5px;
+  font-weight: 780;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric-head strong {
+  color: #17233a;
+  font-size: 27px;
+  line-height: .95;
+  font-weight: 820;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline {
+  display: block;
+  width: 100%;
+  height: 58px;
+  overflow: visible;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline-line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.25;
+  vector-effect: non-scaling-stroke;
+  transition: stroke 160ms ease;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline-point {
+  stroke: #fff;
+  stroke-width: 1.6;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: fill 160ms ease, stroke 160ms ease, transform 160ms ease;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline-point:hover,
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline-point:focus-visible {
+  outline: none;
+  transform: scale(1.18);
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__series--signed {
+  stroke: #315bef;
+  fill: #315bef;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__series--offer {
+  stroke: #6f86d8;
+  fill: #6f86d8;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__series--visa {
+  stroke: #6aa887;
+  fill: #6aa887;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline-point.dashboard-business-trend-chart__series--signed:hover,
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline-point.dashboard-business-trend-chart__series--signed:focus-visible {
+  stroke: #dfe7ff;
+  fill: #244bd6;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline-point.dashboard-business-trend-chart__series--offer:hover,
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline-point.dashboard-business-trend-chart__series--offer:focus-visible {
+  stroke: #e5e9fb;
+  fill: #5f78d3;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline-point.dashboard-business-trend-chart__series--visa:hover,
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline-point.dashboard-business-trend-chart__series--visa:focus-visible {
+  stroke: #e0f0e8;
+  fill: #569677;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__range-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 2px;
+  color: #8896ab;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__empty {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: min(460px, calc(100% - 44px));
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px dashed rgba(88, 111, 149, .22);
+  border-radius: 12px;
+  color: #66758d;
+  background: rgba(255, 255, 255, .88);
+  font-size: 12.5px;
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+[data-theme="dark"] .ui-premium-v2 #dashboard-business-trend-chart {
+  border-color: rgba(180, 194, 220, .14);
+  background: rgba(17, 24, 39, .94);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, .24);
+}
+
+[data-theme="dark"] .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__header h2,
+[data-theme="dark"] .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric-head strong {
+  color: #eef4ff;
+}
+
+[data-theme="dark"] .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__header p,
+[data-theme="dark"] .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric-head span,
+[data-theme="dark"] .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__range-labels {
+  color: #a8b5ca;
+}
+
+[data-theme="dark"] .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__period-tabs {
+  border-color: rgba(180, 194, 220, .12);
+  background: rgba(28, 38, 56, .82);
+}
+
+[data-theme="dark"] .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric {
+  border-left-color: rgba(180, 194, 220, .12);
+}
+
+@media (max-width: 860px) {
+  .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric {
+    padding: 0 12px;
+  }
+}
+
+@media (max-width: 680px) {
+  .ui-premium-v2 #dashboard-business-trend-chart {
+    padding: 16px;
+  }
+
+  .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__header {
+    display: grid;
+  }
+
+  .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__period-tabs {
+    justify-self: start;
+  }
+
+  .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metrics {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric,
+  .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric:first-child,
+  .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__metric:last-child {
+    padding: 0;
+    border-left: 0;
+  }
+
+  .ui-premium-v2 #dashboard-business-trend-chart .dashboard-business-trend-chart__sparkline {
+    height: 54px;
+  }
+}

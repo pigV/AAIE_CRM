@@ -1,0 +1,358 @@
+{
+  "version": "v1",
+  "generated_at": "2026-07-18T08:23:20",
+  "scope": "Phase 11B-2B SignedOffer Institution Mapping Baseline",
+  "read_only_notice": "This file contains reviewed mapping baselines only. It does not modify offers, schools, database schema, or business data.",
+  "statistical_unit": "有效 SignedOffer 业务事件",
+  "match_method": "reviewed_manual_mapping",
+  "institution_mappings": [
+    {
+      "source_name": "Toorak college",
+      "institution_type": "k12_private",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to Toorak College in Phase 11B-2A/2B audit; keep original Offer source name for exact lookup."
+    },
+    {
+      "source_name": "Norwood International High School",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Adelaide",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school in Adelaide."
+    },
+    {
+      "source_name": "NSW Public School",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Sydney",
+      "reviewed": true,
+      "match_method": "reviewed_system_level_mapping",
+      "notes": "Business confirmed this is the NSW public school system/general K-12 public-school category in Sydney, not a specific school."
+    },
+    {
+      "source_name": "Melbourne Girls College",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school; Richmond VIC reviewed as Melbourne metropolitan area."
+    },
+    {
+      "source_name": "Brentwood Secondary College",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school; Glen Waverley VIC reviewed as Melbourne metropolitan area."
+    },
+    {
+      "source_name": "Langports English Language College",
+      "institution_type": "private_language_school",
+      "metropolitan_area": "Brisbane",
+      "reviewed": true,
+      "match_method": "reviewed_manual_mapping",
+      "notes": "Business reviewed private language school mapping."
+    },
+    {
+      "source_name": "CLAYFIELD COLLEGE",
+      "institution_type": "k12_private",
+      "metropolitan_area": "Brisbane",
+      "reviewed": true,
+      "match_method": "reviewed_manual_mapping",
+      "notes": "Business confirmed Clayfield College is a Brisbane K-12 private school."
+    },
+    {
+      "source_name": "Yarra Valley Grammar",
+      "institution_type": "k12_private",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to private K-12 school in Melbourne."
+    },
+    {
+      "source_name": "Mosman High School",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Sydney",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school in Sydney."
+    },
+    {
+      "source_name": "Avalon College",
+      "institution_type": "private_language_school",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_manual_mapping",
+      "notes": "Independent valid language-school SignedOffer event; do not merge with Melbourne Girls Grammar progression."
+    },
+    {
+      "source_name": "Melbourne Girls Grammar",
+      "institution_type": "k12_private",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to private K-12 school in Melbourne; separate progression event from Avalon College."
+    },
+    {
+      "source_name": "Brighton Secondary College",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school; Brighton East VIC reviewed as Melbourne metropolitan area."
+    },
+    {
+      "source_name": "Doncaster Secondary College",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school; Doncaster VIC reviewed as Melbourne metropolitan area."
+    },
+    {
+      "source_name": "Melbourne Language Centre",
+      "institution_type": "private_language_school",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_manual_mapping",
+      "notes": "Business reviewed private language school mapping."
+    },
+    {
+      "source_name": "The Knox School",
+      "institution_type": "k12_private",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to private K-12 school in Melbourne."
+    },
+    {
+      "source_name": "UIL",
+      "institution_type": "private_language_school",
+      "metropolitan_area": "Brisbane",
+      "reviewed": true,
+      "match_method": "reviewed_manual_mapping",
+      "notes": "Business reviewed private language school mapping."
+    },
+    {
+      "source_name": "Indooroopilly State High School",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Brisbane",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school in Brisbane."
+    },
+    {
+      "source_name": "Victorian College",
+      "institution_type": "other_education",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_manual_mapping",
+      "notes": "Business confirmed Melbourne; provider type retained as other_education from the reviewed audit baseline."
+    },
+    {
+      "source_name": "Marryatville High School",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Adelaide",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school in Adelaide."
+    },
+    {
+      "source_name": "Presbyterian Ladies’ College",
+      "institution_type": "k12_private",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_offer_address_mapping",
+      "notes": "Business confirmed the Offer address is in Melbourne; resolves same-name PLC ambiguity to the VIC/Melbourne private-school candidate."
+    },
+    {
+      "source_name": "Pennant Hills High School",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Sydney",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school in Sydney."
+    },
+    {
+      "source_name": "Serpell Primary School",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school; Templestowe VIC reviewed as Melbourne metropolitan area."
+    },
+    {
+      "source_name": "Newtown Primary School",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school in Melbourne."
+    },
+    {
+      "source_name": "La Trobe University",
+      "institution_type": "university",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Reviewed university SignedOffer event in Melbourne."
+    },
+    {
+      "source_name": "Acknowledge Education Pty Ltd",
+      "institution_type": "private_language_school",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_manual_mapping",
+      "notes": "Independent valid language-school SignedOffer event; do not merge with Koonung Secondary College progression."
+    },
+    {
+      "source_name": "Koonung Secondary College",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Matched to public K-12 school; Mont Albert North VIC reviewed as Melbourne metropolitan area."
+    },
+    {
+      "source_name": "The University of Melbourne",
+      "institution_type": "university",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_audit_baseline_mapping",
+      "notes": "Reviewed university SignedOffer event in Melbourne."
+    },
+    {
+      "source_name": "Laburnum Primary School",
+      "institution_type": "k12_public",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_manual_mapping",
+      "notes": ""
+    },
+    {
+      "source_name": "St Paul's International College",
+      "institution_type": "k12_private",
+      "metropolitan_area": "Sydney",
+      "reviewed": true,
+      "match_method": "reviewed_manual_mapping",
+      "notes": ""
+    }
+  ],
+  "city_only_reviewed_mappings": [
+    {
+      "source_name": "Victorian College",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_manual_city_mapping",
+      "notes": "Business confirmed Melbourne; operational institution mapping keeps type as other_education from reviewed audit baseline."
+    }
+  ],
+  "suburb_to_metropolitan_area_mappings": [
+    {
+      "suburb": "Richmond",
+      "state": "VIC",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_suburb_to_metro_mapping"
+    },
+    {
+      "suburb": "Glen Waverley",
+      "state": "VIC",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_suburb_to_metro_mapping"
+    },
+    {
+      "suburb": "Brighton East",
+      "state": "VIC",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_suburb_to_metro_mapping"
+    },
+    {
+      "suburb": "Doncaster",
+      "state": "VIC",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_suburb_to_metro_mapping"
+    },
+    {
+      "suburb": "Templestowe",
+      "state": "VIC",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_suburb_to_metro_mapping"
+    },
+    {
+      "suburb": "Mont Albert North",
+      "state": "VIC",
+      "metropolitan_area": "Melbourne",
+      "reviewed": true,
+      "match_method": "reviewed_suburb_to_metro_mapping"
+    }
+  ],
+  "ambiguous_institution_rules": [
+    {
+      "source_name": "Presbyterian Ladies’ College",
+      "reason": "same_name_multiple_states_need_offer_city",
+      "candidates": [
+        {
+          "formal_name": "Presbyterian Ladies' College",
+          "suburb": "Burwood",
+          "state": "VIC",
+          "metropolitan_area": "Melbourne"
+        },
+        {
+          "formal_name": "Presbyterian Ladies' College Sydney",
+          "suburb": "Croydon",
+          "state": "NSW",
+          "metropolitan_area": "Sydney"
+        },
+        {
+          "formal_name": "Presbyterian Ladies' College",
+          "suburb": "Peppermint Grove",
+          "state": "WA",
+          "metropolitan_area": "Perth"
+        }
+      ],
+      "required_evidence": [
+        "address",
+        "suburb",
+        "city",
+        "state",
+        "campus"
+      ],
+      "resolved_by": "reviewed_offer_address_mapping",
+      "resolved_to": {
+        "institution_type": "k12_private",
+        "metropolitan_area": "Melbourne"
+      },
+      "reviewed": true
+    }
+  ],
+  "system_level_mapping_rules": [
+    {
+      "source_name": "NSW Public School",
+      "meaning": "NSW public-school system/general category, not a concrete school campus.",
+      "allowed_for_chart": true,
+      "do_not_match_to_school_master": true,
+      "institution_type": "k12_public",
+      "metropolitan_area": "Sydney",
+      "reviewed": true
+    }
+  ],
+  "event_counting_rules": {
+    "unit": "有效 SignedOffer 业务事件",
+    "do_not_merge": [
+      "different institution",
+      "transfer",
+      "progression",
+      "different course/study stage",
+      "pathway",
+      "different intake",
+      "different campus"
+    ],
+    "merge_only": "Only merge files proven to represent the same business event. Current offers table has no source/related/course/campus/intake fields, so duplicate merging remains conservative."
+  }
+}

@@ -1,0 +1,117 @@
+.google-drive-update-page .drive-status-row,
+.google-drive-update-page .drive-control-actions,
+.google-drive-update-page .drive-item-select {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.google-drive-update-page .drive-service-grid,
+.google-drive-update-page .drive-summary-grid,
+.google-drive-update-page .drive-item-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.google-drive-update-page .drive-service-grid > div,
+.google-drive-update-page .drive-summary-grid > div,
+.google-drive-update-page .drive-item-grid > div,
+.google-drive-update-page .drive-item-card,
+.google-drive-update-page .drive-log-card {
+  border: 1px solid var(--border, #d9e1e8);
+  border-radius: 12px;
+  padding: 14px;
+  background: var(--surface, #fff);
+}
+
+.google-drive-update-page dt,
+.google-drive-update-page .drive-summary-grid span {
+  color: var(--muted, #667085);
+  font-size: 12px;
+}
+
+.google-drive-update-page dd { margin: 5px 0 0; }
+.google-drive-update-page .drive-item-list { display: grid; gap: 14px; margin: 16px 0; }
+.google-drive-update-page .drive-item-wide { grid-column: 1 / -1; }
+.google-drive-update-page .drive-status { font-weight: 700; }
+.google-drive-update-page .drive-status.is-ok { color: #18794e; }
+.google-drive-update-page .drive-status.is-paused,
+.google-drive-update-page .drive-status.is-warning { color: #9a6700; }
+.google-drive-update-page .drive-status.is-error { color: #b42318; }
+.google-drive-update-page .drive-empty { color: var(--muted, #667085); }
+.google-drive-update-page .drive-preview-form > .drive-action { margin-top: 14px; }
+.google-drive-update-page .drive-carrier-note,
+.google-drive-update-page .drive-scan-message {
+  margin: 12px 0 0;
+  color: var(--muted, #667085);
+}
+.google-drive-update-page .drive-scan-progress { min-width: 0; }
+.google-drive-update-page .drive-scan-progress-head,
+.google-drive-update-page .drive-scan-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.google-drive-update-page .drive-scan-progress-head h3 { margin: 0; }
+.google-drive-update-page .drive-scan-progress-head p { margin: 4px 0 0; }
+.google-drive-update-page .drive-scan-percent {
+  flex: 0 0 auto;
+  font-size: 24px;
+  color: var(--primary, #174ea6);
+}
+.google-drive-update-page .drive-scan-track {
+  width: 100%;
+  height: 12px;
+  margin: 14px 0 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e9eef5;
+}
+.google-drive-update-page .drive-scan-track > span {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: var(--primary, #174ea6);
+  transition: width 180ms ease;
+}
+.google-drive-update-page .drive-scan-progress-meta {
+  flex-wrap: wrap;
+  color: var(--muted, #667085);
+  font-size: 13px;
+}
+.google-drive-update-page button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+@media (max-width: 720px) {
+  .google-drive-update-page .drive-service-grid,
+  .google-drive-update-page .drive-summary-grid,
+  .google-drive-update-page .drive-item-grid {
+    grid-template-columns: 1fr;
+  }
+  .google-drive-update-page .drive-action {
+    width: 100%;
+  }
+  .google-drive-update-page .drive-file-id {
+    overflow-wrap: anywhere;
+  }
+  .google-drive-update-page .drive-control-actions,
+  .google-drive-update-page .drive-control-actions form {
+    width: 100%;
+  }
+  .google-drive-update-page .drive-item-wide { grid-column: auto; }
+  .google-drive-update-page .drive-scan-progress-head {
+    align-items: flex-start;
+  }
+  .google-drive-update-page .drive-scan-progress-meta {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

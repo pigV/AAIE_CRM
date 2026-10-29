@@ -1,0 +1,128 @@
+#!/bin/zsh
+set -eu
+unsetopt BG_NICE
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+readonly APP_DIR="__PRODUCTION_ROOT__"
+readonly -a EXPECTED_HEADS=(
+__EXPECTED_HEADS__
+)
+readonly SERVICE_PYTHON="__SERVICE_PYTHON__"
+readonly LOG_DIR="__LOG_DIR__"
+
+service="${1:-}"
+case "$service" in
+  admin)
+    readonly host="0.0.0.0"
+    readonly port="8780"
+    ;;
+  parent)
+    readonly host="127.0.0.1"
+    readonly port="8781"
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+
+# CRM_ACTIVATION_ACK_V1
+# Controlled activation only. No external command may precede this gate.
+readonly activation_dir="${0:A:h}/activation-control"
+readonly activation_request="$activation_dir/$service.request"
+if [[ -e "$activation_request" || -L "$activation_request" ]]; then
+  [[ ! -L "$activation_dir" && -d "$activation_dir" && -f "$activation_request" && ! -L "$activation_request" ]] || exit 78
+  zmodload zsh/zselect || exit 78
+  activation_token=""; activation_sha=""; activation_role=""
+  activation_request_complete=false
+  for (( activation_read_wait=0; activation_read_wait<100; activation_read_wait++ )); do
+    if { IFS= read -r activation_token; IFS= read -r activation_sha; IFS= read -r activation_role; } < "$activation_request"; then
+      activation_request_complete=true
+      break
+    fi
+    [[ -f "$activation_request" && ! -L "$activation_request" ]] || exit 78
+    zselect -t 1 || true
+  done
+  [[ "$activation_request_complete" == true ]] || exit 75
+  [[ ${#activation_token} == 64 && "$activation_token" != *[^0-9a-f]* && ${#activation_sha} == 40 && "$activation_sha" != *[^0-9a-f]* && "$activation_role" == "$service" ]] || exit 78
+  [[ " ${EXPECTED_HEADS[*]} " == *" $activation_sha "* ]] || exit 78
+  readonly activation_challenge="${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
+  readonly activation_ready="$activation_request.ready.$$"
+  readonly activation_ack="$activation_request.ack.$$"
+  setopt NOCLOBBER
+  print -r -- "$activation_token $activation_challenge" > "$activation_ready" || exit 78
+  unsetopt NOCLOBBER
+  activation_approved=false
+  for (( activation_wait=0; activation_wait<3600; activation_wait++ )); do
+    if [[ -f "$activation_ack" && ! -L "$activation_ack" ]]; then
+      activation_answer=""
+      if ! IFS= read -r activation_answer < "$activation_ack"; then
+        zselect -t 1 || true
+        continue
+      fi
+      [[ "$activation_answer" == "$activation_token $activation_challenge" ]] || exit 78
+      activation_approved=true
+      break
+    fi
+    [[ -f "$activation_request" && ! -L "$activation_request" ]] || exit 78
+    zselect -t 10 || true
+  done
+  [[ "$activation_approved" == true ]] || exit 75
+fi
+
+/bin/mkdir -p "$LOG_DIR"
+readonly LAUNCHER_LOG="$LOG_DIR/${service}.launcher.log"
+
+log_line() {
+  /usr/bin/printf '%s | service=%s | %s\n' \
+    "$(/bin/date '+%Y-%m-%dT%H:%M:%S%z')" "$service" "$1" >> "$LAUNCHER_LOG"
+}
+
+fail_closed() {
+  log_line "preflight_failed code=$1"
+  exit "${2:-78}"
+}
+
+log_line "preflight_started"
+[[ -d "/Volumes/Zhang" ]] || fail_closed "volume_not_ready" 75
+[[ -d "$APP_DIR" ]] || fail_closed "production_root_not_ready" 75
+[[ -x "$SERVICE_PYTHON" ]] || fail_closed "production_python_unavailable"
+[[ -f "$APP_DIR/app.py" && ! -L "$APP_DIR/app.py" ]] || fail_closed "app_entrypoint_invalid"
+[[ -f "$APP_DIR/database/aaie_crm.db" && ! -L "$APP_DIR/database/aaie_crm.db" ]] || fail_closed "database_path_invalid"
+[[ -r "$APP_DIR/.env.production" && ! -L "$APP_DIR/.env.production" ]] || fail_closed "production_environment_invalid"
+
+observed_head=$(/usr/bin/git -C "$APP_DIR" rev-parse HEAD 2>> "$LAUNCHER_LOG") \
+  || fail_closed "git_head_unreadable"
+head_allowed=false
+for expected_head in "${EXPECTED_HEADS[@]}"; do
+  if [[ "$observed_head" == "$expected_head" ]]; then
+    head_allowed=true
+    break
+  fi
+done
+[[ "$head_allowed" == true ]] || fail_closed "production_head_mismatch"
+/usr/bin/git -C "$APP_DIR" diff --quiet HEAD -- 2>> "$LAUNCHER_LOG" \
+  || fail_closed "production_tracked_changes"
+/usr/bin/git -C "$APP_DIR" diff --cached --quiet 2>> "$LAUNCHER_LOG" \
+  || fail_closed "production_index_changes"
+
+cd "$APP_DIR" || fail_closed "production_chdir_failed" 75
+
+unset PYTHONPATH PYTHONHOME VIRTUAL_ENV
+unset AAIE_CRM_ENV AAIE_CRM_RUNTIME_ROOT AAIE_CRM_DB_PATH
+unset AAIE_CRM_ADMIN_PORT AAIE_CRM_PARENT_PORT
+unset AAIE_CRM_LOG_DIR AAIE_CRM_CACHE_DIR AAIE_CRM_REPORTS_DIR
+unset AAIE_CRM_UPLOAD_ROOT AAIE_CRM_UPLOAD_STAGING_DIR AAIE_CRM_PRODUCTION_ROOT
+unset AAIE_CRM_SECURE_ASSETS_DIR AAIE_CRM_PREVIEW_DIR
+unset AAIE_CRM_CONTRACT_SIGNING_DIR AAIE_CRM_BACKUP_DIR
+unset AAIE_CRM_SAFEBOX_DIR AAIE_CRM_SCHOOL_LIBRARY_DIR
+unset AAIE_CRM_WATCHDOG_STATE_DIR AAIE_CRM_SERVICE_LOG_DIR
+unset AAIE_CRM_DATA_AUTO_ENABLED AAIE_CRM_EMAIL_ENABLED
+unset AAIE_CRM_REMINDER_AUTO_ENABLED AAIE_CRM_SYNC_ENABLED
+unset AAIE_CRM_STARTUP_BACKUP_ENABLED AAIE_CRM_PERF_ENABLED AAIE_CRM_DB_PERF_LOG
+export PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE=1
+
+log_line "exec_approved head=$observed_head host=$host port=$port"
+exec "$SERVICE_PYTHON" "$APP_DIR/app.py" --host "$host" --port "$port" --service "$service"

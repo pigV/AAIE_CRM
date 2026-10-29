@@ -1,0 +1,245 @@
+[data-student-management-application-summary] .student-management-table-wrap {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto !important;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+}
+
+[data-student-management-application-summary] .student-management-table {
+  width: 100%;
+  min-width: 1260px !important;
+  table-layout: auto !important;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+[data-student-management-application-summary] .student-management-table th,
+[data-student-management-application-summary] .student-management-table td {
+  vertical-align: middle;
+  padding: 8px 10px;
+}
+
+[data-student-management-application-summary] .student-management-table th {
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 12px !important;
+  font-weight: 700;
+  letter-spacing: 0 !important;
+  text-transform: none;
+}
+
+[data-student-management-application-summary] .student-management-table td {
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 450;
+}
+
+[data-student-management-application-summary] .student-management-row td {
+  height: 68px !important;
+}
+
+[data-student-management-application-summary] .student-management-table td code {
+  font-family: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+[data-student-management-application-summary] .student-name-link {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(1),
+[data-student-management-application-summary] .student-management-table td:nth-child(1) {
+  width: 44px !important;
+  min-width: 44px !important;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(2),
+[data-student-management-application-summary] .student-management-table td:nth-child(2) {
+  width: 108px !important;
+  min-width: 108px !important;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(3),
+[data-student-management-application-summary] .student-management-table td:nth-child(3) {
+  width: 132px !important;
+  min-width: 132px !important;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(4),
+[data-student-management-application-summary] .student-management-table td:nth-child(4) {
+  width: 132px !important;
+  min-width: 132px !important;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(5),
+[data-student-management-application-summary] .student-management-table td:nth-child(5) {
+  width: 220px !important;
+  min-width: 220px !important;
+  max-width: none;
+  white-space: normal !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+  hyphens: manual;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(6),
+[data-student-management-application-summary] .student-management-table td:nth-child(6) {
+  width: 104px !important;
+  min-width: 104px !important;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(7),
+[data-student-management-application-summary] .student-management-table td:nth-child(7) {
+  width: 138px !important;
+  min-width: 138px !important;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(8),
+[data-student-management-application-summary] .student-management-table td:nth-child(8) {
+  width: 138px !important;
+  min-width: 138px !important;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(9),
+[data-student-management-application-summary] .student-management-table td:nth-child(9) {
+  width: 120px !important;
+  min-width: 120px !important;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(10),
+[data-student-management-application-summary] .student-management-table td:nth-child(10) {
+  width: 112px !important;
+  min-width: 112px !important;
+}
+
+[data-student-management-application-summary] .student-management-table th:nth-child(2),
+[data-student-management-application-summary] .student-management-table td:nth-child(2),
+[data-student-management-application-summary] .student-management-table th:nth-child(4),
+[data-student-management-application-summary] .student-management-table td:nth-child(4),
+[data-student-management-application-summary] .student-management-table th:nth-child(6),
+[data-student-management-application-summary] .student-management-table td:nth-child(6),
+[data-student-management-application-summary] .student-management-table th:nth-child(7),
+[data-student-management-application-summary] .student-management-table td:nth-child(7),
+[data-student-management-application-summary] .student-management-table th:nth-child(8),
+[data-student-management-application-summary] .student-management-table td:nth-child(8),
+[data-student-management-application-summary] .student-management-table th:nth-child(9),
+[data-student-management-application-summary] .student-management-table td:nth-child(9) {
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  overflow-wrap: normal !important;
+}
+
+[data-student-management-application-summary] .student-management-table .status {
+  max-width: 100%;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+[data-student-management-application-summary] .student-actions-cell {
+  white-space: nowrap;
+}
+
+[data-student-management-application-summary] .student-actions-cell .inline-form {
+  display: inline-flex;
+  margin: 0 0 0 5px;
+  vertical-align: middle;
+}
+
+[data-student-management-application-summary] .student-actions-cell .button-link,
+[data-student-management-application-summary] .student-actions-cell button {
+  min-height: 30px !important;
+  font-family: inherit;
+  font-size: 12px !important;
+}
+
+@media (max-width: 760px) {
+  [data-student-management-application-summary] .student-management-table-wrap {
+    overflow: visible !important;
+  }
+
+  [data-student-management-application-summary] .student-management-table,
+  [data-student-management-application-summary] .student-management-table tbody,
+  [data-student-management-application-summary] .student-management-table tr,
+  [data-student-management-application-summary] .student-management-table td {
+    display: block;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none;
+  }
+
+  [data-student-management-application-summary] .student-management-table thead {
+    display: none;
+  }
+
+  [data-student-management-application-summary] .student-management-table tr {
+    margin-bottom: 14px;
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--panel);
+  }
+
+  [data-student-management-application-summary] .student-management-table td {
+    display: grid;
+    grid-template-columns: minmax(92px, 0.38fr) minmax(0, 1fr);
+    gap: 10px;
+    height: auto !important;
+    padding: 7px 0;
+    border: 0;
+  }
+
+  [data-student-management-application-summary] .student-management-table :is(th, td):nth-child(1),
+  [data-student-management-application-summary] .student-management-table :is(th, td):nth-child(2),
+  [data-student-management-application-summary] .student-management-table :is(th, td):nth-child(3),
+  [data-student-management-application-summary] .student-management-table :is(th, td):nth-child(4),
+  [data-student-management-application-summary] .student-management-table :is(th, td):nth-child(5),
+  [data-student-management-application-summary] .student-management-table :is(th, td):nth-child(6),
+  [data-student-management-application-summary] .student-management-table :is(th, td):nth-child(7),
+  [data-student-management-application-summary] .student-management-table :is(th, td):nth-child(8),
+  [data-student-management-application-summary] .student-management-table :is(th, td):nth-child(9),
+  [data-student-management-application-summary] .student-management-table :is(th, td):nth-child(10) {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  [data-student-management-application-summary] .student-management-table th:nth-child(2),
+  [data-student-management-application-summary] .student-management-table td:nth-child(2),
+  [data-student-management-application-summary] .student-management-table th:nth-child(4),
+  [data-student-management-application-summary] .student-management-table td:nth-child(4),
+  [data-student-management-application-summary] .student-management-table th:nth-child(6),
+  [data-student-management-application-summary] .student-management-table td:nth-child(6),
+  [data-student-management-application-summary] .student-management-table th:nth-child(7),
+  [data-student-management-application-summary] .student-management-table td:nth-child(7),
+  [data-student-management-application-summary] .student-management-table th:nth-child(8),
+  [data-student-management-application-summary] .student-management-table td:nth-child(8),
+  [data-student-management-application-summary] .student-management-table th:nth-child(9),
+  [data-student-management-application-summary] .student-management-table td:nth-child(9) {
+    white-space: normal !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+  }
+
+  [data-student-management-application-summary] .student-management-table .status,
+  [data-student-management-application-summary] .student-actions-cell {
+    white-space: normal;
+  }
+
+  [data-student-management-application-summary] .student-actions-cell .inline-form {
+    margin-left: 0;
+  }
+
+  [data-student-management-application-summary] .student-management-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-weight: 750;
+  }
+}

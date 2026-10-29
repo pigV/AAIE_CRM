@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="review-token" content="__REVIEW_TOKEN__">
+  <title>精准文案快速核对</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <p class="eyebrow">SAFEBOX 181 · 本地核对</p>
+      <h1>只核对有疑问的几个字</h1>
+      <p id="progress" class="muted">正在载入…</p>
+    </header>
+    <section class="card">
+      <div class="meta"><span id="risk" class="badge"></span><span id="time"></span></div>
+      <video id="clip" controls playsinline preload="metadata"></video>
+      <div class="context"><p id="before"></p><p id="carrier"></p><p id="after"></p></div>
+      <h2>视频里实际说的是哪一个？</h2>
+      <div id="candidates" class="candidate-grid"></div>
+      <button id="custom-toggle" class="secondary wide">都不对，自己输入</button>
+      <div id="custom-panel" hidden>
+        <label for="custom-text">只填写高亮位置的正确文字</label>
+        <input id="custom-text" autocomplete="off" maxlength="40">
+        <button id="custom-save" class="primary wide">保存这处修改</button>
+      </div>
+      <button id="ambiguous" class="ghost wide">听不清</button>
+      <details id="evidence-panel">
+        <summary>查看依据</summary>
+        <pre id="evidence"></pre>
+      </details>
+      <p id="message" role="status"></p>
+      <nav><button id="previous">上一条</button><button id="next">下一条</button></nav>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

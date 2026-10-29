@@ -1,0 +1,465 @@
+.ui-premium-v2 #dashboard-signed-institution-structure-chart {
+  --aaie-chart-primary: #315bef;
+  --aaie-chart-purple: #7557e8;
+  --aaie-chart-cyan: #35afcb;
+  --aaie-chart-green: #20a66a;
+  --aaie-chart-amber: #e7a52b;
+  --aaie-chart-rose: #d66ba0;
+  --aaie-chart-muted-red: #cf6f79;
+  --aaie-chart-text: #202a3c;
+  --aaie-chart-subtle: #465268;
+  --aaie-chart-muted: #7c879b;
+  box-sizing: border-box;
+  margin: 16px 0;
+  padding: 18px;
+  overflow: visible;
+  border: 0;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(201, 211, 230, .28);
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 12px;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__header h2 {
+  margin: 0;
+  color: var(--aaie-chart-text);
+  font-size: 16px;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__header p {
+  margin: 4px 0 0;
+  color: var(--aaie-chart-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__content {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__summary-strip span {
+  display: grid;
+  gap: 2px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border-radius: 14px;
+  color: var(--aaie-chart-muted);
+  background: #f7f9fd;
+  font-size: 11px;
+  font-weight: 560;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__summary-strip strong {
+  color: var(--aaie-chart-text);
+  font-size: 18px;
+  font-weight: 780;
+  line-height: 1;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  min-width: 0;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card {
+  min-width: 0;
+  padding: 14px;
+  border-radius: 16px;
+  background: #f7f9fd;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card header {
+  margin: 0 0 10px;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card h3,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__unmapped h3 {
+  margin: 0;
+  color: var(--aaie-chart-text);
+  font-size: 14px;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card p,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__unmapped p {
+  margin: 4px 0 0;
+  color: var(--aaie-chart-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-layout {
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__chart-shell,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-shell {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: clamp(200px, 18vw, 260px);
+  max-width: 260px;
+  min-width: 0;
+  margin: 0 auto;
+  aspect-ratio: 1 / 1;
+  flex: 0 0 auto;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-svg {
+  display: block;
+  width: 100%;
+  max-width: 260px;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  overflow: visible;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-ring {
+  fill: none;
+  stroke: #eaf0ff;
+  stroke-width: 20;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__sector {
+  cursor: pointer;
+  filter: drop-shadow(0 3px 7px rgba(32, 42, 60, .08));
+  opacity: .9;
+  outline: none;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: opacity 150ms ease, transform 150ms ease, filter 150ms ease;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-hole {
+  fill: #fff;
+  filter: drop-shadow(0 1px 5px rgba(32, 42, 60, .08));
+  pointer-events: none;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__center {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 86px;
+  min-height: 56px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__center-default,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__center-detail {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 2px;
+  text-align: center;
+  transition: opacity 120ms ease;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__center-detail {
+  opacity: 0;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__center strong,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__center-detail strong {
+  color: var(--aaie-chart-text);
+  font-size: 20px;
+  font-weight: 780;
+  line-height: 1;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__center span {
+  max-width: 82px;
+  color: var(--aaie-chart-subtle);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.12;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__center small {
+  color: var(--aaie-chart-muted);
+  font-size: 10px;
+  font-weight: 620;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__legend {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__legend-item {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto auto;
+  gap: 7px;
+  align-items: center;
+  min-height: 25px;
+  padding: 5px 7px;
+  border-radius: 10px;
+  color: var(--aaie-chart-subtle);
+  font-size: 11.5px;
+  font-weight: 620;
+  transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__legend-item--empty {
+  opacity: .48;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--segment-color);
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__legend-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__legend-item strong {
+  color: var(--aaie-chart-text);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__legend-item small {
+  min-width: 42px;
+  color: var(--aaie-chart-muted);
+  font-size: 10.5px;
+  text-align: right;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__sector:hover,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__sector:focus-visible,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item:hover) .dashboard-signed-institution-structure-chart__sector {
+  opacity: .42;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector:hover) .dashboard-signed-institution-structure-chart__sector {
+  opacity: .42;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__sector:hover,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__sector:focus-visible {
+  filter: drop-shadow(0 8px 14px rgba(32, 42, 60, .16));
+  opacity: 1;
+  transform: translate(var(--slice-pop-x, 0), var(--slice-pop-y, 0));
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector:hover) .dashboard-signed-institution-structure-chart__center-default,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector:focus-visible) .dashboard-signed-institution-structure-chart__center-default,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item:hover) .dashboard-signed-institution-structure-chart__center-default {
+  opacity: 0;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__unmapped {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #f7f9fd;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__unmapped ul {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__unmapped li {
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__unmapped li span {
+  display: block;
+  color: var(--aaie-chart-text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__unmapped li small,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__all-mapped,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__empty {
+  display: block;
+  margin-top: 3px;
+  color: var(--aaie-chart-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__all-mapped,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__empty {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #f7f9fd;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-k12-public:hover) .dashboard-signed-institution-structure-chart__legend-item--type-k12-public,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-k12-public:focus-visible) .dashboard-signed-institution-structure-chart__legend-item--type-k12-public,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-k12-public:hover) .dashboard-signed-institution-structure-chart__legend-item--type-k12-public,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-k12-private:hover) .dashboard-signed-institution-structure-chart__legend-item--type-k12-private,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-k12-private:hover) .dashboard-signed-institution-structure-chart__legend-item--type-k12-private,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-public-language-school:hover) .dashboard-signed-institution-structure-chart__legend-item--type-public-language-school,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-public-language-school:hover) .dashboard-signed-institution-structure-chart__legend-item--type-public-language-school,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-private-language-school:hover) .dashboard-signed-institution-structure-chart__legend-item--type-private-language-school,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-private-language-school:hover) .dashboard-signed-institution-structure-chart__legend-item--type-private-language-school,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-university:hover) .dashboard-signed-institution-structure-chart__legend-item--type-university,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-university:hover) .dashboard-signed-institution-structure-chart__legend-item--type-university,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-other-education:hover) .dashboard-signed-institution-structure-chart__legend-item--type-other-education,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-other-education:hover) .dashboard-signed-institution-structure-chart__legend-item--type-other-education,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-unmapped:hover) .dashboard-signed-institution-structure-chart__legend-item--type-unmapped,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-unmapped:hover) .dashboard-signed-institution-structure-chart__legend-item--type-unmapped,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-melbourne:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-melbourne,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-melbourne:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-melbourne,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-sydney:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-sydney,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-sydney:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-sydney,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-adelaide:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-adelaide,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-adelaide:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-adelaide,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-brisbane:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-brisbane,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-brisbane:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-brisbane,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-perth:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-perth,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-perth:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-perth,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-other:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-other,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-other:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-other,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-unmapped-city:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-unmapped-city,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-unmapped-city:hover) .dashboard-signed-institution-structure-chart__legend-item--metro-unmapped-city {
+  background: #fff;
+  color: var(--aaie-chart-text);
+  transform: translateX(2px);
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-k12-public:hover) .dashboard-signed-institution-structure-chart__sector--type-k12-public,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-k12-private:hover) .dashboard-signed-institution-structure-chart__sector--type-k12-private,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-public-language-school:hover) .dashboard-signed-institution-structure-chart__sector--type-public-language-school,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-private-language-school:hover) .dashboard-signed-institution-structure-chart__sector--type-private-language-school,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-university:hover) .dashboard-signed-institution-structure-chart__sector--type-university,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-other-education:hover) .dashboard-signed-institution-structure-chart__sector--type-other-education,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-unmapped:hover) .dashboard-signed-institution-structure-chart__sector--type-unmapped,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-melbourne:hover) .dashboard-signed-institution-structure-chart__sector--metro-melbourne,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-sydney:hover) .dashboard-signed-institution-structure-chart__sector--metro-sydney,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-adelaide:hover) .dashboard-signed-institution-structure-chart__sector--metro-adelaide,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-brisbane:hover) .dashboard-signed-institution-structure-chart__sector--metro-brisbane,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-perth:hover) .dashboard-signed-institution-structure-chart__sector--metro-perth,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-other:hover) .dashboard-signed-institution-structure-chart__sector--metro-other,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-unmapped-city:hover) .dashboard-signed-institution-structure-chart__sector--metro-unmapped-city {
+  filter: drop-shadow(0 8px 14px rgba(32, 42, 60, .16));
+  opacity: 1;
+  transform: translate(var(--slice-pop-x, 0), var(--slice-pop-y, 0));
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-k12-public:hover) .dashboard-signed-institution-structure-chart__center-detail--type-k12-public,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-k12-public:hover) .dashboard-signed-institution-structure-chart__center-detail--type-k12-public,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-k12-private:hover) .dashboard-signed-institution-structure-chart__center-detail--type-k12-private,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-k12-private:hover) .dashboard-signed-institution-structure-chart__center-detail--type-k12-private,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-public-language-school:hover) .dashboard-signed-institution-structure-chart__center-detail--type-public-language-school,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-public-language-school:hover) .dashboard-signed-institution-structure-chart__center-detail--type-public-language-school,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-private-language-school:hover) .dashboard-signed-institution-structure-chart__center-detail--type-private-language-school,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-private-language-school:hover) .dashboard-signed-institution-structure-chart__center-detail--type-private-language-school,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-university:hover) .dashboard-signed-institution-structure-chart__center-detail--type-university,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-university:hover) .dashboard-signed-institution-structure-chart__center-detail--type-university,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-other-education:hover) .dashboard-signed-institution-structure-chart__center-detail--type-other-education,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-other-education:hover) .dashboard-signed-institution-structure-chart__center-detail--type-other-education,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--type-unmapped:hover) .dashboard-signed-institution-structure-chart__center-detail--type-unmapped,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--type-unmapped:hover) .dashboard-signed-institution-structure-chart__center-detail--type-unmapped,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-melbourne:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-melbourne,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-melbourne:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-melbourne {
+  opacity: 1;
+}
+
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-sydney:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-sydney,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-sydney:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-sydney,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-adelaide:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-adelaide,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-adelaide:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-adelaide,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-brisbane:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-brisbane,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-brisbane:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-brisbane,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-perth:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-perth,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-perth:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-perth,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-other:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-other,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-other:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-other,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__sector--metro-unmapped-city:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-unmapped-city,
+.ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-card:has(.dashboard-signed-institution-structure-chart__legend-item--metro-unmapped-city:hover) .dashboard-signed-institution-structure-chart__center-detail--metro-unmapped-city {
+  opacity: 1;
+}
+
+@media (max-width: 1120px) {
+  .ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-layout {
+    grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .ui-premium-v2 #dashboard-signed-institution-structure-chart {
+    padding: 16px;
+  }
+
+  .ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__header {
+    display: grid;
+  }
+
+  .ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-layout {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__chart-shell,
+  .ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-shell {
+    width: min(220px, 100%);
+    max-width: 220px;
+  }
+
+  .ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__donut-svg {
+    max-width: 220px;
+  }
+
+  .ui-premium-v2 #dashboard-signed-institution-structure-chart .dashboard-signed-institution-structure-chart__unmapped ul {
+    grid-template-columns: 1fr;
+  }
+}

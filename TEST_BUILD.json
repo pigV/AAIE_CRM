@@ -1,0 +1,39 @@
+{
+  "base_commit": "5985902d4c9f7b825fe99711d1dc0f640ebeacfb",
+  "feature_commits": {
+    "student_display": "8cf30f7383022dfc6d712c99534a38e5429d644c",
+    "transfer": "83c52ecd5554da088618be2a6db15de00fe92961",
+    "map": "c69c3916b2681fb64a7d7516e9e46a1f5d29b063",
+    "offer": "980dc0f97ad42e54ab7732f92120b3c74c73fc7d"
+  },
+  "file_sha256": {
+    "app.py": "59ca4133df5935731576aa5587a9490f36aa955bc4a0997ad77ff25f63167d56",
+    "assets/app.js": "ee6f8484c8bc40dbb66344f671974a43cfcc8a8faf19e9fcfe9a46ccbc776410",
+    "assets/higher-education.js": "9e74b65cc67ffe82d4a84aa6018c3eea7c6fef09802d26824c500e663f8c4a7a",
+    "assets/school-plan-report-workspace.js": "a5cab2130120f32abf0d2b4c5eea263cb7198053b9cfee0931cbe8d1caa0b143",
+    "higher_education_views.py": "82aabd08abb5f371c6c219a6cc891d5a9b600d73ac065f3a5744f074786cc751",
+    "revenue/transfer_pricing.py": "77b70df8f6237b3919deee4f47fdb3a9a98e03804a46bb6dd943f116fd4642a9",
+    "school_plan_report_workspace_views.py": "5a87edf39c63bcbd923b24980ee3b80760086b3671ae88c50ee67f9c8f7727e8",
+    "school_plan_student_views.py": "2ecf67a9af84ca72cd08d11be1b9f3f778a6d7ccfa311b0f584ca6a32400290f",
+    "student_applications_display.py": "af85efd2e9569a9f694022b4dc0b6ab542952160db3fe5b257c50465cb39dd54",
+    "student_lifecycle/transfer_contract_authority.py": "06630e4b04e534e368c6839c2f1d5f15e6ab313f3cb94abb77606f6775a72f2c",
+    "student_lifecycle/transfer_source_authority.py": "29b6ebe7d9e09da51fea443390b9e441ee44f6cbc8fe3a63aac449edc75bd6b8",
+    "tests/js/transfer_contract_workflow_e2e.cjs": "992118d021976389dd32d16147801073c28c15e4beb288ca20c52dfda65c321a",
+    "tests/test_contract_generation_authority_cutover.py": "ff74088e9fb941b9540c3a1b2f61a52507067323f36b59ff9f5bcdc565c546c0",
+    "tests/test_core.py": "b4fe38fae2793a85756a748839b9e4b26dd26f5b0681c6cc93315c546b07f15a",
+    "tests/test_higher_education_module.py": "5d7abf550bd741c0d0f749472756c3ad42e05fae61647fe044a81cc6318d4cda",
+    "tests/test_higher_education_v2.py": "7d8d9eeef456ebcf556fa132e93c1ea1033eb1f7753f5f8047006a44ea747b9b",
+    "tests/test_offer_school_search.py": "c5b36aba05516fe8e0bea7752a07cdcb683060c24ec9f36fb989072f039412e9",
+    "tests/test_school_map_tiles.py": "035de32597cbcaf0797a8d9c7486d90777a7bcffbbc2e2553bf05fc8a52e773a",
+    "tests/test_school_plan_student_views.py": "229d13a62c7716192d01b14347284c33d43e122aacddeb4aed998d60416c1919",
+    "tests/test_shared_ui_localization.py": "163319c5920a471ec3a3cf0bdafe9c53fc749c85e583d437db0cd303e0d9e84e",
+    "tests/test_student_applications_localization.py": "173c48dcba994a538d4b252e7ec0664072b25a9c9a2a2c0f29f8698caf51c372",
+    "tests/test_transfer_contract_route_gate.py": "88d88c88a62241a6ea9e6a2420d6fd099f602cfda50b8f09a23223ea5bf11d27",
+    "tests/test_transfer_contract_workflow_correction.py": "f0563e4b6fc6ab2f429cbb9d71ed018825acda40e4ea066953274a6ccfb215db",
+    "tests/transfer_contract_workflow_browser_harness.py": "00f74b13bacabda97d6eb3e61a85534dc2fe72960b2cd1033fc26daf1828ac33",
+    "transfer_v2_views.py": "6120abf5699623a4239285c58a9a12fc79342c4e89c2c66d4304d8d9b6754ecc"
+  },
+  "environment": "isolated_test",
+  "created_local_date": "2026-10-30",
+  "build_id": "test-features-20261030-c7a69e6b04c2"
+}

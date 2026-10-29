@@ -1,0 +1,32 @@
+{
+  "image": "frame-000001.jpg",
+  "expected_text": "孩子最好在10岁以前进入英语环境VISA",
+  "providers": {
+    "paddle": {
+      "text": "孩子最好在10岁以前进入英语环境VISA",
+      "confidence": 0.9780417680740356,
+      "billing_type": "local",
+      "cost": 0,
+      "polygon_count": 2
+    },
+    "easyocr": {
+      "text": "孩子最好在10岁以前进入英语环境 VISF",
+      "confidence": 0.786905221938474,
+      "billing_type": "local",
+      "cost": 0,
+      "polygon_count": 1
+    },
+    "tencent": {
+      "text": "孩子最好在10岁以前进入英语环境VISA",
+      "confidence": 0.99,
+      "billing_type": "cloud",
+      "fixture_only": true
+    },
+    "iflytek": {
+      "text": "孩子最好在10岁以前进入英语环境VISA",
+      "confidence": 0.9825050234794617,
+      "billing_type": "cloud",
+      "fixture_only": true
+    }
+  }
+}

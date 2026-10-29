@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="review-token" content="__REVIEW_TOKEN__">
+  <title>SAFEBOX 181 · Ground Truth Review</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="review-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">SAFEBOX 181 · LOCAL ONLY</p>
+        <h1>精准文案人工复核</h1>
+        <p class="subtitle">只回答：音视频里实际上说了什么？不要选择哪个机器 Provider 正确。</p>
+      </div>
+      <div class="readiness" aria-live="polite">
+        <strong id="progress">载入中…</strong>
+        <span id="readiness"></span>
+      </div>
+    </header>
+
+    <section class="review-card" aria-live="polite">
+      <div class="sample-meta">
+        <span id="sample-id">—</span>
+        <span id="sample-time">—</span>
+        <span id="stage-badge" class="badge">—</span>
+      </div>
+      <h2 id="stage-heading">正在载入审核样本</h2>
+      <p id="stage-instruction" class="instruction"></p>
+
+      <video id="clip-player" controls preload="metadata" playsinline></video>
+
+      <section id="passes-panel" class="evidence-panel" hidden>
+        <h3>两遍独立听写</h3>
+        <dl>
+          <div><dt>First Pass</dt><dd id="first-pass-text"></dd></div>
+          <div><dt>Second Pass</dt><dd id="second-pass-text"></dd></div>
+        </dl>
+      </section>
+
+      <details id="evidence-panel" class="evidence-panel">
+        <summary>机器证据（仅辅助，不是 Ground Truth）</summary>
+        <div class="evidence-grid">
+          <div><h3>当前文案</h3><p id="clean-text"></p></div>
+          <div><h3>Provider 输出</h3><dl id="provider-texts"></dl></div>
+          <div><h3>Alternatives</h3><ul id="alternatives"></ul></div>
+          <div><h3>Conflicts</h3><ul id="conflicts"></ul></div>
+          <div><h3>Critical Tokens</h3><ul id="critical-tokens"></ul></div>
+        </div>
+      </details>
+
+      <label class="editor-label" for="human-text">实际听到的文字</label>
+      <textarea id="human-text" rows="5" autocomplete="off" spellcheck="false"
+        placeholder="请重新播放片段后，独立听写；不要复制机器稿。"></textarea>
+      <p id="message" class="message" role="status"></p>
+
+      <div class="actions">
+        <button id="confirm-button" class="primary" type="button">CONFIRM</button>
+        <button id="edit-button" type="button">EDIT</button>
+        <button id="ambiguous-button" type="button">AMBIGUOUS</button>
+        <button id="skip-button" type="button">SKIP</button>
+      </div>
+      <nav class="sample-nav" aria-label="审核样本导航">
+        <button id="previous-button" type="button">上一条</button>
+        <button id="next-button" type="button">下一条</button>
+      </nav>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

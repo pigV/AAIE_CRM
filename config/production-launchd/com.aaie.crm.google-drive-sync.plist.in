@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aaie.crm.google-drive-sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__SUPPORT_DIR__/google-drive-sync-launcher.zsh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>23</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/launchd.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONNOUSERSITE</key>
+    <string>1</string>
+    <key>PYTHONDONTWRITEBYTECODE</key>
+    <string>1</string>
+    <key>AAIE_GOOGLE_DRIVE_CARRIER_KIND</key>
+    <string>launchd</string>
+  </dict>
+</dict>
+</plist>

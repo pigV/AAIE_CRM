@@ -1,0 +1,124 @@
+[data-student-followup-notes] {
+  display: grid;
+  gap: 18px;
+}
+
+[data-student-followup-notes] .student-followup-create-form,
+[data-student-followup-notes] .student-followup-editor form {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(150px, 1fr)) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--card) 92%, var(--primary) 8%);
+}
+
+[data-student-followup-notes] .student-followup-content textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+
+[data-student-followup-notes] .student-followup-list {
+  display: grid;
+  gap: 12px;
+}
+
+[data-student-followup-notes] .student-followup-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: 0 8px 24px rgb(24 38 64 / 6%);
+}
+
+[data-student-followup-notes] .student-followup-card-head,
+[data-student-followup-notes] .student-followup-actions,
+[data-student-followup-notes] .student-followup-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+
+[data-student-followup-notes] .student-followup-card-head {
+  justify-content: space-between;
+}
+
+[data-student-followup-notes] .student-followup-note-content {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+}
+
+[data-student-followup-notes] .student-followup-meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+[data-student-followup-notes] .student-followup-actions form,
+[data-student-followup-notes] .student-followup-actions details {
+  margin: 0;
+}
+
+[data-student-followup-notes] .student-followup-editor {
+  flex-basis: 100%;
+}
+
+[data-student-followup-notes] .student-followup-editor summary,
+[data-student-followup-notes] .student-followup-other-reminders summary {
+  cursor: pointer;
+  color: var(--primary);
+  font-weight: 700;
+}
+
+[data-student-followup-notes] .student-followup-editor form {
+  margin-top: 10px;
+}
+
+[data-student-followup-notes] .student-followup-reopen-warning {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--warning-text, #8a5600);
+  font-size: 0.88rem;
+}
+
+[data-student-followup-notes] .student-followup-other-reminders {
+  padding-top: 4px;
+}
+
+@media (max-width: 760px) {
+  [data-student-followup-notes] .student-followup-create-form,
+  [data-student-followup-notes] .student-followup-editor form {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  [data-student-followup-notes] .student-followup-content,
+  [data-student-followup-notes] .student-followup-create-form button,
+  [data-student-followup-notes] .student-followup-editor form button {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 430px) {
+  [data-student-followup-notes] .student-followup-create-form,
+  [data-student-followup-notes] .student-followup-editor form {
+    grid-template-columns: 1fr;
+    padding: 13px;
+  }
+
+  [data-student-followup-notes] .student-followup-create-form > *,
+  [data-student-followup-notes] .student-followup-editor form > * {
+    grid-column: 1;
+    min-width: 0;
+  }
+
+  [data-student-followup-notes] .student-followup-card-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

@@ -1,0 +1,2478 @@
+.student-case-section {
+  color: var(--foreground);
+}
+
+.student-case-section h2,
+.student-case-section h3,
+.student-case-section strong {
+  color: var(--foreground);
+}
+
+.student-case-section p,
+.student-case-section .detail-item span {
+  color: var(--muted);
+}
+
+.student-case-section .detail-section {
+  color: var(--foreground);
+  background: var(--card);
+}
+
+.progression-workspace .compact-case-create-form,
+.student-case-section .compact-case-create-form {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px;
+  align-items: end;
+}
+
+.progression-workspace .progression-create,
+.student-case-section .transfer-case-create {
+  padding: 22px 24px;
+}
+
+.progression-workspace .compact-case-create-form > label,
+.student-case-section .compact-case-create-form > label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.progression-workspace .compact-case-create-form input,
+.progression-workspace .compact-case-create-form select,
+.progression-workspace .compact-case-create-form textarea,
+.student-case-section .compact-case-create-form input,
+.student-case-section .compact-case-create-form select,
+.student-case-section .compact-case-create-form textarea,
+.progression-workspace .compact-case-create-form .transfer-school-picker,
+.student-case-section .compact-case-create-form .transfer-school-picker {
+  width: 100%;
+  min-width: 0;
+}
+
+.progression-workspace .compact-case-create-form input:not([type="hidden"]),
+.progression-workspace .compact-case-create-form select,
+.student-case-section .compact-case-create-form input:not([type="hidden"]),
+.student-case-section .compact-case-create-form select {
+  min-height: 44px;
+}
+
+.progression-workspace .compact-case-create-form textarea,
+.student-case-section .compact-case-create-form textarea {
+  min-height: 80px;
+  resize: vertical;
+}
+
+.progression-workspace .compact-case-create-form .case-form-span-4,
+.student-case-section .compact-case-create-form .case-form-span-4 {
+  grid-column: span 4;
+}
+
+.progression-workspace .compact-case-create-form .case-form-span-8,
+.student-case-section .compact-case-create-form .case-form-span-8 {
+  grid-column: span 8;
+}
+
+.progression-workspace .compact-case-create-form .case-form-span-12,
+.student-case-section .compact-case-create-form .case-form-span-12 {
+  grid-column: 1 / -1;
+}
+
+.progression-workspace .compact-case-create-form .case-form-actions,
+.student-case-section .compact-case-create-form .case-form-actions {
+  display: flex;
+  align-self: end;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.progression-workspace .compact-case-create-form .case-form-actions button,
+.student-case-section .compact-case-create-form .case-form-actions button {
+  min-height: 44px;
+}
+
+.student-case-section .transfer-case-list,
+.student-case-section .transfer-event-list,
+.student-case-section .transfer-people-current {
+  display: grid;
+  gap: 12px;
+}
+
+.student-case-section .transfer-person-row,
+.student-case-section .transfer-event-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.student-case-section .transfer-person-row {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.student-case-section .transfer-person-row form {
+  margin: 0;
+}
+
+.student-case-section .transfer-event-row {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.student-case-section .transfer-event-head time,
+.student-case-section .transfer-event-details {
+  color: var(--muted);
+}
+
+.student-case-section .transfer-event-details {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.student-case-section .transfer-workflow-form {
+  flex-wrap: wrap;
+}
+
+.student-case-section .transfer-application-list {
+  display: grid;
+  gap: 12px;
+}
+
+.student-case-section .transfer-application-card {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  min-width: 0;
+}
+
+.student-case-section .transfer-application-order {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  font-weight: 700;
+}
+
+.student-case-section .transfer-application-main,
+.student-case-section .transfer-application-main > * {
+  min-width: 0;
+}
+
+.student-case-section .transfer-application-main h4 {
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+}
+
+.student-case-section .transfer-school-record-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.student-case-section .transfer-school-record-grid > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 94%, var(--accent));
+}
+
+.student-case-section .transfer-school-record-grid span,
+.student-case-section .transfer-school-record-grid small {
+  color: var(--muted);
+}
+
+.student-case-section .transfer-record-history {
+  margin-top: 6px;
+}
+
+.student-case-section .transfer-student-name {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.student-case-section .transfer-application-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  color: var(--muted);
+  margin: 10px 0;
+}
+
+.student-case-section .transfer-final-badge {
+  display: inline-flex;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--success) 18%, var(--card));
+  font-size: 12px;
+  vertical-align: middle;
+}
+
+.student-case-section .student-case-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(86vh, 760px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  color: var(--foreground);
+  background: var(--card);
+}
+
+.student-case-section .student-case-dialog::backdrop {
+  background: rgb(15 23 42 / 55%);
+}
+
+.student-case-section .transfer-material-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.student-case-section .transfer-material-summary > div {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--card));
+}
+
+.student-case-section .transfer-material-summary span,
+.student-case-section .transfer-material-meta {
+  color: var(--muted);
+}
+
+.student-case-section .transfer-material-list {
+  display: grid;
+  gap: 12px;
+}
+
+.student-case-section .transfer-material-card {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.student-case-section .transfer-material-card h4 {
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+}
+
+.student-case-section .transfer-material-required {
+  display: inline-flex;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--warning) 18%, var(--card));
+  font-size: 12px;
+  vertical-align: middle;
+}
+
+.student-case-section .transfer-material-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 10px 0;
+}
+
+.student-case-section .material-status-confirmed {
+  background: color-mix(in srgb, var(--success) 18%, var(--card));
+}
+
+.student-case-section .material-status-needs_update,
+.student-case-section .material-status-missing {
+  background: color-mix(in srgb, var(--warning) 16%, var(--card));
+}
+
+.student-case-section .dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.student-case-section .transfer-admission-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.student-case-section .transfer-admission-summary > div,
+.student-case-section .transfer-admission-grid > div {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--card));
+}
+
+.student-case-section .transfer-admission-summary > div {
+  display: grid;
+  gap: 4px;
+}
+
+.student-case-section .transfer-admission-summary span,
+.student-case-section .transfer-admission-history-row small,
+.student-case-section .transfer-proof-history small {
+  color: var(--muted);
+}
+
+.student-case-section .transfer-admission-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.student-case-section .transfer-admission-grid h4,
+.student-case-section .transfer-payment-requirements > h4 {
+  margin: 0 0 10px;
+}
+
+.student-case-section .transfer-admission-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.student-case-section .transfer-admission-history-row:first-of-type {
+  border-top: 0;
+}
+
+.student-case-section .transfer-admission-history-row strong,
+.student-case-section .transfer-admission-history-row small,
+.student-case-section .transfer-proof-history span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.student-case-section .transfer-admission-history-row small {
+  grid-column: 1 / -1;
+}
+
+.student-case-section .transfer-payment-requirements {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.student-case-section .transfer-payment-requirement {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.student-case-section .transfer-payment-requirement details {
+  margin: 10px 0;
+}
+
+.student-case-section .transfer-proof-history {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.student-case-section .transfer-proof-history li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.student-case-section .transfer-arrangement-section,
+.student-case-section .transfer-arrangement-section * {
+  min-width: 0;
+}
+
+.student-case-section .transfer-arrangement-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.student-case-section .transfer-arrangement-summary > div {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.student-case-section .transfer-arrangement-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.student-case-section .transfer-arrangement-card {
+  overflow-wrap: anywhere;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+}
+
+.student-case-section .transfer-arrangement-current,
+.student-case-section .transfer-arrangement-evidence,
+.student-case-section .transfer-arrangement-history-row,
+.student-case-section .transfer-arrangement-evidence-row {
+  display: grid;
+  gap: 6px;
+}
+
+.student-case-section .transfer-arrangement-current,
+.student-case-section .transfer-arrangement-evidence-row,
+.student-case-section .transfer-arrangement-history-row {
+  margin: 8px 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.student-case-section .transfer-arrangement-card details {
+  margin: 12px 0;
+}
+
+.student-case-section .transfer-arrangement-card h5 {
+  margin: 8px 0;
+}
+
+.student-case-section .transfer-arrangement-warnings,
+.student-case-section .transfer-arrangement-blocking ul {
+  overflow-wrap: anywhere;
+}
+
+.student-case-section .transfer-arrangement-empty {
+  color: var(--muted);
+}
+
+.student-case-section .transfer-completion-readiness,
+.student-case-section .transfer-completion-summary,
+.student-case-section .transfer-core-completion,
+.student-case-section .transfer-completion-readiness *,
+.student-case-section .transfer-completion-summary *,
+.student-case-section .transfer-core-completion * {
+  min-width: 0;
+}
+
+.student-case-section .transfer-readiness-summary,
+.student-case-section .transfer-completion-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.student-case-section .transfer-readiness-summary > div,
+.student-case-section .transfer-completion-summary-grid > div {
+  display: grid;
+  gap: 4px;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.student-case-section .transfer-readiness-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.student-case-section .transfer-readiness-item {
+  display: grid;
+  gap: 6px;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.student-case-section .transfer-readiness-item-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.student-case-section .transfer-readiness-item p {
+  margin: 0;
+}
+
+.student-case-section .transfer-readiness-message {
+  color: var(--muted);
+}
+
+.student-case-section .student-case-confirmation {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.student-case-section .student-case-confirmation input {
+  margin-top: 4px;
+}
+
+@media (max-width: 980px) {
+  .progression-workspace .compact-case-create-form,
+  .student-case-section .compact-case-create-form {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .progression-workspace .compact-case-create-form .case-form-span-4,
+  .student-case-section .compact-case-create-form .case-form-span-4 {
+    grid-column: span 3;
+  }
+
+  .progression-workspace .compact-case-create-form .case-form-span-8,
+  .progression-workspace .compact-case-create-form .case-form-span-12,
+  .student-case-section .compact-case-create-form .case-form-span-8,
+  .student-case-section .compact-case-create-form .case-form-span-12 {
+    grid-column: 1 / -1;
+  }
+
+  .progression-workspace .compact-case-create-form .case-form-actions,
+  .student-case-section .compact-case-create-form .case-form-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 720px) {
+  .progression-workspace .compact-case-create-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .student-case-section .compact-case-create-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .progression-workspace .compact-case-create-form .case-form-span-4,
+  .progression-workspace .compact-case-create-form .case-form-span-8,
+  .progression-workspace .compact-case-create-form .case-form-span-12,
+  .student-case-section .compact-case-create-form .case-form-span-4,
+  .student-case-section .compact-case-create-form .case-form-span-8,
+  .student-case-section .compact-case-create-form .case-form-span-12 {
+    grid-column: auto;
+  }
+
+  .progression-workspace .progression-create,
+  .student-case-section .transfer-case-create {
+    padding: 18px;
+  }
+
+  .progression-workspace .compact-case-create-form .case-form-actions,
+  .progression-workspace .compact-case-create-form .case-form-actions button,
+  .student-case-section .compact-case-create-form .case-form-actions,
+  .student-case-section .compact-case-create-form .case-form-actions button {
+    width: 100%;
+  }
+
+  .student-case-section .transfer-workflow-form,
+  .student-case-section .transfer-workflow-form > *,
+  .student-case-section .transfer-person-row form,
+  .student-case-section .transfer-person-row button {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .student-case-section .transfer-person-row,
+  .student-case-section .transfer-event-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .student-case-section .transfer-application-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .student-case-section .transfer-school-record-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .student-case-section .transfer-application-card .panel-head,
+  .student-case-section .transfer-applications > .panel-head,
+  .student-case-section .transfer-applications > .panel-head .row-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .student-case-section .transfer-applications button,
+  .student-case-section .transfer-applications .row-actions {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .student-case-section .transfer-applications .row-actions > button {
+    flex: 0 0 auto;
+    min-height: 44px;
+    height: auto;
+  }
+
+  .student-case-section .transfer-material-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .student-case-section .transfer-materials > .panel-head,
+  .student-case-section .transfer-material-card .panel-head,
+  .student-case-section .transfer-materials .row-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .student-case-section .transfer-materials button,
+  .student-case-section .transfer-materials .row-actions {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .student-case-section .transfer-materials .row-actions > button {
+    flex: 0 0 auto;
+    min-height: 44px;
+    height: auto;
+  }
+
+  .student-case-section .transfer-admission-summary,
+  .student-case-section .transfer-admission-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .student-case-section .transfer-admission-records > .panel-head,
+  .student-case-section .transfer-admission-records > .panel-head .row-actions,
+  .student-case-section .transfer-payment-requirement .panel-head,
+  .student-case-section .transfer-payment-requirement .row-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .student-case-section .transfer-admission-records button,
+  .student-case-section .transfer-admission-records .button-link,
+  .student-case-section .transfer-admission-records .row-actions,
+  .student-case-section .transfer-admission-records .inline-form {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .student-case-section .transfer-admission-records button {
+    min-height: 44px;
+    height: auto;
+  }
+
+  .student-case-section .transfer-arrangement-summary,
+  .student-case-section .transfer-arrangement-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .student-case-section .transfer-arrangement-section > .panel-head,
+  .student-case-section .transfer-arrangement-card .panel-head,
+  .student-case-section .transfer-arrangement-card .row-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .student-case-section .transfer-arrangement-section button,
+  .student-case-section .transfer-arrangement-section .row-actions,
+  .student-case-section .transfer-arrangement-section .inline-form {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .student-case-section .transfer-arrangement-section button {
+    min-height: 44px;
+    height: auto;
+  }
+
+  .student-case-section .transfer-readiness-summary,
+  .student-case-section .transfer-completion-summary-grid,
+  .student-case-section .transfer-readiness-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .student-case-section .transfer-completion-readiness > .panel-head,
+  .student-case-section .transfer-core-completion > .panel-head,
+  .student-case-section .transfer-completion-readiness > .panel-head .row-actions,
+  .student-case-section .transfer-core-completion > .panel-head .row-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .student-case-section .transfer-completion-readiness button,
+  .student-case-section .transfer-completion-readiness .row-actions,
+  .student-case-section .transfer-core-completion button,
+  .student-case-section .transfer-core-completion .row-actions {
+    width: 100%;
+    max-width: 100%;
+  }
+}
+
+/* Transfer case professional workbench */
+.transfer-workspace {
+  display: grid;
+  gap: 14px;
+  width: 100%;
+  max-width: 1560px;
+  margin-inline: auto;
+  min-width: 0;
+}
+
+.transfer-case-hero {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px;
+}
+
+.transfer-case-heading,
+.transfer-title-row,
+.transfer-section-heading,
+.transfer-support-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.transfer-case-heading {
+  align-items: flex-start;
+}
+
+.transfer-title-row {
+  justify-content: flex-start;
+}
+
+.transfer-title-row h1,
+.transfer-section-heading h2 {
+  margin: 0;
+}
+
+.transfer-title-row + p {
+  margin: 6px 0 0;
+}
+
+.transfer-back-link {
+  display: inline-flex;
+  margin-bottom: 8px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.transfer-back-link:hover {
+  text-decoration: underline;
+}
+
+.transfer-workspace .status-badge.success {
+  display: inline-flex;
+  margin-left: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 14%, var(--card));
+  font-size: 12px;
+}
+
+.transfer-case-summary {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--card) 92%, var(--foreground) 8%);
+}
+
+.transfer-case-summary > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 11px 13px;
+  border-right: 1px solid var(--border);
+}
+
+.transfer-case-summary > div:last-child {
+  border-right: 0;
+}
+
+.transfer-case-summary span,
+.transfer-field-label,
+.transfer-final-document-flow span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.transfer-case-summary strong,
+.transfer-application-field strong,
+.transfer-final-document-flow strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.transfer-workbench {
+  display: grid;
+  grid-template-columns: minmax(230px, 260px) minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+}
+
+.transfer-side-column {
+  display: grid;
+  gap: 12px;
+  position: sticky;
+  top: 14px;
+}
+
+.transfer-stage-rail,
+.transfer-support-summary {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.transfer-rail-eyebrow,
+.transfer-section-kicker {
+  margin: 0;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: .08em;
+}
+
+.transfer-stage-rail > .transfer-rail-eyebrow,
+.transfer-support-head {
+  padding: 14px 16px 10px;
+}
+
+.transfer-stage-link {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 11px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.transfer-stage-link:hover,
+.transfer-support-summary > a:hover {
+  background: color-mix(in srgb, var(--accent) 7%, var(--card));
+}
+
+.transfer-stage-link.current {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.transfer-stage-link.complete {
+  color: var(--foreground);
+}
+
+.transfer-stage-number {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--card);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.transfer-stage-link.current .transfer-stage-number {
+  border-color: var(--accent);
+  color: var(--card);
+  background: var(--accent);
+}
+
+.transfer-stage-link.complete .transfer-stage-number {
+  border-color: color-mix(in srgb, var(--success) 50%, var(--border));
+  color: var(--success);
+}
+
+.transfer-stage-link strong,
+.transfer-stage-link small {
+  display: block;
+}
+
+.transfer-stage-link small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.transfer-support-head span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.transfer-support-summary > a {
+  display: grid;
+  gap: 4px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--foreground);
+  text-decoration: none;
+}
+
+.transfer-support-summary > a span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.transfer-support-summary > a strong {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+.transfer-main-column {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.transfer-business-panel,
+.transfer-secondary-panel {
+  min-width: 0;
+  padding: 16px 18px;
+  scroll-margin-top: 16px;
+}
+
+.transfer-section-heading {
+  align-items: flex-start;
+  margin-bottom: 12px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid var(--border);
+}
+
+.transfer-section-heading p {
+  margin: 5px 0 0;
+  font-size: 13px;
+}
+
+.transfer-page-feedback {
+  margin: 0;
+}
+
+.transfer-application-list {
+  display: block;
+}
+
+.transfer-application-table {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--card);
+}
+
+.transfer-application-table-head,
+.transfer-application-row {
+  display: grid;
+  grid-template-columns: 40px minmax(185px, 1.3fr) repeat(4, minmax(105px, .75fr));
+  align-items: center;
+  gap: 12px;
+}
+
+.transfer-application-table-head {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--card) 94%, var(--foreground) 6%);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.student-case-section .transfer-application-row {
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.transfer-application-row + .transfer-application-row {
+  border-top: 1px solid var(--border);
+}
+
+.transfer-application-primary,
+.transfer-application-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.transfer-application-primary h4,
+.transfer-application-primary p,
+.transfer-application-primary small {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.transfer-application-primary p,
+.transfer-application-primary small,
+.transfer-application-field small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.transfer-application-table .transfer-field-label {
+  display: none;
+}
+
+.transfer-application-actions {
+  grid-column: 2 / -1;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.transfer-action-menu > summary {
+  width: fit-content;
+  margin-left: auto;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--foreground);
+  background: var(--card);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.transfer-action-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.transfer-action-menu[open] > summary {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+}
+
+.transfer-action-menu > .row-actions {
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.transfer-final-document-flow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.transfer-final-document-flow > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--card) 95%, var(--foreground) 5%);
+}
+
+.transfer-empty-state {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  padding: 20px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 96%, var(--foreground) 4%);
+}
+
+.transfer-empty-state p {
+  margin: 0;
+}
+
+.transfer-arrangement-menu {
+  margin-top: 12px;
+}
+
+.transfer-secondary-details + .transfer-secondary-details {
+  border-top: 1px solid var(--border);
+}
+
+.transfer-secondary-details > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 0;
+  color: var(--foreground);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.transfer-secondary-details > summary small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+@media (max-width: 1180px) {
+  .transfer-case-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .transfer-case-summary > div:nth-child(3) {
+    border-right: 0;
+  }
+
+  .transfer-case-summary > div:nth-child(-n + 3) {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .transfer-application-table-head {
+    display: none;
+  }
+
+  .transfer-application-table .transfer-field-label {
+    display: block;
+  }
+
+  .transfer-application-row {
+    grid-template-columns: 40px minmax(180px, 1fr) repeat(2, minmax(110px, .75fr));
+  }
+
+  .transfer-application-field:nth-of-type(n + 5) {
+    grid-column: 2 / -1;
+  }
+}
+
+@media (max-width: 980px) {
+  .transfer-workbench {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .transfer-side-column {
+    position: static;
+    grid-template-columns: minmax(0, 1.3fr) minmax(220px, .7fr);
+  }
+
+  .transfer-stage-rail {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .transfer-stage-rail > .transfer-rail-eyebrow {
+    grid-column: 1 / -1;
+  }
+
+  .transfer-stage-link {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    padding: 10px 8px;
+    text-align: center;
+  }
+
+  .transfer-stage-link.current {
+    box-shadow: inset 0 -3px 0 var(--accent);
+  }
+
+  .transfer-final-document-flow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .transfer-case-hero,
+  .transfer-business-panel,
+  .transfer-secondary-panel {
+    padding: 16px;
+  }
+
+  .transfer-case-heading,
+  .transfer-title-row,
+  .transfer-section-heading,
+  .transfer-secondary-details > summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .transfer-title-row .status-badge {
+    align-self: flex-start;
+  }
+
+  .transfer-case-summary,
+  .transfer-side-column,
+  .transfer-stage-rail,
+  .transfer-final-document-flow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .transfer-case-summary > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .transfer-case-summary > div:last-child {
+    border-bottom: 0;
+  }
+
+  .transfer-stage-link {
+    grid-template-columns: 30px minmax(0, 1fr);
+    justify-items: stretch;
+    text-align: left;
+  }
+
+  .student-case-section .transfer-application-row {
+    grid-template-columns: 36px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .transfer-application-field,
+  .transfer-application-actions {
+    grid-column: 2 / -1;
+  }
+
+  .transfer-action-menu > summary {
+    width: 100%;
+    margin-left: 0;
+    text-align: center;
+  }
+
+  .transfer-action-menu > .row-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .transfer-action-menu button,
+  .transfer-action-menu form,
+  .transfer-action-menu form button {
+    width: 100%;
+  }
+}
+.progression-workspace {
+  display: grid;
+  gap: 14px;
+  width: 100%;
+  max-width: 1560px;
+  margin-inline: auto;
+  min-width: 0;
+}
+
+.progression-workspace input,
+.progression-workspace select,
+.progression-workspace textarea {
+  max-width: 100%;
+}
+
+.progression-workspace .case-grid,
+.progression-workspace .inline-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 12px;
+}
+
+.progression-workspace .case-card {
+  display: grid;
+  gap: 5px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--foreground);
+  background: var(--card);
+  text-decoration: none;
+}
+
+.progression-case-hero {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px;
+}
+
+.progression-back-link {
+  display: inline-flex;
+  margin-bottom: 8px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.progression-back-link:hover {
+  text-decoration: underline;
+}
+
+.progression-title-row,
+.progression-section-heading,
+.progression-school-heading,
+.progression-support-head,
+.progression-completion-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.progression-title-row h1,
+.progression-section-heading h2,
+.progression-completion-card h2 {
+  margin: 0;
+}
+
+.progression-title-row + p {
+  margin: 6px 0 0;
+}
+
+.progression-case-summary {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--card) 92%, var(--foreground) 8%);
+}
+
+.progression-case-summary > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 11px 13px;
+  border-right: 1px solid var(--border);
+}
+
+.progression-case-summary > div:last-child {
+  border-right: 0;
+}
+
+.progression-case-summary span,
+.progression-application-field span,
+.progression-final-file-grid span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.progression-case-summary strong,
+.progression-application-field strong,
+.progression-final-file-grid strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.progression-workbench {
+  display: grid;
+  grid-template-columns: minmax(230px, 260px) minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+}
+
+.progression-side-column {
+  display: grid;
+  gap: 12px;
+  position: sticky;
+  top: 14px;
+}
+
+.progression-stage-rail,
+.progression-support-summary {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.progression-rail-eyebrow,
+.progression-section-kicker {
+  margin: 0;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.progression-stage-rail > .progression-rail-eyebrow,
+.progression-support-head {
+  padding: 14px 16px 10px;
+}
+
+.progression-stage-link {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 11px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.progression-stage-link:hover {
+  background: color-mix(in srgb, var(--accent) 7%, var(--card));
+}
+
+.progression-stage-link.current {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.progression-stage-link.complete {
+  color: var(--foreground);
+}
+
+.progression-stage-number {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--card);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.progression-stage-link.current .progression-stage-number {
+  border-color: var(--accent);
+  color: var(--card);
+  background: var(--accent);
+}
+
+.progression-stage-link.complete .progression-stage-number {
+  border-color: color-mix(in srgb, var(--success) 50%, var(--border));
+  color: var(--success);
+}
+
+.progression-stage-link strong,
+.progression-stage-link small {
+  display: block;
+}
+
+.progression-stage-link small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.progression-support-head span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.progression-support-summary > a {
+  display: grid;
+  gap: 4px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--foreground);
+  text-decoration: none;
+}
+
+.progression-support-summary > a:hover {
+  background: color-mix(in srgb, var(--accent) 7%, var(--card));
+}
+
+.progression-support-summary > a span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.progression-support-summary > a strong {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+.progression-main-column {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.progression-business-panel,
+.progression-history-panel {
+  min-width: 0;
+  padding: 16px 18px;
+  scroll-margin-top: 16px;
+}
+
+.progression-section-heading {
+  align-items: flex-start;
+  margin-bottom: 12px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid var(--border);
+}
+
+.progression-section-heading p {
+  margin: 5px 0 0;
+  font-size: 13px;
+}
+
+.progression-material-highlight {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--card));
+}
+
+.progression-material-highlight h3,
+.progression-material-highlight p {
+  margin: 0;
+}
+
+.progression-material-highlight p {
+  margin-top: 5px;
+  font-size: 13px;
+}
+
+.progression-secondary-details,
+.progression-offer-records,
+.progression-history-details {
+  margin-top: 12px;
+}
+
+.progression-secondary-details > summary,
+.progression-offer-records > summary,
+.progression-history-details > summary {
+  cursor: pointer;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.progression-arrangement-list {
+  display: grid;
+  gap: 8px;
+}
+
+.progression-application-list {
+  display: block;
+}
+
+.progression-application-table {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--card);
+}
+
+.progression-application-table-head {
+  display: grid;
+  grid-template-columns: 40px minmax(190px, 1.25fr) repeat(3, minmax(105px, .75fr));
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--card) 94%, var(--foreground) 6%);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.progression-application-table-head span:first-child {
+  text-align: center;
+}
+
+.progression-application-row {
+  display: grid;
+  grid-template-columns: 40px minmax(190px, 1.25fr) repeat(3, minmax(105px, .75fr));
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding: 11px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.progression-application-row + .progression-application-row {
+  border-top: 1px solid var(--border);
+}
+
+.progression-application-order {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.progression-application-primary,
+.progression-application-field {
+  min-width: 0;
+}
+
+.progression-school-heading {
+  justify-content: flex-start;
+  gap: 7px;
+}
+
+.progression-school-heading h3,
+.progression-application-primary p {
+  margin: 0;
+}
+
+.progression-application-primary h3 {
+  overflow-wrap: anywhere;
+  font-size: 15px;
+}
+
+.progression-application-primary p {
+  margin-top: 5px;
+  font-size: 12px;
+}
+
+.progression-application-field {
+  display: grid;
+  gap: 4px;
+}
+
+.progression-application-table .progression-application-field > span {
+  display: none;
+}
+
+.progression-application-actions {
+  grid-column: 2 / -1;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.progression-application-actions .row-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.progression-application-actions form {
+  margin: 0;
+}
+
+.progression-offer-records {
+  grid-column: 2 / -1;
+  margin-top: 0;
+}
+
+.progression-offer-records ul,
+.progression-history-details ol {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+
+.progression-offer-records li {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.progression-final-admission {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.progression-final-pathway-row {
+  display: grid;
+  grid-template-columns: minmax(220px, .9fr) minmax(0, 2.6fr);
+  align-items: center;
+  gap: 14px 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--card);
+}
+
+.progression-final-pathway-row + .progression-final-pathway-row {
+  margin-top: 8px;
+}
+
+.progression-final-pathway-main {
+  min-width: 0;
+}
+
+.progression-final-pathway-main h3,
+.progression-final-pathway-main p {
+  margin: 0;
+}
+
+.progression-final-pathway-main h3 {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.progression-final-pathway-main p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.progression-final-pathway-actions {
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.progression-final-pathway-actions:empty {
+  display: none;
+}
+
+.progression-final-file-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.progression-final-document-cell {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--card) 95%, var(--foreground) 5%);
+}
+
+.progression-upload-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.progression-upload-grid .compact-form {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.progression-dialog-grid {
+  margin-top: 0;
+}
+
+.progression-arrangement-list > article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.progression-arrangement-list h3,
+.progression-arrangement-list p {
+  margin: 0;
+}
+
+.progression-arrangement-list p {
+  margin-top: 5px;
+  font-size: 13px;
+}
+
+.progression-completion-card {
+  align-items: flex-end;
+  border-color: color-mix(in srgb, var(--success) 38%, var(--border));
+}
+
+.progression-completion-card p {
+  margin: 6px 0;
+}
+
+.progression-completion-card ul {
+  margin: 8px 0 0;
+}
+
+.progression-complete-disabled {
+  display: grid;
+  gap: 7px;
+  justify-items: end;
+}
+
+.progression-complete-disabled small {
+  max-width: 280px;
+  color: var(--muted);
+  text-align: right;
+}
+
+.progression-history-panel {
+  padding-block: 14px;
+}
+
+.progression-history-details {
+  margin: 0;
+}
+
+.progression-history-details > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.progression-history-details > summary small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.progression-history-details li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.progression-history-details li span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.progression-offer-confirm {
+  max-width: 560px;
+}
+
+.progression-workspace .status-badge.success {
+  display: inline-flex;
+  margin-left: 0;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 14%, var(--card));
+  font-size: 12px;
+  vertical-align: middle;
+}
+
+@media (max-width: 1180px) {
+  .progression-case-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .progression-case-summary > div:nth-child(3) {
+    border-right: 0;
+  }
+
+  .progression-case-summary > div:nth-child(-n + 3) {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .progression-application-table-head,
+  .progression-application-row {
+    grid-template-columns: 40px minmax(190px, 1fr) repeat(2, minmax(110px, .75fr));
+  }
+
+  .progression-application-table-head {
+    display: none;
+  }
+
+  .progression-application-table .progression-application-field > span {
+    display: block;
+  }
+
+  .progression-application-field:nth-of-type(5) {
+    grid-column: 2 / -1;
+  }
+}
+
+@media (max-width: 980px) {
+  .progression-workbench {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .progression-side-column {
+    position: static;
+    grid-template-columns: minmax(0, 1.3fr) minmax(220px, .7fr);
+  }
+
+  .progression-stage-rail {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .progression-stage-rail > .progression-rail-eyebrow {
+    grid-column: 1 / -1;
+  }
+
+  .progression-stage-link {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    padding: 10px 8px;
+    text-align: center;
+  }
+
+  .progression-stage-link.current {
+    box-shadow: inset 0 -3px 0 var(--accent);
+  }
+}
+
+@media (max-width: 720px) {
+  .progression-case-hero,
+  .progression-business-panel,
+  .progression-history-panel {
+    padding: 16px;
+  }
+
+  .progression-case-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .progression-case-summary > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .progression-case-summary > div:last-child {
+    border-bottom: 0;
+  }
+
+  .progression-side-column {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .progression-stage-rail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .progression-stage-link {
+    grid-template-columns: 30px minmax(0, 1fr);
+    justify-items: stretch;
+    text-align: left;
+  }
+
+  .progression-title-row,
+  .progression-section-heading,
+  .progression-material-highlight,
+  .progression-completion-card,
+  .progression-arrangement-list > article,
+  .progression-history-details li {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .progression-title-row .status-badge {
+    align-self: flex-start;
+  }
+
+  .progression-application-row {
+    grid-template-columns: 36px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .progression-application-field,
+  .progression-application-actions,
+  .progression-offer-records {
+    grid-column: 2 / -1;
+  }
+
+  .progression-application-actions .row-actions,
+  .progression-final-pathway-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .progression-application-actions button,
+  .progression-application-actions form,
+  .progression-application-actions form button,
+  .progression-final-pathway-actions button {
+    width: 100%;
+  }
+
+  .progression-final-pathway-row,
+  .progression-final-file-grid,
+  .progression-upload-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .progression-complete-disabled {
+    justify-items: stretch;
+  }
+
+  .progression-complete-disabled small {
+    max-width: none;
+    text-align: left;
+  }
+}
+
+/* AAIE Premium Card CRM — shared progression and transfer content area */
+.premium-case-workspace {
+  --case-primary: #315bef;
+  --case-primary-deep: #203a73;
+  --case-link: #203a73;
+  --case-title: #202a3c;
+  --case-body: #465268;
+  --case-muted: #7c879b;
+  --case-border: #e4e9f2;
+  --case-border-strong: #dce4f3;
+  --case-canvas: #f3f5fa;
+  --case-card: #fff;
+  --case-field: #f7f9fd;
+  --case-primary-soft: #eaf0ff;
+  --case-success: #20a66a;
+  --case-success-soft: #e9f8f1;
+  --case-warning: #e7a52b;
+  --case-danger: #d85a62;
+  --case-shadow: 0 8px 24px rgba(201, 211, 230, .28);
+  --case-shadow-strong: 0 12px 32px rgba(177, 190, 216, .28);
+  --accent: var(--case-primary);
+  --accent-soft: var(--case-primary-soft);
+  --success: var(--case-success);
+  box-sizing: border-box;
+  gap: 20px;
+  max-width: 1600px;
+  padding: 20px;
+  border-radius: 20px;
+  color: var(--case-body);
+  background: var(--case-canvas);
+  font-family: Inter, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.premium-case-workspace *,
+.premium-case-workspace *::before,
+.premium-case-workspace *::after {
+  box-sizing: border-box;
+}
+
+.premium-case-workspace h1,
+.premium-case-workspace h2,
+.premium-case-workspace h3,
+.premium-case-workspace h4,
+.premium-case-workspace h5,
+.premium-case-workspace strong {
+  color: var(--case-title);
+}
+
+.premium-case-workspace p,
+.premium-case-workspace small {
+  color: var(--case-muted);
+}
+
+.premium-case-workspace .premium-case-hero,
+.premium-case-workspace .premium-case-card,
+.premium-case-workspace .premium-case-stage-rail,
+.premium-case-workspace .premium-case-rail-card {
+  border: 1px solid var(--case-border);
+  border-radius: 18px;
+  background: var(--case-card);
+  box-shadow: var(--case-shadow);
+}
+
+.premium-case-workspace .premium-case-hero {
+  gap: 22px;
+  padding: 24px;
+  box-shadow: var(--case-shadow-strong);
+}
+
+.premium-case-workspace .progression-case-heading,
+.premium-case-workspace .transfer-case-heading {
+  min-height: 68px;
+}
+
+.premium-case-workspace .progression-back-link,
+.premium-case-workspace .transfer-back-link {
+  margin-bottom: 10px;
+  color: var(--case-link);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.premium-case-workspace .progression-title-row,
+.premium-case-workspace .transfer-title-row {
+  gap: 10px;
+}
+
+.premium-case-workspace .progression-title-row h1,
+.premium-case-workspace .transfer-title-row h1 {
+  color: var(--case-title);
+  font-size: clamp(25px, 2vw, 32px);
+  font-weight: 780;
+  letter-spacing: -.025em;
+  line-height: 1.2;
+}
+
+.premium-case-workspace .premium-case-metrics {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--case-border);
+  border-radius: 14px;
+  background: var(--case-border);
+}
+
+.premium-case-workspace .premium-case-metrics > div {
+  gap: 7px;
+  min-height: 78px;
+  padding: 15px 16px;
+  border: 0;
+  background: var(--case-field);
+}
+
+.premium-case-workspace .premium-case-metrics span {
+  color: var(--case-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.premium-case-workspace .premium-case-metrics strong {
+  color: var(--case-title);
+  font-size: 14px;
+  font-weight: 740;
+  line-height: 1.35;
+}
+
+.premium-case-workspace .premium-case-layout {
+  grid-template-columns: minmax(242px, 274px) minmax(0, 1fr);
+  gap: 20px;
+}
+
+.premium-case-workspace .premium-case-sidebar {
+  gap: 16px;
+  top: 20px;
+}
+
+.premium-case-workspace .premium-case-stage-rail,
+.premium-case-workspace .premium-case-rail-card {
+  overflow: hidden;
+  border-radius: 16px;
+}
+
+.premium-case-workspace .progression-stage-rail > .progression-rail-eyebrow,
+.premium-case-workspace .transfer-stage-rail > .transfer-rail-eyebrow,
+.premium-case-workspace .progression-support-head,
+.premium-case-workspace .transfer-support-head {
+  padding: 16px 18px 12px;
+}
+
+.premium-case-workspace .progression-rail-eyebrow,
+.premium-case-workspace .transfer-rail-eyebrow,
+.premium-case-workspace .progression-section-kicker,
+.premium-case-workspace .transfer-section-kicker {
+  color: var(--case-primary);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+
+.premium-case-workspace .progression-stage-link,
+.premium-case-workspace .transfer-stage-link {
+  gap: 12px;
+  padding: 13px 16px;
+  border-top-color: var(--case-border);
+  color: var(--case-muted);
+  background: var(--case-card);
+  transition: background-color .16s ease, color .16s ease, box-shadow .16s ease;
+}
+
+.premium-case-workspace .progression-stage-link:hover,
+.premium-case-workspace .transfer-stage-link:hover,
+.premium-case-workspace .progression-support-summary > a:hover,
+.premium-case-workspace .transfer-support-summary > a:hover {
+  background: var(--case-primary-soft);
+}
+
+.premium-case-workspace .progression-stage-link.current,
+.premium-case-workspace .transfer-stage-link.current {
+  color: var(--case-title);
+  background: var(--case-primary-soft);
+  box-shadow: inset 3px 0 0 var(--case-primary);
+}
+
+.premium-case-workspace .progression-stage-number,
+.premium-case-workspace .transfer-stage-number {
+  width: 30px;
+  height: 30px;
+  border-color: var(--case-border-strong);
+  color: var(--case-muted);
+  background: var(--case-card);
+}
+
+.premium-case-workspace .progression-stage-link.current .progression-stage-number,
+.premium-case-workspace .transfer-stage-link.current .transfer-stage-number {
+  border-color: var(--case-primary);
+  color: #fff;
+  background: var(--case-primary);
+  box-shadow: 0 4px 10px rgba(49, 91, 239, .22);
+}
+
+.premium-case-workspace .progression-stage-link.complete .progression-stage-number,
+.premium-case-workspace .transfer-stage-link.complete .transfer-stage-number {
+  border-color: #9ddfc1;
+  color: var(--case-success);
+  background: var(--case-success-soft);
+}
+
+.premium-case-workspace .progression-stage-link strong,
+.premium-case-workspace .transfer-stage-link strong {
+  font-size: 13px;
+  font-weight: 730;
+}
+
+.premium-case-workspace .progression-stage-link small,
+.premium-case-workspace .transfer-stage-link small {
+  color: var(--case-muted);
+}
+
+.premium-case-workspace .progression-support-summary > a,
+.premium-case-workspace .transfer-support-summary > a {
+  padding: 12px 16px;
+  border-top-color: var(--case-border);
+}
+
+.premium-case-workspace .premium-case-content {
+  gap: 16px;
+}
+
+.premium-case-workspace .premium-case-card {
+  padding: 22px 24px;
+  scroll-margin-top: 20px;
+}
+
+.premium-case-workspace .progression-section-heading,
+.premium-case-workspace .transfer-section-heading {
+  margin-bottom: 18px;
+  padding-bottom: 16px;
+  border-bottom-color: var(--case-border);
+}
+
+.premium-case-workspace .progression-section-heading h2,
+.premium-case-workspace .transfer-section-heading h2,
+.premium-case-workspace .progression-completion-card h2 {
+  margin-top: 3px;
+  color: var(--case-title);
+  font-size: 20px;
+  font-weight: 770;
+  letter-spacing: -.015em;
+}
+
+.premium-case-workspace .progression-section-heading p,
+.premium-case-workspace .transfer-section-heading p {
+  margin-top: 6px;
+  color: var(--case-muted);
+  line-height: 1.55;
+}
+
+.premium-case-workspace input:not([type="hidden"]),
+.premium-case-workspace select,
+.premium-case-workspace textarea {
+  min-height: 42px;
+  border: 1px solid var(--case-border-strong);
+  border-radius: 10px;
+  color: var(--case-title);
+  background: var(--case-field);
+}
+
+.premium-case-workspace textarea {
+  min-height: 92px;
+}
+
+.premium-case-workspace input:not([type="hidden"]):focus,
+.premium-case-workspace select:focus,
+.premium-case-workspace textarea:focus {
+  border-color: var(--case-primary);
+  outline: 3px solid rgba(49, 91, 239, .14);
+}
+
+.premium-case-workspace button,
+.premium-case-workspace .button {
+  min-height: 40px;
+  border-radius: 11px;
+  font-weight: 720;
+}
+
+.premium-case-workspace button.primary,
+.premium-case-workspace .button.primary {
+  border-color: var(--case-primary);
+  color: #fff;
+  background: var(--case-primary);
+  box-shadow: 0 5px 10px rgba(49, 91, 239, .25);
+}
+
+.premium-case-workspace button.primary:hover:not(:disabled),
+.premium-case-workspace .button.primary:hover {
+  border-color: #264bda;
+  background: #264bda;
+}
+
+.premium-case-workspace button.secondary,
+.premium-case-workspace .button.secondary,
+.premium-case-workspace button:not(.primary) {
+  border-color: var(--case-border-strong);
+  color: var(--case-link);
+  background: var(--case-card);
+  box-shadow: none;
+}
+
+.premium-case-workspace button:disabled {
+  color: #a1aabd;
+  background: #edf0f5;
+  border-color: #e3e7ee;
+  box-shadow: none;
+}
+
+.premium-case-workspace .status-badge,
+.premium-case-workspace .status-pill {
+  border-radius: 999px;
+  font-weight: 720;
+}
+
+.premium-case-workspace .status-badge.success {
+  color: var(--case-success);
+  background: var(--case-success-soft);
+}
+
+.premium-case-workspace .progression-material-highlight {
+  padding: 16px 18px;
+  border-color: #b8c8fb;
+  border-radius: 12px;
+  background: var(--case-primary-soft);
+}
+
+.premium-case-workspace .progression-application-table,
+.premium-case-workspace .transfer-application-table,
+.premium-case-workspace .progression-final-pathway-row,
+.premium-case-workspace .transfer-final-document-flow > div,
+.premium-case-workspace .progression-final-document-cell,
+.premium-case-workspace .progression-arrangement-list > article,
+.premium-case-workspace .transfer-arrangement-card,
+.premium-case-workspace .transfer-empty-state {
+  border-color: var(--case-border);
+  border-radius: 12px;
+  background: var(--case-card);
+}
+
+.premium-case-workspace .progression-application-table-head,
+.premium-case-workspace .transfer-application-table-head {
+  border-bottom-color: var(--case-border);
+  color: var(--case-muted);
+  background: var(--case-field);
+}
+
+.premium-case-workspace .progression-application-row + .progression-application-row,
+.premium-case-workspace .transfer-application-row + .transfer-application-row,
+.premium-case-workspace .progression-application-actions,
+.premium-case-workspace .transfer-application-actions,
+.premium-case-workspace .progression-final-pathway-actions {
+  border-color: var(--case-border);
+}
+
+.premium-case-workspace .progression-application-order,
+.premium-case-workspace .transfer-application-order {
+  color: var(--case-primary-deep);
+  background: var(--case-primary-soft);
+}
+
+.premium-case-workspace .progression-completion-card {
+  border-color: #b9e4d0;
+  background: #fbfefc;
+}
+
+.premium-case-workspace .student-case-dialog {
+  border: 1px solid var(--case-border);
+  border-radius: 18px;
+  color: var(--case-body);
+  background: var(--case-card);
+  box-shadow: 0 24px 70px rgba(31, 46, 80, .28);
+}
+
+html[data-theme="dark"] .premium-case-workspace {
+  --case-link: #8da7ff;
+  --case-title: #f1f5ff;
+  --case-body: #c6d0e4;
+  --case-muted: #92a0b8;
+  --case-border: #34415b;
+  --case-border-strong: #43516d;
+  --case-canvas: #111827;
+  --case-card: #182237;
+  --case-field: #202c43;
+  --case-primary-soft: #24365f;
+  --case-success-soft: #173c31;
+  --case-shadow: 0 10px 28px rgba(3, 8, 18, .28);
+  --case-shadow-strong: 0 14px 36px rgba(3, 8, 18, .36);
+}
+
+html[data-theme="dark"] .premium-case-workspace .progression-completion-card {
+  border-color: #28654d;
+  background: #182d2a;
+}
+
+@media (max-width: 1180px) {
+  .premium-case-workspace .premium-case-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 980px) {
+  .premium-case-workspace {
+    padding: 16px;
+  }
+
+  .premium-case-workspace .premium-case-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .premium-case-workspace .premium-case-sidebar {
+    position: static;
+  }
+
+  .premium-case-workspace .progression-stage-link.current,
+  .premium-case-workspace .transfer-stage-link.current {
+    box-shadow: inset 0 -3px 0 var(--case-primary);
+  }
+}
+
+@media (max-width: 720px) {
+  .premium-case-workspace {
+    gap: 14px;
+    padding: 10px;
+    border-radius: 14px;
+  }
+
+  .premium-case-workspace .premium-case-hero,
+  .premium-case-workspace .premium-case-card {
+    padding: 18px;
+    border-radius: 14px;
+  }
+
+  .premium-case-workspace .premium-case-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .premium-case-workspace .premium-case-metrics > div {
+    min-height: 0;
+  }
+
+  .premium-case-workspace .progression-case-heading,
+  .premium-case-workspace .transfer-case-heading {
+    min-height: 0;
+  }
+}

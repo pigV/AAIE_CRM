@@ -1,0 +1,3 @@
+.visa-field-error { outline: 3px solid #b42318 !important; background: #fff2f0 !important; }
+.visa-validation-summary a { text-decoration: underline; }
+.visa-information-admin-edit-page pre { white-space: pre-wrap; overflow-wrap: anywhere; }

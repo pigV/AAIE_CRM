@@ -1,0 +1,19 @@
+* text=auto
+
+*.py text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.command text eol=lf
+*.sh text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.ttf binary
+*.otf binary
+*.zip binary

@@ -1,0 +1,335 @@
+.ui-premium-v2 #dashboard-workflow-distribution-chart {
+  --aaie-chart-primary: #315bef;
+  --aaie-chart-purple: #7557e8;
+  --aaie-chart-cyan: #35afcb;
+  --aaie-chart-green: #20a66a;
+  --aaie-chart-amber: #e7a52b;
+  --aaie-chart-red: #df5d5d;
+  --aaie-chart-text: #202a3c;
+  --aaie-chart-subtle: #465268;
+  --aaie-chart-muted: #7c879b;
+  align-self: stretch;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 100%;
+  overflow: hidden;
+  padding: 20px 22px;
+  border: 0;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(201, 211, 230, .28);
+}
+
+.dashboard-transfer-v2 {
+  display: grid;
+  gap: 16px;
+}
+
+.dashboard-transfer-v2 > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.dashboard-transfer-v2 > header > a {
+  display: grid;
+  min-width: 72px;
+  min-height: 56px;
+  place-items: center;
+  border-radius: 14px;
+  background: #173e73;
+  color: #fff;
+  text-decoration: none;
+}
+
+.dashboard-transfer-v2-stage-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dashboard-transfer-v2-stage-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #dce5f3;
+  border-radius: 12px;
+  color: #173e73;
+  text-decoration: none;
+}
+
+@media (max-width: 720px) {
+  .dashboard-transfer-v2-stage-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 0 0 12px;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__header h2 {
+  margin: 0;
+  color: var(--aaie-chart-text);
+  font-size: 20px;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__header p {
+  margin: 4px 0 0;
+  color: var(--aaie-chart-muted);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: space-between;
+  min-height: 0;
+  min-width: 0;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row {
+  flex: 0 0 auto;
+  min-width: 0;
+  width: 100%;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--aaie-chart-text);
+  overflow: hidden;
+  transition: background 140ms ease;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label count"
+    "svg svg";
+  align-items: center;
+  column-gap: 14px;
+  row-gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  padding: 4px 6px;
+  cursor: pointer;
+  color: var(--aaie-chart-text);
+  outline: none;
+  transition: background 140ms ease, transform 140ms ease;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row > summary::marker {
+  content: "";
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row:hover > summary,
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row[open] > summary {
+  background: #f7f9fd;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row--muted {
+  opacity: .58;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row:not(:hover):not([open]) > summary:not(:focus-visible) {
+  background: transparent;
+  transform: none;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row > summary:focus-visible {
+  background: #f7f9fd;
+  box-shadow: inset 0 0 0 2px rgba(49, 91, 239, .25);
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__label {
+  grid-area: label;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--aaie-chart-subtle);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__index {
+  display: none;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__name {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: normal;
+  word-break: normal;
+  hyphens: none;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__svg {
+  grid-area: svg;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 6px;
+  overflow: visible;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__svg-fill {
+  transition: filter 140ms ease;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__count {
+  grid-area: count;
+  display: block;
+  justify-self: end;
+  min-width: 36px;
+  position: static;
+  overflow: visible;
+  color: var(--aaie-chart-text);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: right;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row:hover .dashboard-workflow-distribution-chart__svg-fill {
+  filter: saturate(1.12) brightness(1.02);
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row:hover .dashboard-workflow-distribution-chart__count {
+  color: var(--aaie-chart-text);
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__students {
+  display: grid;
+  gap: 5px;
+  margin: 2px 6px 7px;
+  padding: 7px;
+  border-radius: 10px;
+  background: #f7f9fd;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid #eaf0ff;
+  border-radius: 9px;
+  background: #fff;
+  color: var(--aaie-chart-text);
+  text-decoration: none;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student:hover,
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student:focus-visible {
+  border-color: rgba(49, 91, 239, .35);
+  box-shadow: 0 3px 10px rgba(49, 91, 239, .08);
+  outline: none;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student span:first-child {
+  display: grid;
+  min-width: 0;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student strong,
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student strong {
+  font-size: 13px;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student small,
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__empty {
+  color: var(--aaie-chart-muted);
+  font-size: 12px;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__empty {
+  margin: 2px;
+}
+
+@media (max-width: 760px) {
+  .ui-premium-v2 #dashboard-workflow-distribution-chart {
+    align-self: auto;
+    display: block;
+    height: auto;
+    min-height: 0;
+    overflow: hidden;
+    padding: 14px;
+  }
+
+  .ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__list {
+    display: grid;
+    flex: none;
+    justify-content: normal;
+  }
+
+  .ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__header {
+    display: grid;
+  }
+
+  .ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__row > summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "label count"
+      "svg svg";
+    gap: 6px 10px;
+    min-height: 0;
+    padding: 4px;
+  }
+
+  .ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student {
+    min-height: 46px;
+  }
+
+  .ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__label {
+    grid-area: label;
+    align-self: end;
+  }
+
+  .ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__svg {
+    grid-area: svg;
+  }
+
+  .ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__count {
+    grid-area: count;
+    align-self: end;
+    min-width: 36px;
+    font-size: 14px;
+  }
+
+}

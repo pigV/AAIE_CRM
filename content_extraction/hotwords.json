@@ -1,0 +1,5 @@
+{
+  "visa_categories": ["500签证", "590签证", "Subclass 500", "Subclass 590"],
+  "australian_states": ["NSW", "VIC", "QLD", "SA", "WA", "TAS", "ACT", "NT"],
+  "cities": ["悉尼", "墨尔本", "布里斯班", "珀斯", "阿德莱德", "堪培拉", "霍巴特"]
+}

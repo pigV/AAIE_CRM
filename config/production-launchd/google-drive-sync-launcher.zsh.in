@@ -1,0 +1,60 @@
+#!/bin/zsh
+set -eu
+unsetopt BG_NICE
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+readonly APP_DIR="__PRODUCTION_ROOT__"
+readonly -a EXPECTED_HEADS=(
+__EXPECTED_HEADS__
+)
+readonly SERVICE_PYTHON="__SERVICE_PYTHON__"
+readonly LOG_DIR="__LOG_DIR__"
+readonly LAUNCHER_LOG="$LOG_DIR/launcher.log"
+readonly MODE="${1:-}"
+
+[[ $# -le 1 ]] || exit 64
+[[ -z "$MODE" || "$MODE" == "--preflight-only" ]] || exit 64
+
+/bin/mkdir -p "$LOG_DIR"
+
+log_line() {
+  /usr/bin/printf '%s | %s\n' "$(/bin/date '+%Y-%m-%dT%H:%M:%S%z')" "$1" >> "$LAUNCHER_LOG"
+}
+
+fail_closed() {
+  log_line "preflight_failed code=$1"
+  exit "${2:-78}"
+}
+
+log_line "preflight_started"
+[[ -d "/Volumes/Zhang" || "$APP_DIR" != /Volumes/Zhang/* ]] || fail_closed "volume_not_ready" 75
+[[ -d "$APP_DIR" ]] || fail_closed "production_root_not_ready" 75
+[[ -x "$SERVICE_PYTHON" ]] || fail_closed "production_python_unavailable"
+[[ -f "$APP_DIR/tools/google_drive_scheduled_sync.py" && ! -L "$APP_DIR/tools/google_drive_scheduled_sync.py" ]] || fail_closed "entrypoint_invalid"
+[[ -f "$APP_DIR/database/aaie_crm.db" && ! -L "$APP_DIR/database/aaie_crm.db" ]] || fail_closed "database_path_invalid"
+
+observed_head=$(/usr/bin/git -C "$APP_DIR" rev-parse HEAD 2>> "$LAUNCHER_LOG") || fail_closed "git_head_unreadable"
+head_allowed=false
+for expected_head in "${EXPECTED_HEADS[@]}"; do
+  if [[ "$observed_head" == "$expected_head" ]]; then
+    head_allowed=true
+    break
+  fi
+done
+[[ "$head_allowed" == true ]] || fail_closed "production_head_mismatch"
+/usr/bin/git -C "$APP_DIR" diff --quiet HEAD -- 2>> "$LAUNCHER_LOG" || fail_closed "production_tracked_changes"
+/usr/bin/git -C "$APP_DIR" diff --cached --quiet 2>> "$LAUNCHER_LOG" || fail_closed "production_index_changes"
+
+cd "$APP_DIR" || fail_closed "production_chdir_failed" 75
+unset PYTHONPATH PYTHONHOME VIRTUAL_ENV
+unset AAIE_CRM_ENV AAIE_CRM_RUNTIME_ROOT AAIE_CRM_DB_PATH
+export PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE=1
+
+log_line "exec_approved head=$observed_head"
+if [[ "$MODE" == "--preflight-only" ]]; then
+  exec "$SERVICE_PYTHON" "$APP_DIR/tools/google_drive_scheduled_sync.py" --preflight-only
+fi
+exec "$SERVICE_PYTHON" "$APP_DIR/tools/google_drive_scheduled_sync.py"

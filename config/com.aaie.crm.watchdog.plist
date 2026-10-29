@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aaie.crm.watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/faqiang/Library/Application Support/AAIE CRM/run_crm_watchdog_from_launchd.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AAIE_CRM_PYTHON</key>
+    <string>/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/faqiang/Library/Logs/AAIE CRM/watchdog.launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/faqiang/Library/Logs/AAIE CRM/watchdog.launchd.err.log</string>
+</dict>
+</plist>

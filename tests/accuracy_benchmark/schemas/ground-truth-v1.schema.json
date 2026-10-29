@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aaie.local/schemas/accurate-ground-truth-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "sample_id", "is_ground_truth", "machine_generated", "media", "coverage_tags", "human_verified_transcript", "segments", "ambiguous_regions", "verification"],
+  "properties": {
+    "schema_version": {"const": "accurate-ground-truth-v1"},
+    "sample_id": {"type": "string", "minLength": 1},
+    "is_ground_truth": {"const": true},
+    "machine_generated": {"const": false},
+    "media": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sha256", "duration_ms", "source_type", "rights_confirmed"],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "duration_ms": {"type": "integer", "minimum": 1},
+        "source_type": {"type": "string"},
+        "rights_confirmed": {"const": true}
+      }
+    },
+    "coverage_tags": {"type": "array", "items": {"type": "string"}},
+    "human_verified_transcript": {"type": "string", "minLength": 1},
+    "segments": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "ambiguous_regions": {"type": "array", "items": {"type": "object"}},
+    "verification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "first_pass_completed", "second_pass_completed", "verified_at", "verification_method"],
+      "properties": {
+        "status": {"const": "HUMAN_VERIFIED"},
+        "first_pass_completed": {"const": true},
+        "second_pass_completed": {"const": true},
+        "verified_at": {"type": "string", "minLength": 1},
+        "verification_method": {"const": "two_pass_audio_video_review"}
+      }
+    }
+  }
+}

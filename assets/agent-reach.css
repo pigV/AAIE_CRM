@@ -1,0 +1,37 @@
+/* Layout only: colors, typography, cards and controls inherit CRM authorities. */
+.agent-reach-workspace { display: grid; gap: 20px; min-width: 0; }
+.agent-reach-workspace .panel { min-width: 0; }
+.agent-reach-workspace .stack-form input { width: 100%; max-width: 560px; }
+.agent-reach-workspace .notice:empty { display: none; }
+.agent-reach-workspace td { overflow-wrap: anywhere; }
+.agent-reach-workspace table { min-width: 0; table-layout: fixed; }
+.agent-reach-workspace th:first-child { width: 50%; }
+.agent-reach-workspace .panel-head { flex-wrap: wrap; }
+
+.agent-reach-workspace .ar-monitor-table table { min-width: 850px; }
+.agent-reach-workspace .ar-monitor-table th:first-child { width: 20%; }
+.agent-reach-workspace .ar-monitor-table th:last-child { width: 25%; }
+.agent-reach-workspace .ar-task-table th:first-child { width: 30%; }
+.agent-reach-workspace .ar-row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.agent-reach-workspace .ar-weekdays { display: flex; gap: 12px; flex-wrap: wrap; }
+.agent-reach-workspace [hidden] { display: none !important; }
+.agent-reach-workspace dialog { width: min(640px, calc(100vw - 32px)); }
+.agent-reach-workspace dialog input[type="checkbox"], .agent-reach-workspace form input[type="checkbox"] { width: auto; }
+.agent-reach-workspace select { max-width: 100%; }
+
+.agent-reach-workspace .ar-summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.agent-reach-workspace .ar-summary-grid .ar-date { font-size: 16px; line-height: 1.4; }
+@media (max-width: 700px) { .agent-reach-workspace .ar-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.agent-reach-workspace .ar-search-results-table table { min-width: 1250px; }
+.agent-reach-workspace .ar-search-results-table th:first-child { width: 23%; }
+.agent-reach-workspace .ar-search-results-table td { white-space: normal; }
+.agent-reach-workspace .ar-result-controls { margin-bottom: 12px; }
+
+/* Keep native checkbox controls beside their labels, scoped to this module. */
+.agent-reach-workspace .stack-form .ar-check,
+.agent-reach-workspace .ar-weekdays .ar-check { display: flex; align-items: center; gap: 8px; }
+.agent-reach-workspace .ar-check input[type="checkbox"] { width: 18px; height: 18px; min-height: 18px; margin: 0; padding: 0; flex: 0 0 18px; }
+
+.agent-reach-workspace .ar-source-tabs { display:flex; gap:8px; margin-bottom:16px; }
+.agent-reach-workspace .ar-source-tabs [aria-selected="true"] { font-weight:700; outline:2px solid currentColor; outline-offset:2px; }

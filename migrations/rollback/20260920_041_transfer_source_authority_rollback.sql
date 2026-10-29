@@ -1,0 +1,28 @@
+-- Only an EMPTY authority table can be downgraded. Any context is auditable fact.
+-- Populated instances require separately authorized verified backup restore.
+CREATE TEMP TABLE transfer_source_rollback_empty_guard_036(value INTEGER CHECK(value=0));
+INSERT INTO transfer_source_rollback_empty_guard_036 SELECT count(*) FROM transfer_source_authorities;
+DROP TABLE transfer_source_rollback_empty_guard_036;
+DROP TRIGGER transfer_source_case_insert_projection_guard_036;
+DROP TRIGGER transfer_source_student_case_identity_guard_036;
+DROP TRIGGER transfer_source_origin_no_replace_036;
+DROP TRIGGER transfer_source_authority_no_replace_036;
+DROP TRIGGER transfer_source_transfer_contract_identity_guard_036;
+DROP TRIGGER transfer_source_transfer_cycle_identity_guard_036;
+DROP TRIGGER transfer_source_public_application_identity_guard_036;
+DROP TRIGGER transfer_source_private_application_identity_guard_036;
+DROP TRIGGER transfer_source_ordinary_contract_identity_guard_036;
+DROP TRIGGER transfer_source_ordinary_cycle_identity_guard_036;
+DROP TRIGGER transfer_source_enrolment_identity_guard_036;
+DROP TRIGGER transfer_source_origin_projection_guard_036;
+DROP TRIGGER transfer_source_case_projection_guard_036;
+DROP TRIGGER transfer_source_parent_intake_guard_036;
+DROP TRIGGER transfer_source_authority_consume_036;
+DROP TRIGGER transfer_source_authority_validate_update_036;
+DROP TRIGGER transfer_source_authority_validate_insert_036;
+DROP TRIGGER transfer_source_authority_no_delete_036;
+DROP TRIGGER transfer_source_authority_identity_immutable_036;
+DROP TRIGGER transfer_source_authority_pre_case_insert_036;
+DROP TRIGGER transfer_source_authority_pending_insert_036;
+DROP TABLE transfer_source_authorities;
+DROP VIEW transfer_existing_source_evidence;

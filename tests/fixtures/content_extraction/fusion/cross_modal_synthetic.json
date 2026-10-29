@@ -1,0 +1,94 @@
+{
+  "is_ground_truth": false,
+  "is_synthetic_alignment_fixture": true,
+  "provider_execution_performed": false,
+  "source_identity": "synthetic-cross-modal-phase4",
+  "expected_behavior_is_rule_contract_not_transcript_truth": true,
+  "timebase": "milliseconds",
+  "purpose": [
+    "temporal alignment rules",
+    "evidence classification rules",
+    "conflict resolution rules",
+    "regression tests"
+  ],
+  "cases": [
+    {
+      "id": "exact_consensus",
+      "ocr": {"start_ms": 0, "end_ms": 1000, "text": "孩子申请500签证", "role": "spoken_subtitle", "providers": ["paddle", "easyocr"]},
+      "asr": {"start_ms": 0, "end_ms": 1000, "text": "孩子申请500签证", "providers": ["funasr", "whispercpp"]},
+      "expected": {"status": "CROSS_MODAL_CONSENSUS", "final_truth": false}
+    },
+    {
+      "id": "eal_esl_strong_ocr",
+      "ocr": {"start_ms": 1000, "end_ms": 2000, "text": "EAL课要是高二还没过的话", "role": "spoken_subtitle", "providers": ["paddle", "easyocr"]},
+      "asr": {"start_ms": 1000, "end_ms": 2000, "text": "ESL课要是高二还没过的话", "provider_texts": {"funasr": "ESL课要是高二还没过的话", "whispercpp": "ESL课要是高二还没过的话"}},
+      "expected": {"status": "CROSS_MODAL_CRITICAL_TOKEN_RESOLVED", "text": "EAL课要是高二还没过的话", "final_truth": false}
+    },
+    {
+      "id": "eal_esl_weak_ocr",
+      "ocr": {"start_ms": 1000, "end_ms": 2000, "text": "EAL课", "role": "spoken_subtitle", "providers": ["paddle"]},
+      "asr": {"start_ms": 1000, "end_ms": 2000, "text": "ESL课"},
+      "expected": {"status": "CROSS_MODAL_CRITICAL_CONFLICT", "text": "ESL课", "final_truth": false}
+    },
+    {
+      "id": "gpa_ocr_resolves",
+      "ocr": {"start_ms": 2000, "end_ms": 3000, "text": "GPA很重要", "role": "spoken_subtitle", "providers": ["paddle", "easyocr"]},
+      "asr": {"start_ms": 2000, "end_ms": 3000, "text": "GPA很重要", "provider_texts": {"funasr": "GPS很重要", "whispercpp": "GPA很重要"}, "status": "ASR_CRITICAL_TOKEN_CONFLICT"},
+      "expected": {"status": "CROSS_MODAL_CRITICAL_TOKEN_RESOLVED", "text": "GPA很重要", "final_truth": false}
+    },
+    {
+      "id": "gps_ocr_unresolved",
+      "ocr": {"start_ms": 2000, "end_ms": 3000, "text": "GPS很重要", "role": "spoken_subtitle", "providers": ["paddle", "easyocr"]},
+      "asr": {"start_ms": 2000, "end_ms": 3000, "text": "GPA很重要", "provider_texts": {"funasr": "GPS很重要", "whispercpp": "GPA很重要"}, "status": "ASR_CRITICAL_TOKEN_CONFLICT"},
+      "expected": {"status": "CROSS_MODAL_CRITICAL_CONFLICT", "text": "GPA很重要", "final_truth": false}
+    },
+    {
+      "id": "education_chinese_corroboration",
+      "ocr": {"start_ms": 3000, "end_ms": 4000, "text": "学校教育安排", "role": "spoken_subtitle", "providers": ["paddle", "easyocr"]},
+      "asr": {"start_ms": 3000, "end_ms": 4000, "text": "学校教务安排", "provider_texts": {"funasr": "学校教务安排", "whispercpp": "学校教育安排"}},
+      "expected": {"status": "CROSS_MODAL_RESOLVED", "text": "学校教育安排", "final_truth": false}
+    },
+    {
+      "id": "graduation_subtitle_resolution",
+      "ocr": {"start_ms": 4000, "end_ms": 5000, "text": "可以毕业", "role": "spoken_subtitle", "providers": ["paddle", "easyocr"]},
+      "asr": {"start_ms": 4000, "end_ms": 5000, "text": "配不了业", "provider_texts": {"funasr": "配不了业", "whispercpp": "可以养业"}},
+      "expected": {"status": "CROSS_MODAL_RESOLVED", "text": "可以毕业", "final_truth": false}
+    },
+    {
+      "id": "subtitle_compression",
+      "ocr": {"start_ms": 5000, "end_ms": 6000, "text": "刚来澳洲英语适应需要时间", "role": "spoken_subtitle", "providers": ["paddle", "easyocr"]},
+      "asr": {"start_ms": 5000, "end_ms": 6000, "text": "孩子刚来澳洲以后英语适应需要时间"},
+      "expected": {"status": "CROSS_MODAL_SUBTITLE_COMPRESSION", "text_source": "asr", "final_truth": false}
+    },
+    {
+      "id": "screen_title_excluded",
+      "ocr": {"start_ms": 0, "end_ms": 5000, "text": "澳洲留学专题", "role": "screen_title", "providers": ["paddle", "easyocr"]},
+      "asr": null,
+      "expected": {"status": "OCR_ONLY_TEXT", "included": false, "final_truth": false}
+    },
+    {
+      "id": "asr_only_included",
+      "ocr": null,
+      "asr": {"start_ms": 6000, "end_ms": 7000, "text": "没有字幕的口播"},
+      "expected": {"status": "ASR_ONLY_SEGMENT", "included": true, "final_truth": false}
+    },
+    {
+      "id": "ocr_unknown_excluded",
+      "ocr": {"start_ms": 7000, "end_ms": 8000, "text": "未知屏幕文字", "role": "unknown", "providers": ["paddle", "easyocr"]},
+      "asr": null,
+      "expected": {"status": "OCR_ONLY_TEXT", "included": false, "final_truth": false}
+    },
+    {
+      "id": "one_ocr_multiple_asr",
+      "ocr": {"start_ms": 8000, "end_ms": 10000, "text": "完整一句", "role": "spoken_subtitle", "providers": ["paddle", "easyocr"]},
+      "asr": [{"start_ms": 8000, "end_ms": 8900, "text": "完整"}, {"start_ms": 8900, "end_ms": 9900, "text": "一句"}],
+      "expected": {"component_count": 1, "final_truth": false}
+    },
+    {
+      "id": "source_mismatch",
+      "ocr": {"source_video_id": "video-A", "start_ms": 0, "end_ms": 1000, "text": "EAL"},
+      "asr": {"source_video_id": "video-B", "start_ms": 0, "end_ms": 1000, "text": "ESL"},
+      "expected": {"status": "CROSS_MODAL_SOURCE_MISMATCH", "final_truth": false}
+    }
+  ]
+}
