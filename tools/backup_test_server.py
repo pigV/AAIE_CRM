@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--service",choices=("admin","parent"),required=True)
     args=parser.parse_args()
     expected=c.admin_port if args.service=="admin" else c.parent_port
-    if args.host!="127.0.0.1" or args.port!=expected:
+    if args.host!=c.bind_host(args.service) or args.port!=expected:
         raise RuntimeError("Only the configured local test endpoint is allowed")
     result=verify_migrations(c.check(c.db),ROOT/"migrations")
     if result["pending"] or result["foreign_key_violations"]:

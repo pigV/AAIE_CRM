@@ -2735,7 +2735,8 @@ def ensure_dirs():
         if not (STAGING and path == ASSET_DIR):
             path.mkdir(parents=True, exist_ok=True)
     try:
-        SCHOOL_LIBRARY_FILE_DIR.mkdir(parents=True, exist_ok=True)
+        if not (STAGING and SCHOOL_LIBRARY_FILE_DIR in STAGING.nas_read_roots):
+            SCHOOL_LIBRARY_FILE_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         append_service_log("system", "school_library_dir_unavailable", repr(exc), path=str(SCHOOL_LIBRARY_FILE_DIR))
     for path in (SIGNATURE_DIR, STAMP_DIR):

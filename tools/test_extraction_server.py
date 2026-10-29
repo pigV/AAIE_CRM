@@ -23,7 +23,7 @@ repository.initialize()
 repository.recover_interrupted_runs()
 token=build_service_token(c.root)
 workflow=build_local_workflow(repository,c.root,environ=os.environ)
-server=build_server("127.0.0.1",18892,token,repository,c.root,local_workflow=workflow,
+server=build_server("127.0.0.1",8792,token,repository,c.root,local_workflow=workflow,
                     source_mode="test",runtime_version="test-5985902-"+args.instance)
 try: server.serve_forever()
 finally: server.server_close()

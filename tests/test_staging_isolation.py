@@ -2,12 +2,14 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 from staging_environment import Staging, SOURCE, PRODUCTION_DB, PROTECTED_STORAGE, IsolationError
 
 class StagingContract(unittest.TestCase):
     def setUp(self):
         self.c=Staging.load(SOURCE/'STAGING_DATA/staging.json')
-    def test_db_storage_and_descendant_collisions(self):
+    @patch.object(Staging, 'nas_write_roots', new=property(lambda self: ()))
+    def test_db_storage_and_descendant_collisions_without_write_authorization(self):
         for path in [PRODUCTION_DB,*PROTECTED_STORAGE,PROTECTED_STORAGE[0]/'fixture',PROTECTED_STORAGE[1]/'fixture']:
             with self.subTest(path=path),self.assertRaises(IsolationError): self.c.check(path)
     def test_outside_paths_and_traversal_rejected(self):
@@ -34,7 +36,7 @@ class StagingContract(unittest.TestCase):
             with self.assertRaises(IsolationError):health(self.c,'admin')
 
     def test_port_collision_and_cookie_namespace(self):
-        for patch in [{'admin_port':8780},{'parent_port':8880},{'namespace':'aaie_session'},{'mode':'test'}]:
+        for patch in [{'admin_port':8792},{'admin_port':8781,'parent_port':8780},{'parent_port':self.c.admin_port},{'namespace':'aaie_session'},{'mode':'test'}]:
             d=json.loads((SOURCE/'STAGING_DATA/staging.json').read_text());d.update(patch)
             with tempfile.NamedTemporaryFile(mode='w',dir=self.c.root,suffix='.json') as f:
                 json.dump(d,f);f.flush()

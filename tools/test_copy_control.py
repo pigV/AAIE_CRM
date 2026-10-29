@@ -39,6 +39,9 @@ def main():
             if action=="restart":
                 control.stop(c)
                 extraction.stop(c)
+            # Check CRM port conflicts before starting any test service.
+            if not any(control.state_path(c,r).exists() for r in ("admin","parent")):
+                control.require_stopped(c)
             extraction.start(c)
             if any(control.state_path(c,r).exists() for r in ("admin","parent")):
                 for role in ("admin","parent"):
@@ -50,7 +53,7 @@ def main():
                 except Exception:
                     control.stop(c)
                     raise
-            print("Local test running: Admin 18880, Parent 18881, Content Extraction 18892")
+            print("Local test running: Admin 8780, Parent 8781, Content Extraction 8792")
         elif action=="stop":
             control.stop(c)
             extraction.stop(c)

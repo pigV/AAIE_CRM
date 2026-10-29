@@ -35,8 +35,15 @@ def sandbox_profile(c):
         '(deny file-read* (literal "/Volumes/Zhang/AAIE CodeX/CRM/.env") (literal "/Volumes/Zhang/AAIE CodeX/CRM/.env.production") (literal "/Volumes/Zhang/AAIE CodeX/CRM/.env.local"))',
         '(deny network-outbound)', '(deny network-bind)', '(deny network-inbound)',
         f'(allow network-bind network-inbound (local ip "localhost:{c.admin_port}") (local ip "localhost:{c.parent_port}"))',
-        f'(allow network-outbound (remote ip "localhost:{c.admin_port}") (remote ip "localhost:{c.parent_port}") (remote ip "localhost:18892"))',
-        '(deny file-read* (subpath "/Volumes"))', '(deny process-fork)', '(deny signal)', '(deny process-exec)',
+        *([f'(allow network-bind network-inbound (local ip "*:{c.admin_port}"))'] if c.admin_lan_ip else []),
+        f'(allow network-outbound (remote ip "localhost:{c.admin_port}") (remote ip "localhost:{c.parent_port}") (remote ip "localhost:8792") (remote ip "localhost:8790"))',
+        '(deny file-read* (subpath "/Volumes"))',
+        *[f'(allow file-read-metadata (literal {q(p)}))'
+          for p in sorted({parent for root in c.nas_read_roots for parent in root.parents if str(parent).startswith('/Volumes')})],
+        *[f'(allow file-read* (subpath {q(p)}))' for p in c.nas_read_roots],
+        *[f'(allow file-write* (subpath {q(p)}))' for p in c.nas_write_roots],
+        '(allow process-fork)' if c.nas_read_roots else '(deny process-fork)',
+        '(deny signal)', '(deny process-exec)',
         f'(allow process-exec (literal {q(Path(PYTHON).resolve())}) (literal {q(PYTHON)}))',
     ]) + '\n'
 
@@ -49,11 +56,11 @@ def environment(c):
             'AAIE_CRM_ENV':'staging','AAIE_STAGING_CONFIG':str(CONFIG),
             # Staging is intentionally LAN-accessible for manual acceptance;
             # Production launchers never consume this environment.
-            'AAIE_STAGING_BIND_HOST': '127.0.0.1',
+            'AAIE_STAGING_BIND_HOST': c.bind_host('admin'),
             'AAIE_CRM_DB_PERF_LOG':'0',
-            'AAIE_CRM_CONTENT_EXTRACTION_SERVICE_URL':'http://127.0.0.1:18892',
+            'AAIE_CRM_CONTENT_EXTRACTION_SERVICE_URL':'http://127.0.0.1:8792',
             'AAIE_CRM_BACKUP_DIR':str(c.root/'backups'),
-            'AAIE_CRM_SCHOOL_LIBRARY_DIR':str(c.root/'school_library_files'),
+            'AAIE_CRM_SCHOOL_LIBRARY_DIR':str(c.nas_read_roots[1] if c.nas_read_roots else c.root/'school_library_files'),
             'AAIE_CRM_SECURE_ASSET_DIR':str(c.root/'secure_assets'),
             'AAIE_CRM_CONTENT_REPORT_DIR':str(c.root/'import_reports'),
             'REVENUE_SECURE_STORAGE_ROOT':str(c.root/'revenue_documents'),
@@ -70,7 +77,7 @@ def prepare():
         # Canonical fixed location; refuse parent aliases before mkdir/write.
         canonical(DATA)
         DATA.mkdir(exist_ok=True)
-        CONFIG.write_text(json.dumps({'mode':'staging','root':str(DATA),'admin_port':8880,'parent_port':8881,'namespace':'aaie_staging_'},indent=2)+'\n')
+        CONFIG.write_text(json.dumps({'mode':'staging','root':str(DATA),'admin_port':8780,'parent_port':8781,'namespace':'aaie_staging_'},indent=2)+'\n')
     c=load()
     for name in ['database','storage','logs','tmp','home','cache','backups']:
         c.check(c.root/name).mkdir(exist_ok=True)
@@ -155,6 +162,7 @@ def start(c):
     if bind_host not in {'127.0.0.1', '0.0.0.0'}:
         raise IsolationError('Invalid Staging bind host')
     for role,port in [('admin',c.admin_port),('parent',c.parent_port)]:
+        bind_host = c.bind_host(role)
         with c.check(c.root/f'logs/{role}.log').open('ab') as log:
             proc=subprocess.Popen(command(c,str(ROOT/'tools/backup_test_server.py'),'--host',bind_host,'--port',str(port),'--service',role),cwd=ROOT,env=environment(c),stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
         time.sleep(.3)

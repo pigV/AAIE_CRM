@@ -1,7 +1,7 @@
 # AAIE CRM
 
 This repository contains the source snapshot of the local CRM test build
-`test-features-20261030-c7a69e6b04c2`, prepared on 2026-10-30 (Australia/Melbourne).
+`test-features-20261030-c7a69e6b04c2-nas-ro-7dfac156-lan-af9bcfae-nas-rw-1ecb6688-ports-f7a4708e-agent-reach-fb4c2f48`, prepared on 2026-10-30 (Australia/Melbourne).
 
 ## Included updates
 
@@ -30,11 +30,25 @@ configuration, empty test database or separately authorized backup, document
 templates, and locally created credentials. Do not run production service
 installation/control scripts or point this clone at a production database.
 
-The configured test service ports were Admin `18880`, Parent `18881`, and
-Content Extraction `18892`, bound to localhost. The test sandbox blocks
-production volume access and external network requests; browser CSP also
-blocks external resources. Online map loading is therefore intentionally
-unavailable under that test policy.
+The current service ports are Admin `8780`, Parent `8781`, and Content
+Extraction `8792`. Admin can bind to the LAN when explicitly configured;
+Parent and Content Extraction remain on localhost. CRM can connect to the
+independently deployed Agent Reach backend on `127.0.0.1:8790`. Its deployed
+source commit is recorded in `TEST_BUILD.json`; its repository, database and
+runtime are separate and are not bundled here. Its scheduler is disabled.
+`tools/test_copy_control.py` manages the three CRM services only.
+
+NAS attachment access is opt-in through local configuration. Read and write
+permissions are separate; the current local deployment authorizes writes to
+the shared student and school directories. Database writes remain restricted
+to local Staging data. No local NAS authorization or LAN configuration is
+included in this source snapshot. External network access and browser CSP
+restrictions remain in place.
+
+The original production services were stopped before the current services
+took over these ports. This snapshot still uses the backup-derived test
+database and test accounts; it is not evidence of completed production-data
+or account migration.
 
 ## Validation of the source build
 
@@ -47,3 +61,10 @@ verified by HTTP and service health checks.
 Full browser business end-to-end flows, video extraction, and live online map
 loading were not validated. These results describe the configured local build;
 they do not establish that a fresh clone is configured or ready for production.
+
+## Current deployment verification
+
+The four service health checks passed on 2026-10-30. Five read-only CRM gateway
+operations passed. Trend run history has a known validation incompatibility
+with three older failed records whose platform outcomes are incomplete.
+No real platform search was executed during this deployment.

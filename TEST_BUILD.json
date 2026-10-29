@@ -7,7 +7,7 @@
     "offer": "980dc0f97ad42e54ab7732f92120b3c74c73fc7d"
   },
   "file_sha256": {
-    "app.py": "59ca4133df5935731576aa5587a9490f36aa955bc4a0997ad77ff25f63167d56",
+    "app.py": "f5eda478b7e14b7d583d5f8f23f7b7bf7689bcf336d7c7d74acf740ba76237c3",
     "assets/app.js": "ee6f8484c8bc40dbb66344f671974a43cfcc8a8faf19e9fcfe9a46ccbc776410",
     "assets/higher-education.js": "9e74b65cc67ffe82d4a84aa6018c3eea7c6fef09802d26824c500e663f8c4a7a",
     "assets/school-plan-report-workspace.js": "a5cab2130120f32abf0d2b4c5eea263cb7198053b9cfee0931cbe8d1caa0b143",
@@ -31,9 +31,37 @@
     "tests/test_transfer_contract_route_gate.py": "88d88c88a62241a6ea9e6a2420d6fd099f602cfda50b8f09a23223ea5bf11d27",
     "tests/test_transfer_contract_workflow_correction.py": "f0563e4b6fc6ab2f429cbb9d71ed018825acda40e4ea066953274a6ccfb215db",
     "tests/transfer_contract_workflow_browser_harness.py": "00f74b13bacabda97d6eb3e61a85534dc2fe72960b2cd1033fc26daf1828ac33",
-    "transfer_v2_views.py": "6120abf5699623a4239285c58a9a12fc79342c4e89c2c66d4304d8d9b6754ecc"
+    "transfer_v2_views.py": "6120abf5699623a4239285c58a9a12fc79342c4e89c2c66d4304d8d9b6754ecc",
+    "nas.py": "d0c9f2475ca28747b7431db8692018613ed1589ad2e9c0859335f79c021e9851",
+    "staging_environment.py": "45c22259814a4d2f57a8a7e7a5cf86f30d4238b80b51329453971b1fd5bbdb91",
+    "tools/staging_control.py": "fb4c2f4896e9976aaee17226b23f55e2162549453618b299f2622e7f6c7e9057",
+    "tests/test_staging_isolation.py": "29c1bc632f64707ac00ac4b0046cbdd203f30cc2c3248f63d103ec95537005ce",
+    "tools/backup_test_server.py": "6471f6bd8a8837441f6ded6041afe529418f68ba236cb54f0c84d072053ad9d8",
+    "tools/test_extraction_control.py": "8c8a8048189ecb113243244ee631bda05d3db4ffbbb1707fcb50178fbb3f96a4",
+    "tools/test_extraction_server.py": "be6363dc911d039100e4fc137f0e37d7398b426b233113d6949c9459c90cd128",
+    "tools/test_copy_control.py": "9ef5521967fe8c5ccbb375a18072618f72796458c6d0efd7e1c7aff5ca032033",
+    "tests/test_test_extraction_config.py": "ddd256ba0d061868509e075f99e860c89f24de37cd93660bd6016c56643351eb",
+    "start.command": "a49d415608c294635ea04b56e131bf466a5a97bf1692c3f13cc4527d6f265ff1",
+    "打开 AAIE CRM.command": "a49d415608c294635ea04b56e131bf466a5a97bf1692c3f13cc4527d6f265ff1",
+    "重启 AAIE CRM.command": "c463c1250a05eb12f82fab91cfb1d74a2821d10ceca418c70c6e64eadf95a1e8",
+    "测试版使用说明.md": "41cd909cad6c9e41a763546a1443db38dbedd403e7084a9c7b07364dd56e3075",
+    "TEST_SETUP_PLAN.md": "38efcb45e54a7ad0ab95e77c7bf71dd3a787126a72f0e2a8160349f0f6622846"
   },
   "environment": "isolated_test",
   "created_local_date": "2026-10-30",
-  "build_id": "test-features-20261030-c7a69e6b04c2"
+  "build_id": "test-features-20261030-c7a69e6b04c2-nas-ro-7dfac156-lan-af9bcfae-nas-rw-1ecb6688-ports-f7a4708e-agent-reach-fb4c2f48",
+  "nas_access": "read_write_shared_students_and_schools",
+  "admin_lan_url": "http://192.168.1.123:8780",
+  "ports": {
+    "admin": 8780,
+    "parent": 8781,
+    "content_extraction": 8792,
+    "agent_reach_target": 8790
+  },
+  "agent_reach": {
+    "host": "127.0.0.1",
+    "port": 8790,
+    "source_commit": "5b42941fa971d75339f366730cc7201ece4ba0b3",
+    "scheduler_enabled": false
+  }
 }

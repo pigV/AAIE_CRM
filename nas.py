@@ -161,7 +161,12 @@ class NasManager:
         if not student["folder_path"]:
             raise NasSafetyError("Student folder has not been created")
         root = self.active_root()
-        return ensure_within(student["folder_path"], root)
+        try:
+            return ensure_within(student["folder_path"], root)
+        except NasSafetyError:
+            if STAGING and STAGING.nas_read_roots:
+                return STAGING.nas_read_path(student["folder_path"], TEST_ROOT)
+            raise
 
     def category_folder(self, student, category):
         return self.require_category_access(student, category, write=True)
@@ -172,6 +177,11 @@ class NasManager:
             raise NasSafetyError("Unknown folder category")
         student_root = self.student_folder(student)
         folder = ensure_within(student_root / category, student_root)
+        if write and STAGING:
+            try:
+                STAGING.check(folder)
+            except RuntimeError as exc:
+                raise NasSafetyError('测试环境对 NAS 附件仅有只读权限。') from exc
         if not folder.is_dir():
             raise NasSafetyError(f"{category} folder is unavailable")
         try:
