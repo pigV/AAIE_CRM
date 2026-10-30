@@ -27713,6 +27713,7 @@ class CoreTests(unittest.TestCase):
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (contract_id, "TCON003", link_id, stamp, "127.0.0.1", "UnitTest", "openidABC123", "张妈妈", str(root / "signature.png"), "confirmed", "signed", stamp, stamp),
                 )
+                db.execute("UPDATE contract_signatures SET archive_status='archived' WHERE link_id=?", (link_id,))
                 handler = object.__new__(app_module.CRMHandler)
                 handler.headers = {"Cookie": f"aaie_csl_{link_id}={handler.contract_signing_cookie_value(db.one('SELECT * FROM contract_signing_links WHERE id=?', (link_id,)), 'openidABC123')}"}
                 handler.client_address = ("127.0.0.1", 12345)

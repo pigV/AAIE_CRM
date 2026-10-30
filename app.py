@@ -909,7 +909,7 @@ SCHOOL_FEATURE_TAG_AUDIT_ACTIONS = {
     "school_feature_tag_rejected",
     "school_feature_tag_notes_updated",
 }
-SECURE_ASSET_DIR = Path(os.environ.get("AAIE_CRM_SECURE_ASSET_DIR", "/Volumes/Zhang/AAIE CodeX/AAIE CRM/secure_assets"))
+SECURE_ASSET_DIR = Path(os.environ.get("AAIE_CRM_SECURE_ASSET_DIR", "/Volumes/Zhang/AAIE CodeX/CRM/secure_assets"))
 SIGNATURE_DIR = SECURE_ASSET_DIR / "signatures"
 STAMP_DIR = SECURE_ASSET_DIR / "stamps"
 SONNY_SIGNATURE_PATH = SIGNATURE_DIR / "sonny_signature.png"
@@ -7481,7 +7481,7 @@ def float_setting(key, default):
 
 
 def local_company_signing_date():
-    return datetime.now().astimezone().strftime("%Y年%m月%d日")
+    return datetime.now(ZoneInfo("Australia/Melbourne")).strftime("%Y年%m月%d日")
 
 
 def reportlab_chinese_font():
@@ -7807,7 +7807,7 @@ def _contained_image_placement(path, x, y, width, bounds, padding=6):
 def _contained_aaie_signature_stamp_placement(
     signature_path, stamp_path, signature_width, stamp_width, bounds, padding=2
 ):
-    """Keep the overlapping AAIE composition large and contained below the date."""
+    """Keep the overlapping AAIE composition top-aligned below the date."""
     signature_width = float(signature_width)
     stamp_width = float(stamp_width)
     signature_height = image_height_for_width(signature_path, signature_width)
@@ -7833,7 +7833,9 @@ def _contained_aaie_signature_stamp_placement(
     cluster_x = (
         float(bounds["x0"]) + padding + (available_width - cluster_width) / 2
     )
-    cluster_y = float(bounds["y0"]) + padding
+    cluster_y = float(bounds["y1"]) - padding - max(
+        signature_offset_y + signature_height, stamp_height
+    )
     return {
         "signature": (
             cluster_x,
@@ -7919,14 +7921,16 @@ def _contract_parent_signature_section_anchors(source_pdf, page_index):
 
 
 def parent_signature_date_text(signed_at):
-    parsed = parse_local_datetime(signed_at)
-    if parsed:
-        return parsed.strftime("%Y年%m月%d日")
-    raw = str(signed_at or "").split("T", 1)[0]
+    # Persist the signing day's Melbourne date, including retries on later days.
+    raw = str(signed_at or "").strip()
     try:
-        return datetime.strptime(raw, "%Y-%m-%d").strftime("%Y年%m月%d日")
-    except Exception:
-        return raw
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw.split("T", 1)[0]
+    melbourne = ZoneInfo("Australia/Melbourne")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=melbourne)
+    return parsed.astimezone(melbourne).strftime("%Y年%m月%d日")
 
 
 def apply_parent_signature_to_contract_signature_section(source_pdf, signature_image_path, target_pdf, parent_name="", signed_at=None):
@@ -8045,6 +8049,18 @@ def apply_aaie_signature_and_stamp(source_pdf, target_pdf, company_signing_date=
         for page in reader.pages
     )
     company_signing_date = company_signing_date or local_company_signing_date()
+    master_cell = None
+    if master_layout_signature:
+        sonny = anchors.get("sonny")
+        company_date = anchors.get("company_date")
+        if not sonny or not company_date or sonny["page_index"] != company_date["page_index"]:
+            raise ValueError("无法定位甲方签署区域及日期，最终合同尚未生成。")
+        master_cell = _contract_aaie_signature_cell_bounds(source_pdf, sonny["page_index"], sonny)
+        if not master_cell or not (
+            master_cell["x0"] < company_date["x1"] < master_cell["x1"] - 20
+            and master_cell["y0"] + 30 < company_date["y"] < master_cell["y1"]
+        ):
+            raise ValueError("无法确认甲方签署边框，最终合同尚未生成。")
     last_index = _contract_body_last_page_index(reader)
     for index, page in enumerate(reader.pages):
         sonny = anchors.get("sonny")
@@ -8058,7 +8074,7 @@ def apply_aaie_signature_and_stamp(source_pdf, target_pdf, company_signing_date=
             overlay_stream = io.BytesIO()
             c = canvas.Canvas(overlay_stream, pagesize=(width, height))
             aaie_cell = (
-                _contract_aaie_signature_cell_bounds(source_pdf, index, sonny)
+                master_cell
                 if master_layout_signature and sonny and index == sonny["page_index"]
                 else None
             )
@@ -8084,8 +8100,8 @@ def apply_aaie_signature_and_stamp(source_pdf, target_pdf, company_signing_date=
                 aaie_asset_placement = _contained_aaie_signature_stamp_placement(
                     signature_path,
                     stamp_path,
-                    min(placement["signature_width"], 82),
-                    min(placement["stamp_width"], 48),
+                    min(placement["signature_width"], 82) * 1.15,
+                    min(placement["stamp_width"], 48) * 1.15,
                     aaie_asset_bounds,
                 )
             if index == signature_page_index:
@@ -8120,7 +8136,18 @@ def apply_aaie_signature_and_stamp(source_pdf, target_pdf, company_signing_date=
             if index == date_page_index:
                 date_x = min(width - 120, (company_date["x1"] + 10) if company_date else placement["company_date_x"])
                 date_y = max(24, (company_date["y"] - 1) if company_date else placement["company_date_y"])
-                c.setFont(reportlab_chinese_font(), placement["company_date_font_size"])
+                date_font = reportlab_chinese_font()
+                date_size = placement["company_date_font_size"]
+                if aaie_cell:
+                    date_size = min(10.0, max(6.0, float(date_size)))
+                    available = float(aaie_cell["x1"]) - 6 - date_x
+                    text_width = pdfmetrics.stringWidth(company_signing_date, date_font, date_size)
+                    if available <= 0 or text_width <= 0:
+                        raise ValueError("甲方签署日期无法放入边框。")
+                    date_size *= min(1.0, available / text_width)
+                    if date_size < 6 or date_y < aaie_cell["y0"] + 6 or date_y + date_size > aaie_cell["y1"] - 6:
+                        raise ValueError("甲方签署日期无法完整显示在边框内。")
+                c.setFont(date_font, date_size)
                 c.drawString(date_x, date_y, company_signing_date)
             c.save()
             overlay_stream.seek(0)
@@ -70064,9 +70091,17 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         contract = db.one("SELECT * FROM contracts WHERE id=?", (link["contract_id"],))
         if not contract:
             raise FileNotFoundError("合同不存在。")
+        signature = db.one(
+            "SELECT archive_status FROM contract_signatures WHERE link_id=? AND status='signed' ORDER BY id DESC LIMIT 1",
+            (link["id"],),
+        )
+        if normalize_contract_status(contract["contract_status"]) != "FullyExecuted" or not signature or signature["archive_status"] != "archived":
+            raise ValueError("双方签署完整合同尚未生成，请联系 AAIE 顾问处理；无需重新签名。")
         path = self.contract_center_file_path(contract, "final")
         if not path.is_file():
             raise FileNotFoundError("最终签署合同文件不存在。")
+        if path.suffix.lower() != ".pdf" or not PdfReader(str(path)).pages:
+            raise ValueError("最终签署合同 PDF 无效。")
         return path
 
     def contract_signing_save_signature_image(self, contract_id, signature_data):
@@ -70380,7 +70415,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         try:
             path = self.contract_signing_final_pdf_path(link)
         except Exception as exc:
-            return self.school_plan_share_public_page("最终合同暂不可用", f"<h1>最终合同暂不可用</h1><p>{esc(str(exc))}</p>", HTTPStatus.NOT_FOUND)
+            return self.school_plan_share_public_page("最终合同暂不可用", "<h1>最终合同暂不可用</h1><p>请联系 AAIE 顾问处理；已提交的签名会保留，无需重新签名。</p>", HTTPStatus.NOT_FOUND)
         payload = path.read_bytes()
         disposition = "inline" if action == "view" else "attachment"
         self.send_response(200)
@@ -70422,7 +70457,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.school_plan_share_public_page("合同不存在", "<h1>合同不存在</h1><p>请联系 AAIE 顾问。</p>", HTTPStatus.NOT_FOUND)
         signed = db.one("SELECT * FROM contract_signatures WHERE link_id=? AND status='signed' ORDER BY id DESC LIMIT 1", (link["id"],))
         final_pdf_available = False
-        final_pdf_error = ""
         try:
             if signed:
                 final_path = self.contract_signing_final_pdf_path(link)
@@ -70433,7 +70467,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             if not signed:
                 return self.school_plan_share_public_page("合同预览失败", f"<h1>合同预览失败</h1><p>{esc(str(exc))}</p>", HTTPStatus.INTERNAL_SERVER_ERROR)
-            final_pdf_error = str(exc)
             preview_pages = []
         emit_contract_business_event(
             contract,
@@ -70452,19 +70485,22 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if signed:
             final_actions = ""
             if final_pdf_available:
+                completion_title = "合同已完成签署"
+                completion_message = "双方签名及 AAIE 公章已加盖完成，签署日期已填写。您可以查看或下载包含全部正文的完整合同 PDF。"
                 final_actions = f"""
                 <div class="share-actions">
                   <a class="button-link" href="/contract-sign/{esc(token)}/final/view" target="_blank" rel="noopener">查看已签署合同</a>
-                  <a class="button-link secondary" href="/contract-sign/{esc(token)}/final/download">下载已签署合同</a>
+                  <a class="button-link secondary" href="/contract-sign/{esc(token)}/final/download">下载完整合同 PDF</a>
                 </div>
                 """
-            elif final_pdf_error:
-                final_actions = f"<p class='muted-line'>最终合同正在处理或暂不可读取：{esc(final_pdf_error)}</p>"
+            else:
+                completion_title = "家长签署已提交，完整合同尚未就绪"
+                completion_message = "您的签名已保存，甲方签章或合同归档尚未完成。请联系 AAIE 顾问处理；无需重新签名。处理完成后，重新打开此链接即可下载完整合同 PDF。"
             sign_area = f"""
             <section class="contract-sign-card">
-              <h2>合同已完成签署</h2>
-              <p>双方签名及 AAIE 公章已加盖完成。您可以在左侧查看最终合同，或使用下方按钮查看和下载。</p>
-              <p>完成时间：{esc(display_datetime(signed['signed_at']))}</p>
+              <h2>{completion_title}</h2>
+              <p>{completion_message}</p>
+              <p>家长签署时间：{esc(display_datetime(signed['signed_at']))}</p>
               {final_actions}
             </section>
             """
@@ -70472,7 +70508,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             sign_area = f"""
             <form class="contract-sign-card" method="post" action="/contract-sign/{esc(token)}/submit" data-contract-sign-form>
               <h2>在线签署确认</h2>
-              <p>请确认已阅读合同内容，并在下方手写签名。提交后本签署链接将自动失效。</p>
+              <p>请确认已阅读合同内容，并在下方手写签名。提交后不能重复签署；此链接仍可用于查看和下载完整合同。</p>
               <label class="choice"><input type="checkbox" name="declaration" value="yes" required><span>我已阅读并确认以上合同内容，同意以本人电子签名方式完成确认。</span></label>
               <label>家长姓名<input name="parent_name" value="{esc(contract['parent_signer_name'] or '')}" placeholder="请输入家长姓名" required></label>
               <label>电子签名<canvas class="signature-pad" data-signature-pad></canvas><input type="hidden" name="signature_data" data-signature-data required><small>请在框内手写签名。</small></label>
@@ -70605,7 +70641,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <p>双方签名及 AAIE 公章已加盖完成。您可以在下方查看或下载最终合同。</p>
             <div class="share-actions">
               <a class="button-link" href="/contract-sign/{esc(token)}/final/view" target="_blank" rel="noopener">查看已签署合同</a>
-              <a class="button-link secondary" href="/contract-sign/{esc(token)}/final/download">下载已签署合同</a>
+              <a class="button-link secondary" href="/contract-sign/{esc(token)}/final/download">下载完整合同 PDF</a>
             </div>
             {signature_preview}
             <table class="share-confirm-table"><tbody>
@@ -70627,9 +70663,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 except Exception as link_exc:
                     append_service_log("parent", "contract_signature_link_signed_update_failed", str(link_exc), contract_id=link["contract_id"], signature_id=signature_id)
             append_service_log("parent", "contract_signature_submit_failed", str(exc), contract_id=link["contract_id"], signature_id=signature_id)
+            if signature_id is None:
+                body = f"""
+                <h1>签署未完成</h1>
+                <p>系统未能确认保存签署记录，请稍后重新打开此链接提交，或联系 AAIE 顾问。</p>
+                <div class="share-actions"><a class="button-link" href="/contract-sign/{esc(token)}">返回签约页面</a></div>
+                """
+                return self.school_plan_share_public_page("签署未完成", body, HTTPStatus.SERVICE_UNAVAILABLE)
             body = """
             <h1>签署已提交</h1>
-            <p>系统正在处理签署文件，请联系顾问确认签署状态。</p>
+            <p>完整合同尚未生成。请联系 AAIE 顾问处理；已提交的签名会保留，无需重新签名。处理完成后，重新打开此链接即可下载完整合同 PDF。</p>
             """
             return self.school_plan_share_public_page("签署已提交", body, HTTPStatus.ACCEPTED)
 
