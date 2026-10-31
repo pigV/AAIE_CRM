@@ -162,6 +162,52 @@ class RevenueOperationalClientFeeTests(RevenueDatabaseFixture, unittest.TestCase
                 connection.execute("SELECT COUNT(*) FROM revenue_fee_items").fetchone()[0],
             )
 
+    def _assert_exception_leaves_connection_ready(self, reason):
+        connection = self.connect()
+        connection.execute("INSERT INTO contracts VALUES(70,'S-REVENUE',100,'FullyExecuted','2026-08-01','2026-08-02T00:00:00Z')")
+        if reason == "ambiguous_engagement_contract":
+            connection.execute("INSERT INTO contracts VALUES(71,'S-REVENUE',100,'FullyExecuted','2026-08-03','2026-08-04T00:00:00Z')")
+        else:
+            connection.execute("UPDATE revenue_fee_rule_versions SET status='retired'")
+        # HTTP request-scoped connections have no active transaction at this boundary.
+        connection.commit()
+        orchestrator = RevenueOperationalOrchestrator(connection, 1, "Admin")
+        result = orchestrator.contract_fully_executed(70)
+        self.assertEqual(reason, result["reason"])
+        self.assertEqual("NEEDS_ATTENTION", result["fee_status"])
+        self.assertEqual([], result["fee_items"])
+        self.assertFalse(connection.in_transaction)
+        observer = self.connect()
+        self.assertEqual(1, observer.execute("SELECT COUNT(*) FROM revenue_exceptions WHERE exception_code=? AND status='open'", (reason,)).fetchone()[0])
+        self.assertEqual(0, observer.execute("SELECT COUNT(*) FROM revenue_fee_items").fetchone()[0])
+        replay = orchestrator.contract_fully_executed(70)
+        self.assertEqual(result["exception"]["uid"], replay["exception"]["uid"])
+        # This is the next CRM write boundary that previously raised OperationalError.
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("UPDATE contracts SET contract_status='FullyExecuted' WHERE id=70")
+        connection.commit()
+        self.assertEqual(1, observer.execute("SELECT COUNT(*) FROM revenue_exceptions WHERE exception_code=?", (reason,)).fetchone()[0])
+
+    def test_ambiguous_contract_exception_does_not_block_next_crm_transaction(self):
+        self._assert_exception_leaves_connection_ready("ambiguous_engagement_contract")
+
+    def test_missing_fee_rule_exception_does_not_block_next_crm_transaction(self):
+        self._assert_exception_leaves_connection_ready("missing_fee_rule")
+
+    def test_exception_does_not_commit_caller_transaction_and_rolls_back_with_it(self):
+        connection = self.connect()
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("INSERT INTO contracts VALUES(70,'S-REVENUE',100,'FullyExecuted','2026-08-01','2026-08-02T00:00:00Z')")
+        RevenueOperationalOrchestrator(connection, 1, "Admin").open_exception(
+            "test_transaction_ownership", "commercial_case", "test-case", "Test only"
+        )
+        self.assertTrue(connection.in_transaction)
+        observer = self.connect()
+        self.assertEqual(0, observer.execute("SELECT COUNT(*) FROM revenue_exceptions WHERE exception_code='test_transaction_ownership'").fetchone()[0])
+        connection.rollback()
+        self.assertEqual(0, observer.execute("SELECT COUNT(*) FROM revenue_exceptions WHERE exception_code='test_transaction_ownership'").fetchone()[0])
+        self.assertEqual(0, observer.execute("SELECT COUNT(*) FROM contracts WHERE id=70").fetchone()[0])
+
     def test_base_and_590_fees_share_account_and_are_invoice_eligible_together(self):
         with self.connect() as connection:
             self.seed_component_authorities(connection)

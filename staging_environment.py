@@ -9,8 +9,10 @@ import sys
 
 PRODUCTION = Path('/Volumes/Zhang/AAIE CodeX/CRM')
 PRODUCTION_DB = PRODUCTION / 'database/aaie_crm.db'
+PRODUCTION_DEPLOYMENT = Path('/Users/faqiang/Downloads/AAIE_CRM_Test_5985902_20261030')
 PROTECTED_STORAGE = (Path('/Volumes/Server/Students/CRM_TEST'), Path('/Volumes/Server/Students/2026'))
 NAS_READ_ROOTS = (PROTECTED_STORAGE[0], Path('/Volumes/Server/Schools/CRM_Schools'))
+SCHOOL_REPORT_PDFUNITE = Path('/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/poppler/poppler/bin/pdfunite')
 SOURCE = Path(__file__).resolve().parent
 
 class IsolationError(RuntimeError):
@@ -78,6 +80,21 @@ class Staging:
         return NAS_READ_ROOTS if value['enabled'] else ()
 
     @property
+    def school_library_read_roots(self):
+        config = self.check(self.root / 'school-library-readonly.json')
+        enabled = False
+        if config.exists():
+            value = json.loads(config.read_text())
+            if not isinstance(value, dict) or set(value) != {'enabled'} or type(value['enabled']) is not bool:
+                raise IsolationError('Invalid school-library read-only configuration')
+            enabled = value['enabled']
+        return (NAS_READ_ROOTS[1],) if enabled or NAS_READ_ROOTS[1] in self.nas_read_roots else ()
+
+    @property
+    def read_roots(self):
+        return tuple(dict.fromkeys((*self.nas_read_roots, *self.school_library_read_roots)))
+
+    @property
     def nas_write_roots(self):
         config = canonical(self.root / 'nas-write.json')
         if not config.exists():
@@ -93,7 +110,7 @@ class Staging:
         return roots
 
     def nas_read_path(self, target, root):
-        if root not in self.nas_read_roots:
+        if root not in self.read_roots:
             raise IsolationError('NAS read root is not authorized')
         approved = canonical(root)
         path = canonical(target)
@@ -114,7 +131,7 @@ class Staging:
         if SOURCE == PRODUCTION:
             raise IsolationError('Production checkout cannot be Staging')
         ports = [d['admin_port'], d['parent_port']]
-        if any(type(p) is not int or p < 1024 or p > 65535 or (p in (8780,8781,8790,8792) and ports != [8780,8781]) for p in ports) or ports[0] == ports[1]:
+        if any(type(p) is not int or p < 1024 or p > 65535 or p in (8780,8781,8790,8792) for p in ports) or ports[0] == ports[1]:
             raise IsolationError('Invalid or colliding ports')
         if d['namespace'] != 'aaie_staging_':
             raise IsolationError('Dedicated cookie namespace required')
@@ -168,13 +185,13 @@ class Staging:
         lib.sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
         lib.sandbox_check.restype = ctypes.c_int
         writable = self.nas_write_roots
-        for p in [p for p in [PRODUCTION_DB, *PROTECTED_STORAGE, *NAS_READ_ROOTS, SOURCE / 'app.py'] if p not in writable]:
+        for p in [p for p in [PRODUCTION_DB, PRODUCTION_DEPLOYMENT / 'STAGING_DATA/database/staging.db', *PROTECTED_STORAGE, *NAS_READ_ROOTS, SOURCE / 'app.py'] if p not in writable]:
             if lib.sandbox_check(os.getpid(), b'file-write-data', 1, str(p).encode()) != 1:
                 raise IsolationError('Required OS write sandbox missing')
         for p in writable:
             if lib.sandbox_check(os.getpid(), b'file-write-data', 1, str(p).encode()) != 0:
                 raise IsolationError('Authorized NAS write access is unavailable')
-        for p in self.nas_read_roots:
+        for p in self.read_roots:
             if lib.sandbox_check(os.getpid(), b'file-read-data', 1, str(p).encode()) != 0:
                 raise IsolationError('Authorized read-only NAS access is unavailable')
 

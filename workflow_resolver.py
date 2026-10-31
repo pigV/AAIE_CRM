@@ -58,6 +58,7 @@ class WorkflowFacts:
     cycle_type: str = "initial"
     source_case_id: int | None = None
     contract_gate_status: str | None = None
+    contract_execution_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -226,6 +227,11 @@ def resolve_workflow_stage(facts: WorkflowFacts) -> WorkflowStageResult:
         return _active_result(facts, 6, "等待正式递交学校申请", issues)
     if facts.plan_sent:
         return _active_result(facts, 5, "等待家长最终确认学校方案", issues)
+    if facts.contract_execution_pending:
+        return _active_result(
+            facts, 3, "家长已签署，等待 AAIE 完成签章及完整合同归档", issues,
+            title="等待 AAIE 完成签章／归档",
+        )
     if facts.contract_signed:
         return _active_result(facts, 4, "等待制作并发送学校方案", issues)
     if facts.contract_ready_for_signature:

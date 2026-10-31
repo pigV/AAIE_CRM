@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from staging_environment import ACTIVE as STAGING, SOURCE as SOURCE_DIR
+from staging_environment import ACTIVE as STAGING, SOURCE as SOURCE_DIR, SCHOOL_REPORT_PDFUNITE
 if STAGING is None and (SOURCE_DIR / "STAGING_DATA/staging.json").exists():
     raise RuntimeError("Staging must be started through tools/staging_control.py")
 from agent_reach_permissions import can_access_agent_reach
@@ -53,6 +53,7 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from PIL import Image, ImageDraw, ImageFont
+from school_map_tiles import load_tile as load_school_map_tile
 from pypdf import PdfReader, PdfWriter
 from production_environment import load_canonical_production_environment
 from system_health_authority import (
@@ -142,6 +143,7 @@ from contract_student_selector import (
     search_students,
     student_confirmation,
 )
+from contract_display_bindings import binding_value as contract_display_binding_value
 from contract_domain import (
     DEFAULT_CONTRACT_TYPE,
     TRANSFER_APPLICATION_CONTRACT,
@@ -2735,7 +2737,7 @@ def ensure_dirs():
         if not (STAGING and path == ASSET_DIR):
             path.mkdir(parents=True, exist_ok=True)
     try:
-        if not (STAGING and SCHOOL_LIBRARY_FILE_DIR in STAGING.nas_read_roots):
+        if not (STAGING and SCHOOL_LIBRARY_FILE_DIR in STAGING.read_roots):
             SCHOOL_LIBRARY_FILE_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         append_service_log("system", "school_library_dir_unavailable", repr(exc), path=str(SCHOOL_LIBRARY_FILE_DIR))
@@ -3001,6 +3003,7 @@ def school_plan_appendix_divider_reader(report_year):
 
 def school_plan_pdfunite_path():
     candidates = [
+        SCHOOL_REPORT_PDFUNITE,
         Path(shutil.which("pdfunite") or ""),
         Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/native/poppler/poppler/bin/pdfunite",
     ]
@@ -3034,9 +3037,7 @@ def school_plan_append_school_brochures(source_pdf, target_pdf, school_ids, repo
     pdfunite = school_plan_pdfunite_path()
     if not pdfunite:
         append_service_log("admin", "school_plan_brochure_pdfunite_unavailable", target_pdf=str(target_pdf))
-        if source_pdf.resolve() != target_pdf.resolve():
-            shutil.copyfile(source_pdf, target_pdf)
-        return attached
+        raise RuntimeError("学校宣传册合并工具不可用，请检查 PDF 合并工具配置。")
     try:
         with tempfile.NamedTemporaryFile(
             suffix=".school-plan-brochure-divider.pdf",
@@ -3075,9 +3076,7 @@ def school_plan_append_school_brochures(source_pdf, target_pdf, school_ids, repo
         return attached
     except Exception as exc:
         append_service_log("admin", "school_plan_brochure_pdfunite_failed", repr(exc), target_pdf=str(target_pdf))
-        if source_pdf.resolve() != target_pdf.resolve():
-            shutil.copyfile(source_pdf, target_pdf)
-        return []
+        raise RuntimeError("学校宣传册合并失败，请检查宣传册文件及 PDF 合并工具权限。") from exc
     finally:
         for temp_path in temp_paths:
             try:
@@ -22368,7 +22367,11 @@ def caaw_welfare_section_dates(lines):
     if anchor_index is None:
         return "", "", False
 
-    section = lines[anchor_index:anchor_index + 40]
+    section = []
+    for line in lines[anchor_index:anchor_index + 40]:
+        if re.search(r"^\s*(?:[F-Z]\.\s*)?(?:provider\s+details|provider\s+name|course\s+details|signed|signature)\b", line, re.I):
+            break
+        section.append(line)
 
     def dates_from_following(index, label_re, date_index=0):
         line = section[index]
@@ -22392,6 +22395,13 @@ def caaw_welfare_section_dates(lines):
     end = ""
     for index, line in enumerate(section):
         if start_re.search(line) and end_re.search(line):
+            start_match = start_re.search(line)
+            end_match = end_re.search(line)
+            start_dates = offer_dates_from_text(line[start_match.end():end_match.start()])
+            end_dates = offer_dates_from_text(line[end_match.end():])
+            if start_dates and end_dates:
+                start, end = start_dates[0][1], end_dates[0][1]
+                break
             dates = []
             for candidate in section[index:index + 8]:
                 dates.extend(date_value for _, date_value in offer_dates_from_text(candidate))
@@ -22994,8 +23004,7 @@ def is_medibank_oshc_policy_certificate(text):
     haystack = normalized_search_text(text)
     return (
         "medibank" in haystack
-        and "your policy certificate" in haystack
-        and "medibank oshc" in haystack
+        and "oshc" in haystack
         and "your details" in haystack
         and "membership number" in haystack
         and "start date" in haystack
@@ -23028,37 +23037,46 @@ def medibank_direct_field(section, label_pattern, value_pattern):
 
 
 def medibank_ordered_values(lines):
-    normalized = [re.sub(r"\s+", " ", line).strip() for line in lines if re.sub(r"\s+", " ", line).strip()]
-    label_indexes = []
+    normalized = [re.sub(r"\s+", " ", line).strip() for line in lines if line.strip()]
+    labels = []
     for index, line in enumerate(normalized):
-        if len(label_indexes) >= len(MEDIBANK_OSHC_LABELS):
+        if len(labels) == len(MEDIBANK_OSHC_LABELS):
             break
-        _key, pattern = MEDIBANK_OSHC_LABELS[len(label_indexes)]
-        if pattern.fullmatch(line):
-            label_indexes.append(index)
-    if len(label_indexes) != len(MEDIBANK_OSHC_LABELS):
+        key = MEDIBANK_OSHC_LABELS[len(labels)][0]
+        label = r"\s+".join(key.split("_"))
+        match = re.match(rf"^{label}\b\s*:?\s*(.*)$", line, re.I)
+        if match:
+            labels.append((key, index, match.group(1).strip()))
+    if len(labels) != len(MEDIBANK_OSHC_LABELS):
         return {}
-    after_labels = normalized[label_indexes[-1] + 1:]
-    start_index = None
-    for index, line in enumerate(after_labels):
-        if (
-            len(line) <= 80
-            and re.search(r"\bMedibank\b.*\bOSHC\b", line, flags=re.I)
-            and not re.search(r"\b(policy|premium|subject|email|phone|web|gpo|privacy|benefits)\b", line, flags=re.I)
-        ):
-            start_index = index
-            break
-    if start_index is None:
-        for index, line in enumerate(after_labels):
-            if valid_oshc_policy_number(line):
-                start_index = max(0, index - 1)
-                break
-    if start_index is None:
+    values = {}
+    for pos, (key, index, inline) in enumerate(labels):
+        if inline:
+            values[key] = inline
+        elif pos + 1 < len(labels) and labels[pos + 1][1] == index + 2:
+            # A single value between successive labels is unambiguous.
+            values[key] = normalized[index + 1]
+    tail = normalized[labels[-1][1] + 1:]
+    if "your_cover" not in values:
+        cover = next((i for i, line in enumerate(tail)
+                      if len(line) <= 80 and re.search(r"\bMedibank\b.*\bOSHC\b", line, re.I)
+                      and not re.search(r"\b(policy|premium|subject|email|phone|web|gpo|privacy|benefits)\b", line, re.I)), None)
+        if cover is None:
+            return {}
+        tail = tail[cover:]
+    required = [key for key, _ in MEDIBANK_OSHC_LABELS[:8]]
+    missing = [key for key in required if key not in values]
+    if len(tail) < len(missing):
         return {}
-    values = after_labels[start_index:start_index + len(MEDIBANK_OSHC_LABELS)]
-    if len(values) < len(MEDIBANK_OSHC_LABELS):
+    values.update(zip(missing, tail[:len(missing)]))
+    # Optional empty Passport No/Dependants must not shift earlier fields.
+    # Typed anchors reject ambiguous columns rather than using DOB as cover.
+    if (not valid_oshc_policy_number(values.get("membership_number"))
+            or not normalize_offer_date(values.get("date_of_birth"))
+            or not normalize_offer_date(values.get("start_date"))
+            or not normalize_offer_date(values.get("valid_to"))):
         return {}
-    return {key: values[index].strip() for index, (key, _pattern) in enumerate(MEDIBANK_OSHC_LABELS)}
+    return {key: values[key] for key in required}
 
 
 def infer_medibank_oshc_details(text):
@@ -23262,6 +23280,7 @@ def decode_pdf_numeric_glyph_text(text):
 
 def mark_upload_text_extraction(upload, text, source="", ocr_fallback_used=False):
     try:
+        setattr(upload, "_extracted_text_cache", text)
         setattr(upload, "_text_extraction_meta", {
             "source": source,
             "extracted_text_available": bool(str(text or "").strip()),
@@ -23278,7 +23297,17 @@ def upload_text_extraction_meta(upload):
 
 
 def extract_uploaded_text(upload):
+    if hasattr(upload, "_extracted_text_cache"):
+        return upload._extracted_text_cache
     suffix = Path(upload.filename or "").suffix.lower()
+    # Explicit text uploads can retain a PDF-looking original filename. Keep
+    # that supported path without treating real PDF bytes as plain text.
+    if str(upload.content_type or "").startswith("text/") and not upload.data.lstrip().startswith(b"%PDF-"):
+        for encoding in ("utf-8", "utf-16", "latin-1"):
+            try:
+                return mark_upload_text_extraction(upload, upload.data.decode(encoding), f"text_{encoding}", False)
+            except UnicodeDecodeError:
+                pass
     if suffix == ".pdf":
         try:
             from pypdf import PdfReader
@@ -23292,13 +23321,17 @@ def extract_uploaded_text(upload):
                 return mark_upload_text_extraction(upload, decoded_text, "pdf_text_layer_decoded", False)
         except Exception:
             pass
-        ocr_text = ocr_pdf_text(upload.data)
-        if ocr_text.strip():
-            return mark_upload_text_extraction(upload, ocr_text, "pdf_ocr", True)
+        diagnostics = {}
+        ocr_text = ocr_pdf_text(upload.data, diagnostics=diagnostics)
+        result = mark_upload_text_extraction(upload, ocr_text, "pdf_ocr", True)
+        upload_text_extraction_meta(upload).update({"ocr_status": diagnostics.get("status", "no_text"), **{k: v for k, v in diagnostics.items() if k != "status"}})
+        return result
     if suffix in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tif", ".tiff"} or str(upload.content_type or "").startswith("image/"):
-        ocr_text = ocr_image_text(upload.data, suffix)
-        if ocr_text.strip():
-            return mark_upload_text_extraction(upload, ocr_text, "image_ocr", True)
+        diagnostics = {}
+        ocr_text = ocr_image_text(upload.data, suffix, diagnostics=diagnostics)
+        result = mark_upload_text_extraction(upload, ocr_text, "image_ocr", True)
+        upload_text_extraction_meta(upload).update({"ocr_status": diagnostics.get("status", "no_text")})
+        return result
     if suffix == ".docx":
         try:
             with zipfile.ZipFile(io.BytesIO(upload.data)) as archive:
@@ -23363,75 +23396,16 @@ def extract_school_feature_matches_from_upload(upload, source_reference="", tags
     return result
 
 
-def ocr_image_text(data, suffix=".png"):
-    script = APP_DIR / "tools" / "macos_vision_ocr.swift"
-    if not script.exists() or not data:
-        return ""
-    safe_suffix = suffix if suffix and re.match(r"^\.[A-Za-z0-9]+$", suffix) else ".png"
-    try:
-        work_root = APP_DIR / "cache" / "ocr_work" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        work_root.mkdir(parents=True, exist_ok=True)
-        image_path = work_root / f"image{safe_suffix}"
-        image_path.write_bytes(data)
-        env = os.environ.copy()
-        cache_root = APP_DIR / "cache" / "swift_module_cache"
-        cache_root.mkdir(parents=True, exist_ok=True)
-        env.setdefault("CLANG_MODULE_CACHE_PATH", str(cache_root))
-        env.setdefault("SWIFT_MODULE_CACHE_PATH", str(cache_root))
-        result = subprocess.run(
-            ["/usr/bin/swift", str(script), str(image_path)],
-            cwd=str(APP_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env=env,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        return result.stdout if result.returncode == 0 else ""
-    except Exception:
-        return ""
+def ocr_image_text(data, suffix=".png", diagnostics=None):
+    from document_ocr import extract_image
+    return extract_image(data, suffix, data_root=APP_DIR, source_root=SOURCE_DIR,
+                         staging=bool(STAGING), diagnostics=diagnostics if diagnostics is not None else {})
 
 
-def ocr_pdf_text(data, max_pages=3):
-    script = APP_DIR / "tools" / "macos_vision_ocr.swift"
-    if not script.exists():
-        return ""
-    try:
-        import pypdfium2 as pdfium
-
-        pdf = pdfium.PdfDocument(data)
-        images = []
-        temp_root = APP_DIR / "cache" / "ocr_work" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        temp_root.mkdir(parents=True, exist_ok=True)
-        page_count = min(len(pdf), max_pages)
-        for index in range(page_count):
-            page = pdf[index]
-            bitmap = page.render(scale=2.5)
-            image = bitmap.to_pil()
-            image_path = temp_root / f"page-{index + 1}.png"
-            image.save(image_path)
-            images.append(str(image_path))
-        if not images:
-            return ""
-        env = os.environ.copy()
-        cache_root = APP_DIR / "cache" / "swift_module_cache"
-        cache_root.mkdir(parents=True, exist_ok=True)
-        env.setdefault("CLANG_MODULE_CACHE_PATH", str(cache_root))
-        env.setdefault("SWIFT_MODULE_CACHE_PATH", str(cache_root))
-        result = subprocess.run(
-            ["/usr/bin/swift", str(script), *images],
-            cwd=str(APP_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env=env,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        return result.stdout if result.returncode == 0 else ""
-    except Exception:
-        return ""
+def ocr_pdf_text(data, max_pages=8, diagnostics=None):
+    from document_ocr import extract_pdf
+    return extract_pdf(data, max_pages, data_root=APP_DIR, source_root=SOURCE_DIR,
+                       staging=bool(STAGING), diagnostics=diagnostics if diagnostics is not None else {})
 
 
 def school_name_phrase_candidates(value):
@@ -23799,6 +23773,35 @@ def infer_nsw_public_offer_details(upload, text, lines):
     }
 
 
+def offer_course_details_schools(text):
+    """Prefer explicit Course Details cells over incidental earlier school names."""
+    section = text_between_patterns(
+        text, r"\bCourse\s+Details\b",
+        r"\b(?:Accommodation\s+and\s+Welfare|Conditions\s*/\s*Pre-requisites)\b|\Z",
+    )
+    if not section:
+        return {}
+    result = {}
+    for field, label in (("school_name", r"School"),
+                         ("language_school_name", r"English\s+Language\s+Cent(?:re|er)")):
+        match = re.search(rf"(?:^|\n)[ \t]*{label}[ \t]*:[ ]*([^\n]*(?:\n[^\n]*){{0,8}})", section, re.I)
+        if not match:
+            continue
+        value = ""
+        for line in match.group(1).splitlines():
+            candidate = line.strip()
+            if not candidate:
+                continue
+            if re.match(r"(?:School|English\s+Language\s+Cent(?:re|er)|Address|Year\s+Level)\s*:", candidate, re.I):
+                break
+            phrases = school_name_phrase_candidates(candidate)
+            if phrases:
+                value = phrases[0]
+                break
+        result[field] = value
+    return result
+
+
 def infer_offer_details(upload):
     text = extract_uploaded_text(upload)
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
@@ -23841,8 +23844,10 @@ def infer_offer_details(upload):
         ), allow_negative_anchor=True)
         or best_context_date(lines, ("accept by", "acceptance due", "offer due date", "expiry", "expires", "valid until", "deadline", "due date", "must accept"), allow_negative_anchor=True)
     )
+    course_schools = offer_course_details_schools(text)
     details = {
-        "school_name": infer_school_name(lines, upload.filename),
+        "school_name": course_schools.get("school_name", infer_school_name(lines, upload.filename)),
+        "language_school_name": course_schools.get("language_school_name", ""),
         "offer_date": offer_date,
         "course_start_date": course_start_date,
         "offer_expiry_date": offer_expiry_date,
@@ -23854,6 +23859,10 @@ def infer_offer_details(upload):
         details["document_type"] = "SA_GOV_OFFER_TAX_INVOICE"
         details["_field_confidence"] = {"deposit_amount": "explicit", "deposit_currency": "explicit"}
         details["_field_snippets"] = {"deposit_amount": sa_deposit_snippet, "deposit_currency": sa_deposit_snippet}
+    for field, value in course_schools.items():
+        if value:
+            details.setdefault("_field_confidence", {})[field] = "explicit"
+            details.setdefault("_field_snippets", {})[field] = section_snippet(text, value)
     return details
 
 
@@ -24359,6 +24368,7 @@ def visa_conditions_from_lines(lines):
 
 EXTRACTION_FIELD_LABELS = {
     "school_name": "School Name",
+    "language_school_name": "English Language Centre / 语言学校（空白待确认）",
     "offer_date": "Offer Date",
     "course_start_date": "Course Start Date",
     "offer_expiry_date": "Offer Expiry Date",
@@ -24397,7 +24407,7 @@ EXTRACTION_DATE_FIELDS = {
     "oshc_commencement_date", "oshc_expiry_date", "receipt_date",
 }
 
-OFFER_EXTRACTION_FIELDS = ["school_name", "offer_date", "course_start_date", "offer_expiry_date", "deposit_amount", "deposit_currency"]
+OFFER_EXTRACTION_FIELDS = ["school_name", "language_school_name", "offer_date", "course_start_date", "offer_expiry_date", "deposit_amount", "deposit_currency"]
 COE_OSHC_EXTRACTION_FIELDS = [
     "coe_provider", "coe_course", "coe_start_date", "coe_end_date",
     "letter_language_course_name", "letter_language_start_date", "letter_language_end_date",
@@ -24471,7 +24481,14 @@ def extraction_review_data(upload, module, doc_type=""):
         }
     return {
         "text_found": text_found,
-        "source": "PDF/Word 文字层或 OCR" if text_found else "未读取到可用文字",
+        "source": ("本地 OCR 识别，请核对" if upload_text_extraction_meta(upload).get("ocr_fallback_used") else "PDF/Word 文字层") if text_found else {
+            "engine_unavailable": "本地 OCR 未就绪，请联系管理员",
+            "renderer_unavailable": "PDF 扫描组件未就绪，请联系管理员",
+            "engine_failed": "本地 OCR 执行失败，请重试或人工填写",
+            "timeout": "本地 OCR 超时，请重试或人工填写",
+            "pdf_failed": "PDF 无法读取，请检查文件是否损坏或加密",
+            "image_failed": "图片无法读取，请检查文件",
+        }.get(upload_text_extraction_meta(upload).get("ocr_status"), "未读取到可用文字"),
         "document_type": details.get("document_kind") or doc_type or "",
         "detected_document_type": details.get("document_type") or details.get("document_kind") or "",
         "text_extraction": upload_text_extraction_meta(upload),
@@ -24483,6 +24500,7 @@ def extraction_review_data(upload, module, doc_type=""):
 
 EXTRACTION_FIELD_DOCUMENT_TYPES = {
     "school_name": {"Offer", "SignedOffer", "OfferAcceptance"},
+    "language_school_name": {"Offer", "SignedOffer", "OfferAcceptance"},
     "offer_date": {"Offer", "SignedOffer", "OfferAcceptance"},
     "course_start_date": {"Offer", "SignedOffer", "OfferAcceptance"},
     "offer_expiry_date": {"Offer", "SignedOffer", "OfferAcceptance"},
@@ -24584,6 +24602,17 @@ def offer_record_value(offer, key, default=""):
         return offer[key] if key in offer.keys() else default
     except AttributeError:
         return offer.get(key, default) if isinstance(offer, dict) else default
+
+
+def save_offer_language_school(connection, offer_id, student_id, value):
+    value = str(value or "").strip()
+    available = any(str(row[1]) == "language_school_name" for row in connection.execute("PRAGMA table_info('offers')"))
+    if not available:
+        if value:
+            raise ValueError("Offer 语言学校字段尚未完成数据库升级，请联系管理员。")
+        return
+    connection.execute("UPDATE offers SET language_school_name=? WHERE id=? AND student_id=?",
+                       (value, offer_id, student_id))
 
 
 def offer_course_start_date_available(connection=None):
@@ -32356,22 +32385,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             max_tile = 2 ** zoom
             tile_x = tile_x % max_tile
             tile_y = max(0, min(max_tile - 1, tile_y))
-            cache_path = APP_DIR / "cache" / "map_tiles" / "osm" / str(zoom) / str(tile_x) / f"{tile_y}.png"
-            if cache_path.exists() and cache_path.stat().st_size > 100:
-                return Image.open(cache_path).convert("RGB")
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            url = f"https://tile.openstreetmap.org/{zoom}/{tile_x}/{tile_y}.png"
-            request = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "AAIE CRM School Plan Report/1.0 (static map snapshot)",
-                    "Accept": "image/png,image/*;q=0.8,*/*;q=0.5",
-                },
+            return load_school_map_tile(
+                APP_DIR, zoom, tile_x, tile_y,
+                relay_port=STAGING.admin_port + 13 if STAGING else None,
             )
-            with urllib.request.urlopen(request, timeout=10) as response:
-                payload = response.read()
-            cache_path.write_bytes(payload)
-            return Image.open(io.BytesIO(payload)).convert("RGB")
 
         def text_size(draw_obj, text, font):
             box = draw_obj.textbbox((0, 0), text, font=font)
@@ -32382,7 +32399,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             title_w, title_h = text_size(draw_obj, title, font_title)
             sub_w, sub_h = text_size(draw_obj, subtitle, font_subtitle) if subtitle else (0, 0)
             box_w = max(title_w, sub_w) + 28
-            box_h = title_h + sub_h + (18 if subtitle else 14)
+            box_h = title_h + sub_h + (24 if subtitle else 16)
             if prefer == "left":
                 left = x - box_w - 18
             else:
@@ -32392,9 +32409,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             top = max(18, min(height - box_h - 18, top))
             draw_obj.rounded_rectangle((left, top, left + box_w, top + box_h), radius=12, fill=(255, 255, 255), outline="#d8e0ea", width=2)
             draw_obj.rectangle((left, top, left + 7, top + box_h), fill=color)
-            draw_obj.text((left + 16, top + 8), title, fill="#0f172a", font=font_title)
+            draw_obj.text((left + 16, top + 8), title, fill="#0f172a", font=font_title, anchor="lt")
             if subtitle:
-                draw_obj.text((left + 16, top + 10 + title_h + 4), subtitle, fill="#475569", font=font_subtitle)
+                draw_obj.text((left + 16, top + 14 + title_h), subtitle, fill="#475569", font=font_subtitle, anchor="lt")
 
         try:
             lat = float(school["latitude"])
@@ -32480,9 +32497,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         draw.rounded_rectangle((24, height - footer_h - 20, width - 24, height - 20), radius=18, fill="#ffffff", outline="#d8e0ea", width=2)
         draw.text((50, height - footer_h - 4), "城市 CBD 地图照片", fill="#334155", font=small_font)
         draw.text((365, height - footer_h - 4), f"学校到 {cbd['label']}：{school_distance:.1f} km · 直线距离", fill="#0f172a", font=small_font)
-        draw.text((width - 214, height - footer_h - 4), "© OpenStreetMap contributors", fill="#64748b", font=small_font)
-        draw.rounded_rectangle((22, 22, 354, 66), radius=16, fill="#ffffff", outline="#d8e0ea", width=2)
-        draw.text((44, 33), f"学校到 {cbd['label']} 地图照片", fill="#10233f", font=title_font)
+        attribution = "© OpenStreetMap contributors"
+        attribution_font = self.school_plan_map_font(15)
+        attribution_width, _ = text_size(draw, attribution, attribution_font)
+        draw.text((width - 42 - attribution_width, height - footer_h), attribution, fill="#64748b", font=attribution_font)
+        map_title = f"学校到 {cbd['label']} 地图照片"
+        title_width, title_height = text_size(draw, map_title, title_font)
+        draw.rounded_rectangle((22, 22, min(width - 22, title_width + 66), 44 + title_height), radius=16, fill="#ffffff", outline="#d8e0ea", width=2)
+        draw.text((44, 33), map_title, fill="#10233f", font=title_font, anchor="lt")
         buffer = io.BytesIO()
         image.save(buffer, format="PNG", optimize=True)
         image_bytes = buffer.getvalue()
@@ -37023,12 +37045,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
         attached_school_brochures = []
         if include_school_brochure_pdf:
-            attached_school_brochures = school_plan_append_school_brochures(
-                target_pdf,
-                target_pdf,
-                school_ids,
-                school_plan_report_attachment_year(snapshot),
-            )
+            try:
+                attached_school_brochures = school_plan_append_school_brochures(
+                    target_pdf,
+                    target_pdf,
+                    school_ids,
+                    school_plan_report_attachment_year(snapshot),
+                )
+            except (OSError, RuntimeError) as exc:
+                if isinstance(exc, PermissionError):
+                    filename = Path(exc.filename).name if exc.filename else "所选学校宣传册"
+                    message = f"无法读取宣传册“{filename}”，请检查学校资料目录的只读访问权限。"
+                else:
+                    message = str(exc)
+                return self.flash_redirect(
+                    f"/school-plan-reports/create?student_id={quote(selected_student_id)}",
+                    f"学校宣传册附加失败，未创建报告版本：{message}也可取消勾选学校宣传册后重试。",
+                    "error",
+                )
         stamp = now_iso()
         try:
             with db.transaction() as connection:
@@ -57977,6 +58011,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 f'<input type="hidden" name="csrf" value="{esc(self.csrf)}">'
                 f'{school_field}'
                 f'<label>发 Offer 时间{crm_display_date_input("offer_date", offer["offer_date"], form_id)}</label>'
+                f'<label>语言学校<input name="language_school_name" value="{esc(offer_record_value(offer, "language_school_name"))}" placeholder="待确认"></label>'
                 f'<label>课程开学日期{crm_display_date_input("course_start_date", offer_record_value(offer, "course_start_date"), form_id)}</label>'
                 f'<label>有效期{crm_display_date_input("offer_expiry_date", offer["offer_expiry_date"], form_id)}</label>'
                 f'<label>接收定金<div class="money-input"><input type="number" step="0.01" name="deposit_amount" value="{esc(deposit_amount)}"><select name="deposit_currency">{currency_select}</select></div></label>'
@@ -58007,6 +58042,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <div class="dialog-grid">
             {transfer_branch_field}
             <label>学校名称<input name="school_name" required></label>
+            <label>语言学校<input name="language_school_name" placeholder="待确认"></label>
             <label>Document Type / 文件类型<select name="document_type" required>{document_type_options}</select></label>
             <label>发 Offer 时间{crm_display_date_input("offer_date")}</label>
             <label>课程开学日期{crm_display_date_input("course_start_date")}</label>
@@ -66117,6 +66153,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         transfer_fee_authority_by_contract = {}
         transfer_source_hold = True
         transfer_source_fields = ""
+        transfer_source_error = ""
+        preview_source = None
+        saved_transfer_source = None
         authority_connection = db.connect()
         try:
             try:
@@ -66134,6 +66173,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 if len(transfer_drafts) > 1:
                     raise transfer_source_authority.SourceAuthorityError("存在多个待生成转学合同，请先确认本次合同。")
                 preview_id = int(transfer_drafts[0][0]) if transfer_drafts else None
+                if preview_id is not None:
+                    saved_transfer_source = transfer_source_authority.load_for_contract(
+                        authority_connection, str(student_id), preview_id)
                 preview_source = transfer_source_authority.identify_for_submission(
                     authority_connection, str(student_id), preview_id)
                 preview_source.setdefault("created_at", now_iso())
@@ -66147,14 +66189,17 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         "final_fee": format_money(money_decimal(transfer_commercial["final_fee"])),
                     }
                 transfer_source_hold = False
-            except (sqlite3.Error, transfer_source_authority.SourceAuthorityError):
-                if can_manage_transfer:
-                    try:
-                        transfer_source_fields = transfer_v2_views.render_transfer_contract_source_fields(
-                            transfer_source_authority.list_source_options(authority_connection, str(student_id)),
-                            error="转学来源待确认，确认本次正常业务资料后直接生成合同。")
-                    except (sqlite3.Error, transfer_source_authority.SourceAuthorityError):
-                        transfer_source_fields = '<p data-contract-transfer-source-fields hidden role="alert">转学资料不可用，请先确认正常业务记录。</p>'
+            except transfer_source_authority.SourceAuthorityError as exc:
+                transfer_source_error = str(exc)
+            except sqlite3.Error:
+                transfer_source_error = "转学资料读取失败，请联系管理员检查资料库。"
+            if can_manage_transfer:
+                try:
+                    transfer_source_fields = transfer_v2_views.render_transfer_contract_source_fields(
+                        transfer_source_authority.contract_source_options(authority_connection, str(student_id)),
+                        error=transfer_source_error, authority=saved_transfer_source)
+                except (sqlite3.Error, transfer_source_authority.SourceAuthorityError):
+                    transfer_source_fields = '<p data-contract-transfer-source-fields hidden role="alert">转学资料不可用，请联系管理员检查资料库。</p>'
         finally:
             db._release_connection(authority_connection)
         if published_mode:
@@ -66653,6 +66698,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
             option_html_for_file = "".join(option_parts)
             extraction_data = extraction_review_data(upload, module, suggested_type)
+            if module == "Offer" and str((metadata.get("form") or {}).get("language_school_name") or "").strip():
+                language = str(metadata["form"].get("language_school_name") or "").strip()
+                extraction_data["fields"]["language_school_name"].update(
+                    value=language, status="needs_review", message="手动填写，请确认",
+                    snippet="手动新增 Offer 时填写的语言学校。空白表示待确认。",
+                )
             log_upload_review_document_detection(file_meta, module, suggested_type, options, extraction_data)
             extraction_html = extraction_review_html(index, module, extraction_data).replace(
                 'class="extraction-review-box ',
@@ -66856,6 +66907,17 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             student = ensure_student_storage(student)
         allowed_types = set(module_document_types(module))
         stored_form = metadata.get("form") or {}
+        if module == "Offer":
+            needs_language_column = any(
+                self.form.get(f"confirm_item_{item['index']}") == "1"
+                and str(self.form.get(f"extract_language_school_name_{item['index']}",
+                                     stored_form.get("language_school_name") or "") or "").strip()
+                for item in metadata.get("files", ())
+            )
+            if needs_language_column and not any(
+                row["name"] == "language_school_name" for row in db.all("PRAGMA table_info('offers')")
+            ):
+                return self.error_page("Offer 语言学校字段尚未完成数据库升级，请联系管理员。", 400)
         if module == "Forms":
             requested_contract_id = str(stored_form.get("contract_id") or "").strip()
             requested_contract = (
@@ -67073,6 +67135,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 ).strip() or "待确认学校"
                 if transfer_branch_snapshot:
                     school_name = transfer_branch_snapshot
+                language_key = f"extract_language_school_name_{index}"
+                language_school_name = (self.form[language_key] if language_key in self.form else stored_form.get("language_school_name") or "").strip()
                 offer_date_value = extraction_form_value(self.form, "offer_date", index) or stored_form.get("offer_date")
                 course_start_value = extraction_form_value(self.form, "course_start_date", index) or stored_form.get("course_start_date")
                 offer_expiry_value = extraction_form_value(self.form, "offer_expiry_date", index) or stored_form.get("offer_expiry_date")
@@ -67119,6 +67183,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             offer_id=business_record_id,document_id=int(document_id),
                             actor_user_id=int(self.user["id"]),occurred_at=lifecycle_stamp,
                         )
+                    save_offer_language_school(connection, business_record_id, student_id, language_school_name)
                     offer_classification = apply_offer_classification(
                         connection,business_record_id,school_name
                     )
@@ -67126,6 +67191,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     self.user, "extraction_review_confirmed", "offer", business_record_id, str(destination),
                     new_value=json.dumps({
                         "document_type": doc_type, "school_name": school_name,
+                        "language_school_name": language_school_name,
                         "offer_date": offer_date_value, "course_start_date": course_start_value,
                         "offer_expiry_date": offer_expiry_value,
                         "deposit_amount": deposit_amount, "deposit_currency": deposit_currency,
@@ -67557,6 +67623,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     offer_id=record_id,document_id=None,actor_user_id=int(self.user["id"]),
                     occurred_at=lifecycle_stamp,
                 )
+            save_offer_language_school(connection, record_id, student_id, self.form.get("language_school_name", ""))
             offer_classification = apply_offer_classification(
                 connection,record_id,school_name
             )
@@ -67651,6 +67718,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         float(deposit_amount) if deposit_amount else None, deposit_currency, offer_id, student_id,
                     ),
                 )
+            if "language_school_name" in self.form:
+                save_offer_language_school(connection, offer_id, student_id, self.form["language_school_name"])
             offer_classification = apply_offer_classification(connection, int(offer_id), school_name)
         db.audit(self.user, "update", "offers", offer_id, new_value="offer_fields_updated")
         if wants_json:
@@ -67660,6 +67729,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 "offer_id": offer_id,
                 "saved": {
                     "school_name": school_name,
+                    "language_school_name": str(self.form.get("language_school_name", offer_record_value(offer, "language_school_name")) or "").strip(),
                     "offer_date": offer_date_value,
                     "course_start_date": course_start_value,
                     "offer_expiry_date": offer_expiry_value,
@@ -70134,12 +70204,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         parent_contact = " / ".join(
             part for part in (contract["parent_phone"] or "", contract["parent_email"] or "") if str(part or "").strip()
         )
-        parent_relationship = ""
-        if student:
-            parent = db.one("SELECT * FROM parents WHERE student_id=? ORDER BY parent_type LIMIT 1", (student["student_id"],))
-            if parent:
-                parent_relationship = parent["parent_type"] or ""
-        parent_relationship = parent_relationship or "父母/监护人"
+        # Match the relationship frozen into this contract's body, not the
+        # first parent in the student's current profile.
+        snapshot = snapshot_payload(contract["standalone_data_json"])
+        parent_relationship = (
+            contract_display_binding_value(snapshot.get("display_bindings"), "guardian_relationship")
+            or (snapshot.get("signer") or {}).get("relationship")
+            or snapshot.get("parent_signer_relationship")
+            or (snapshot.get("contract_instance") or {}).get("parent_signer_relationship")
+            or "父母/监护人"
+        )
         folder = CONTRACT_SIGNING_DIR / str(contract["id"])
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / f"contract_signature_confirmation_{signature_id}.pdf"
@@ -70179,9 +70253,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             nas.require_student_file_readable(student, contract["contract_file_path"])
         source_pdf = self.contract_signing_source_pdf(contract)
         require_transfer_pdf_file(contract, source_pdf)
-        confirmation_pdf = Path(signature["confirmation_pdf_path"]).resolve() if signature["confirmation_pdf_path"] else None
-        if not confirmation_pdf or not confirmation_pdf.is_file():
-            confirmation_pdf = self.contract_signing_generate_confirmation_pdf(signature_id)
+        # Rebuild on retry so an earlier confirmation with incorrect signer
+        # details is not reused in the complete PDF. The saved signing date stays fixed.
+        confirmation_pdf = self.contract_signing_generate_confirmation_pdf(signature_id)
         archive_folder = CONTRACT_SIGNING_DIR / str(contract["id"]) / "archive"
         archive_folder.mkdir(parents=True, exist_ok=True)
         parent_signed_pdf = archive_folder / f"parent_signed_contract_body_{signature_id}.pdf"
@@ -70600,6 +70674,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     link["bound_wechat_unionid"] or "", link["bound_wechat_nickname"] or "已验证用户", str(signature_path),
                     statement, "signed", "pending", stamp, stamp,
                 ),
+            )
+            # Persist the parent's completed step before fallible PDF generation.
+            # A failed AAIE archive must not leave this contract awaiting a parent.
+            db.execute(
+                """UPDATE contracts SET contract_status='ParentSigned',
+                       signed_at=?,updated_at=?
+                   WHERE id=? AND contract_status NOT IN ('FullyExecuted','Voided','Deleted')
+                     AND deleted_at IS NULL AND voided_at IS NULL""",
+                (stamp, stamp, link["contract_id"]),
             )
             emit_contract_business_event(
                 db.one("SELECT * FROM contracts WHERE id=?", (link["contract_id"],)),

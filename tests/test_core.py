@@ -7356,22 +7356,12 @@ class CoreTests(unittest.TestCase):
         tile.save(tile_buffer, format="PNG")
         tile_payload = tile_buffer.getvalue()
 
-        class FakeTileResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def read(self):
-                return tile_payload
-
         with tempfile.TemporaryDirectory() as folder:
             with mock.patch.object(app_module, "APP_DIR", Path(folder)), mock.patch.object(
-                app_module.urllib.request,
-                "urlopen",
-                return_value=FakeTileResponse(),
-            ) as fake_urlopen:
+                app_module,
+                "load_school_map_tile",
+                return_value=Image.open(io.BytesIO(tile_payload)).convert("RGB"),
+            ) as fake_tiles:
                 first = handler.school_plan_snapshot_static_map_data_uri(
                     school,
                     {"latitude": "-37.9090", "longitude": "145.0380", "sa2_name": "McKinnon - Ormond"},
@@ -7383,7 +7373,7 @@ class CoreTests(unittest.TestCase):
 
         self.assertTrue(first.startswith("data:image/png;base64,"))
         self.assertEqual(first, second)
-        self.assertGreater(fake_urlopen.call_count, 0)
+        self.assertGreater(fake_tiles.call_count, 0)
         source = Path("app.py").read_text(encoding="utf-8")
         map_source = source[
             source.index("def school_plan_snapshot_static_map_data_uri"):

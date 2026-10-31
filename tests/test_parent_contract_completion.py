@@ -259,6 +259,9 @@ class ParentSubmissionTests(ParentCompletionFixture):
             self.h.contract_signing_submit('POST',self.token)
         signature=self.db.one('SELECT * FROM contract_signatures WHERE link_id=?',(self.lid,))
         self.assertEqual(signature['archive_status'],'failed')
+        contract=self.db.one('SELECT * FROM contracts WHERE id=?',(self.cid,))
+        self.assertEqual(contract['contract_status'],'ParentSigned')
+        self.assertEqual(contract['signed_at'],signature['signed_at'])
         parent_bytes=Path(signature['signature_image_path']).read_bytes()
         self.assertTrue(parent_bytes)
         self.assertNotIn('/final/download',self.output['html'])
@@ -272,6 +275,18 @@ class ParentSubmissionTests(ParentCompletionFixture):
         final=app.PdfReader(result['final_document_path'])
         self.assertIn('2026年10月30日',final.pages[-2].extract_text())
         self.assertNotIn('2026年11月02日',final.pages[-2].extract_text())
+
+    def test_archive_retry_rebuilds_confirmation_from_contract_snapshot(self):
+        self.prepare_submission()
+        self.h.contract_signing_submit('POST',self.token)
+        signature=self.db.one('SELECT * FROM contract_signatures WHERE link_id=?',(self.lid,))
+        cached=Path(signature['confirmation_pdf_path'])
+        old=canvas.Canvas(str(cached));old.drawString(50,700,'STALE CONFIRMATION father');old.save()
+        self.db.execute("UPDATE contracts SET standalone_data_json=? WHERE id=?", (json.dumps({'contract_snapshot': {'signer': {'relationship': '母亲'}}}), self.cid))
+        result=self.h.contract_signing_archive_documents(signature['id'])
+        final=app.PdfReader(result['final_document_path'])
+        self.assertIn('乙方与学生关系\n母亲',final.pages[-1].extract_text())
+        self.assertNotIn('STALE CONFIRMATION',final.pages[-1].extract_text())
 
     def test_signature_record_failure_does_not_promise_recoverable_signature(self):
         self.prepare_submission()
@@ -287,3 +302,23 @@ class ParentSubmissionTests(ParentCompletionFixture):
         self.assertIn('签署未完成',self.output['html'])
         self.assertEqual(self.db.one('SELECT COUNT(*) AS n FROM contract_signatures WHERE link_id=?',(self.lid,))['n'],0)
         self.assertEqual(self.db.one('SELECT status FROM contract_signing_links WHERE id=?',(self.lid,))['status'],'active')
+        self.assertEqual(self.db.one('SELECT contract_status FROM contracts WHERE id=?',(self.cid,))['contract_status'],'Sent')
+
+
+class ConfirmationRelationshipTests(ParentCompletionFixture):
+    def test_confirmation_uses_contract_relationship_not_first_parent(self):
+        self.db.execute("INSERT INTO parents(student_id,parent_type,passport_first_name) VALUES(?,?,?)", ('SIGNTEST','father','Other Parent'))
+        cases = [
+            ({'display_bindings': {'fields': {'guardian_relationship': {'value': '母亲'}}}, 'signer': {'relationship': '父亲'}}, '母亲'),
+            ({'signer': {'relationship': '父亲'}}, '父亲'),
+            ({'parent_signer_relationship': '祖母'}, '祖母'),
+            ({}, '父母/监护人'),
+        ]
+        with patch.object(app, 'CONTRACT_SIGNING_DIR', self.root/'signing'):
+            for snapshot, expected in cases:
+                with self.subTest(expected=expected):
+                    self.db.execute("UPDATE contracts SET standalone_data_json=? WHERE id=?", (json.dumps({'contract_snapshot': snapshot}), self.cid))
+                    target=self.h.contract_signing_generate_confirmation_pdf(self.sid)
+                    text=app.PdfReader(target).pages[0].extract_text()
+                    self.assertIn('乙方与学生关系\n'+expected, text)
+                    self.assertNotIn('\nfather\n', text)

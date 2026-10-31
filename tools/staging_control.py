@@ -16,7 +16,8 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from staging_environment import Staging, IsolationError, canonical
+from staging_environment import Staging, IsolationError, canonical, PRODUCTION_DEPLOYMENT, SCHOOL_REPORT_PDFUNITE
+from tools import school_map_tile_control
 DATA = ROOT / 'STAGING_DATA'
 CONFIG = DATA / 'staging.json'
 PYTHON = '/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3'
@@ -31,20 +32,29 @@ def sandbox_profile(c):
         '(version 1)', '(allow default)', '(deny file-write*)',
         f'(allow file-write* (subpath {q(c.root)}) (literal "/dev/null"))',
         '(deny file-read* (subpath "/Volumes/Server"))',
+        f'(deny file-read* (subpath {q(PRODUCTION_DEPLOYMENT)}))',
         '(deny file-read* (subpath "/Volumes/Zhang/AAIE CodeX/CRM/database"))',
         '(deny file-read* (literal "/Volumes/Zhang/AAIE CodeX/CRM/.env") (literal "/Volumes/Zhang/AAIE CodeX/CRM/.env.production") (literal "/Volumes/Zhang/AAIE CodeX/CRM/.env.local"))',
         '(deny network-outbound)', '(deny network-bind)', '(deny network-inbound)',
         f'(allow network-bind network-inbound (local ip "localhost:{c.admin_port}") (local ip "localhost:{c.parent_port}"))',
         *([f'(allow network-bind network-inbound (local ip "*:{c.admin_port}"))'] if c.admin_lan_ip else []),
-        f'(allow network-outbound (remote ip "localhost:{c.admin_port}") (remote ip "localhost:{c.parent_port}") (remote ip "localhost:8792") (remote ip "localhost:8790"))',
+        f'(allow network-outbound (remote ip "localhost:{c.admin_port}") (remote ip "localhost:{c.parent_port}"))',
+        f'(allow network-outbound (remote ip "localhost:{school_map_tile_control.port(c)}"))',
         '(deny file-read* (subpath "/Volumes"))',
+        # Candidate code may live on the external workspace volume. Read only this
+        # checkout; all writes stay confined to its isolated Staging data.
+        f'(allow file-read* (subpath {q(ROOT)}))',
         *[f'(allow file-read-metadata (literal {q(p)}))'
-          for p in sorted({parent for root in c.nas_read_roots for parent in root.parents if str(parent).startswith('/Volumes')})],
-        *[f'(allow file-read* (subpath {q(p)}))' for p in c.nas_read_roots],
+          for p in ROOT.parents if str(p).startswith('/Volumes')],
+        *[f'(allow file-read-metadata (literal {q(p)}))'
+          for p in sorted({parent for root in c.read_roots for parent in root.parents if str(parent).startswith('/Volumes')})],
+        *[f'(allow file-read* (subpath {q(p)}))' for p in c.read_roots],
         *[f'(allow file-write* (subpath {q(p)}))' for p in c.nas_write_roots],
-        '(allow process-fork)' if c.nas_read_roots else '(deny process-fork)',
+        '(allow process-fork)',
         '(deny signal)', '(deny process-exec)',
         f'(allow process-exec (literal {q(Path(PYTHON).resolve())}) (literal {q(PYTHON)}))',
+        f'(allow process-exec (literal {q(c.root / "tools/document-vision-ocr")}))',
+        *([f'(allow process-exec (literal {q(SCHOOL_REPORT_PDFUNITE)}))'] if c.school_library_read_roots else []),
     ]) + '\n'
 
 
@@ -58,9 +68,9 @@ def environment(c):
             # Production launchers never consume this environment.
             'AAIE_STAGING_BIND_HOST': c.bind_host('admin'),
             'AAIE_CRM_DB_PERF_LOG':'0',
-            'AAIE_CRM_CONTENT_EXTRACTION_SERVICE_URL':'http://127.0.0.1:8792',
+            'AAIE_CRM_CONTENT_EXTRACTION_SERVICE_URL':'http://127.0.0.1:18892',
             'AAIE_CRM_BACKUP_DIR':str(c.root/'backups'),
-            'AAIE_CRM_SCHOOL_LIBRARY_DIR':str(c.nas_read_roots[1] if c.nas_read_roots else c.root/'school_library_files'),
+            'AAIE_CRM_SCHOOL_LIBRARY_DIR':str(c.school_library_read_roots[0] if c.school_library_read_roots else c.root/'school_library_files'),
             'AAIE_CRM_SECURE_ASSET_DIR':str(c.root/'secure_assets'),
             'AAIE_CRM_CONTENT_REPORT_DIR':str(c.root/'import_reports'),
             'REVENUE_SECURE_STORAGE_ROOT':str(c.root/'revenue_documents'),
@@ -77,7 +87,7 @@ def prepare():
         # Canonical fixed location; refuse parent aliases before mkdir/write.
         canonical(DATA)
         DATA.mkdir(exist_ok=True)
-        CONFIG.write_text(json.dumps({'mode':'staging','root':str(DATA),'admin_port':8780,'parent_port':8781,'namespace':'aaie_staging_'},indent=2)+'\n')
+        CONFIG.write_text(json.dumps({'mode':'staging','root':str(DATA),'admin_port':18880,'parent_port':18881,'namespace':'aaie_staging_'},indent=2)+'\n')
     c=load()
     for name in ['database','storage','logs','tmp','home','cache','backups']:
         c.check(c.root/name).mkdir(exist_ok=True)
@@ -123,6 +133,7 @@ def stop(c):
             time.sleep(.1)
         else: raise IsolationError('Staging did not stop; no force kill')
         path.unlink()
+    school_map_tile_control.stop(c)
 
 
 def require_stopped(c):
@@ -161,6 +172,9 @@ def start(c):
     bind_host = environment(c)['AAIE_STAGING_BIND_HOST']
     if bind_host not in {'127.0.0.1', '0.0.0.0'}:
         raise IsolationError('Invalid Staging bind host')
+    # Rebuild the service profile so normal restart also enables the map endpoint.
+    c.check(c.root/'staging.sb').write_text(sandbox_profile(c))
+    school_map_tile_control.start(c)
     for role,port in [('admin',c.admin_port),('parent',c.parent_port)]:
         bind_host = c.bind_host(role)
         with c.check(c.root/f'logs/{role}.log').open('ab') as log:
@@ -208,6 +222,10 @@ def reset(c,what):
 def main():
     p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','init','migrate','start','stop','restart','status','reset-db','reset-storage']);a=p.parse_args()
     c=prepare() if a.action=='prepare' else load()
+    if a.action in {'start', 'restart'}:
+        # Compile/verify before stopping a healthy service, never in an upload request.
+        from tools.build_document_ocr import build
+        build()
     if a.action=='init':initialize(c)
     elif a.action=='migrate':migrate(c)
     elif a.action=='start':start(c)

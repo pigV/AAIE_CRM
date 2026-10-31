@@ -1658,7 +1658,10 @@
     const sourceFields = q("[data-contract-transfer-source-fields]", form);
     if (sourceFields) {
       sourceFields.hidden = !sourceAuthoritativeTransfer;
-      qa("select", sourceFields).forEach((control) => { control.disabled = !sourceAuthoritativeTransfer; });
+      qa("select", sourceFields).forEach((control) => {
+        control.disabled = !sourceAuthoritativeTransfer || control.dataset.sourceEmpty === "true"
+          || control.dataset.sourceLocked === "true";
+      });
     }
     const sourceFee = parseMoney(form.dataset.contractTransferFeeAuthority || "");
     const sourceHold = sourceAuthoritativeTransfer && (

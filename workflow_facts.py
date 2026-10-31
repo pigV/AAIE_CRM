@@ -97,6 +97,26 @@ def load_workflow_facts(
     ).fetchall():
         state[int(row[0])]["parent_form_submitted"] = row[1] is not None
 
+    # Older fixtures predate online signatures. In current databases, a saved
+    # signature is authoritative even if PDF generation left the contract Sent.
+    has_signatures = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='contract_signatures'"
+    ).fetchone() is not None
+    saved_signature = "0"
+    archive_complete = "1"
+    if has_signatures:
+        saved_signature = """EXISTS (
+            SELECT 1 FROM contract_signatures signature
+             WHERE signature.contract_id=contract.id
+               AND signature.student_id=contract.student_id
+               AND signature.status='signed')"""
+        archive_complete = """COALESCE((
+            SELECT COALESCE(signature.archive_status, '')='archived'
+              FROM contract_signatures signature
+             WHERE signature.contract_id=contract.id
+               AND signature.student_id=contract.student_id
+               AND signature.status='signed'
+             ORDER BY signature.id DESC LIMIT 1), 1)"""
     for row in conn.execute(
         f"""
         SELECT contract.application_cycle_id,
@@ -109,6 +129,11 @@ def load_workflow_facts(
                max(CASE WHEN contract.signed_at IS NOT NULL
                           OR contract.fully_executed_at IS NOT NULL
                           OR contract.contract_status IN ('ParentSigned','FullyExecuted')
+                          OR {saved_signature}
+                        THEN 1 ELSE 0 END),
+               max(CASE WHEN (contract.contract_status='FullyExecuted'
+                              OR contract.fully_executed_at IS NOT NULL)
+                             AND {archive_complete}
                         THEN 1 ELSE 0 END)
         FROM contracts AS contract
         LEFT JOIN contract_signing_links AS signing ON signing.contract_id=contract.id
@@ -121,6 +146,7 @@ def load_workflow_facts(
         values["contract_exists"] = int(row[1]) > 0
         values["contract_ready_for_signature"] = bool(row[2])
         values["contract_signed"] = bool(row[3])
+        values["contract_execution_pending"] = bool(row[3]) and not bool(row[4])
 
     progression_case_columns = {
         str(row[1])

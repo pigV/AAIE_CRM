@@ -772,23 +772,27 @@ class RevenueOperationalOrchestrator:
         message: str, severity: str = "blocking",
     ):
         self._require_admin()
-        prior = self.connection.execute(
-            """SELECT * FROM revenue_exceptions
-                WHERE exception_code=? AND aggregate_type=? AND aggregate_uid=?
-                  AND status='open'""",
-            (exception_code, aggregate_type, aggregate_uid),
-        ).fetchone()
-        if prior:
-            return dict(prior)
-        uid = new_uid("exception")
-        self.connection.execute(
-            """INSERT INTO revenue_exceptions(
-                 uid,exception_code,severity,aggregate_type,aggregate_uid,message,status,opened_at
-               ) VALUES(?,?,?,?,?,?,'open',?)""",
-            (uid, exception_code, severity, aggregate_type, aggregate_uid,
-             message, self.repository.now()),
-        )
-        return self.repository.require_by_uid("revenue_exceptions", uid)
+        # Finish this write when called on a request-scoped connection, while
+        # preserving rollback ownership when a caller already has a transaction.
+        with self.repository.transaction():
+            prior = self.connection.execute(
+                """SELECT * FROM revenue_exceptions
+                    WHERE exception_code=? AND aggregate_type=? AND aggregate_uid=?
+                      AND status='open'""",
+                (exception_code, aggregate_type, aggregate_uid),
+            ).fetchone()
+            if prior:
+                return dict(prior)
+            uid = new_uid("exception")
+            self.connection.execute(
+                """INSERT INTO revenue_exceptions(
+                     uid,exception_code,severity,aggregate_type,aggregate_uid,message,status,opened_at
+                   ) VALUES(?,?,?,?,?,?,'open',?)""",
+                (uid, exception_code, severity, aggregate_type, aggregate_uid,
+                 message, self.repository.now()),
+            )
+            return self.repository.require_by_uid("revenue_exceptions", uid)
+
 
     def _school_entity_and_rule(self, school_id):
         if school_id is None:

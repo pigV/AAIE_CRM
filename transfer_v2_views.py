@@ -3,6 +3,7 @@ from __future__ import annotations
 from html import escape
 from pathlib import Path
 from typing import Mapping, Sequence
+from urllib.parse import quote
 from uuid import uuid4
 
 from lifecycle_workspace_ui import (
@@ -474,25 +475,67 @@ def render_transfer_source_evidence(
     )
 
 
-def render_transfer_contract_source_fields(options, *, error=""):
-    """Normal contract fields for ambiguous source; never a separate save form."""
-    choices = '<option value="">请选择本次家长资料</option>'
-    for row in options.get('intakes', ()):
-        choices += (f'<option value="{escape(str(row["token"]), quote=True)}">'
-                    f'新学生转学 · {escape(str(row.get("submitted_at") or ""))}</option>')
-    existing = '<option value="">请选择当前在读及历史申请资料</option>'
+def render_transfer_contract_source_fields(options, *, error="", authority=None):
+    """Show usable choices and explain missing records without weakening source checks."""
+    intakes = options.get('intakes', ())
+    records = options.get('existing', ())
+    unique = len(intakes) + len(records) == 1
+    locked = bool(authority and authority.get('id'))
+    choices = '<option value="">' + ('请选择本次家长资料' if intakes else '暂无可用的新学生转学家长资料') + '</option>'
+    for index, row in enumerate(intakes, 1):
+        selected = ' selected' if (row['token'] == authority.get('parent_form_token') if locked else unique) else ''
+        choices += (f'<option value="{escape(str(row["token"]), quote=True)}"{selected}>'
+                    f'家长资料 {index} · 新学生转学 · 提交于 {escape(str(row.get("submitted_at") or ""))}</option>')
+    if locked and authority.get('parent_form_token') and not any(
+            row['token'] == authority['parent_form_token'] for row in intakes):
+        choices += (f'<option value="{escape(str(authority["parent_form_token"]), quote=True)}" selected disabled>'
+                    '已绑定家长资料（当前不可用，请核对原记录）</option>')
+    existing = '<option value="">' + ('请选择当前在读及历史申请资料' if records else '暂无可用的在读及历史申请资料') + '</option>'
     keys = ('current_enrolment_id', 'ordinary_relationship_cycle_id',
             'ordinary_relationship_contract_id', 'private_school_application_id',
             'public_application_group_id')
-    for row in options.get('existing', ()):
+    for row in records:
         value = ':'.join(str(int(row.get(key) or 0)) for key in keys)
-        label = str(row.get('current_school_name') or '当前学校') + ' · ' + str(row.get('proof_label') or '历史申请')
-        existing += f'<option value="{value}">{escape(label)}</option>'
+        proof = next((f'{label} #{row[key]}' for key, label in (
+            ('ordinary_relationship_contract_id', '合同'),
+            ('private_school_application_id', '私校申请'),
+            ('public_application_group_id', '公校申请')) if row.get(key)), '历史申请')
+        label = str(row.get('current_school_name') or '当前学校') + ' · ' + proof
+        if row.get('proof_date'):
+            label += ' · ' + str(row['proof_date'])
+        selected = ' selected' if (all(row.get(key) == authority.get(key) for key in keys) if locked else unique) else ''
+        existing += f'<option value="{value}"{selected}>{escape(label)}</option>'
+    if locked and authority.get('current_enrolment_id') and not any(
+            all(row.get(key) == authority.get(key) for key in keys) for row in records):
+        value = ':'.join(str(int(authority.get(key) or 0)) for key in keys)
+        existing += f'<option value="{value}" selected disabled>已绑定在读及历史申请资料（当前不可用，请核对原记录）</option>'
+    student_id = quote(str(options.get('student_id') or ''), safe='')
+    links = {
+        'parent': ('/parent-links', '查看家长表单'),
+        'enrolment': (f'/students/{student_id}/school-enrolments/current', '确认当前学校'),
+        'history': (f'/students/{student_id}?tab=contracts', '查看历史合同'),
+        'conflict': (f'/students/{student_id}?tab=profile', '核对学生资料'),
+    }
+    diagnostics = ''
+    for kind, message in options.get('issues', ()):
+        href, label = links[kind]
+        action = f' <a href="{escape(href, quote=True)}">{label}</a>' if student_id else ''
+        if kind == 'history' and student_id:
+            action += f' · <a href="/students/{student_id}?tab=applications">查看申请材料</a>'
+        diagnostics += f'<li>{escape(message)}{action}</li>'
+    if diagnostics:
+        diagnostics = '<details data-transfer-source-diagnostics open><summary>资料可用情况与补齐入口</summary><ul>' + diagnostics + '</ul></details>'
+    profile = (f'<p>当前学生：{escape(str(options["student_id"]))} · '
+               f'<a href="/students/{student_id}?tab=profile">查看学生及家长档案</a></p>') if student_id else ''
+    alert = f'<p role="alert">{escape(error)}</p>' if error else ''
+    if locked:
+        alert += '<p>本合同的转学来源已确认，显示已绑定资料；如需变更，请先核对合同及来源记录。</p>'
     return f'''<section class="contract-section" data-contract-transfer-source-fields hidden>
-      <h3>本次转学资料</h3><p role="alert">{escape(error)}</p>
-      <p>请确认本次使用的正常业务资料；资料冲突须先在原业务记录中解决。</p>
-      <label>新学生家长资料<select name="source_parent_form_token" disabled>{choices}</select></label>
-      <label>已有学生在读及历史申请资料<select name="source_existing_evidence" disabled>{existing}</select></label>
+      <h3>本次转学资料</h3>{profile}{alert}
+      <p>以下是当前学生的转学来源资料。新学生使用已提交的转学家长表单；已有学生使用已确认的在读及历史申请记录。按学生情况选择一类，无需两类都选。</p>
+      <label>新学生家长资料<select name="source_parent_form_token" data-source-empty="{str(not bool(intakes)).lower()}" data-source-locked="{str(locked).lower()}" disabled>{choices}</select></label>
+      <label>已有学生在读及历史申请资料<select name="source_existing_evidence" data-source-empty="{str(not bool(records)).lower()}" data-source-locked="{str(locked).lower()}" disabled>{existing}</select></label>
+      {diagnostics}
       </section>'''
 
 def render_transfer_v2_creation_form(

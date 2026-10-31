@@ -225,6 +225,64 @@ def list_source_options(connection, student_id):
     return {'intakes': intakes, 'existing': existing}
 
 
+def contract_source_options(connection, student_id):
+    """Read-only form context; incomplete records never become authority choices."""
+    options = list_source_options(connection, student_id)
+    options['student_id'] = str(student_id)
+    issues = options['issues'] = []
+    intakes = _rows(connection, '''SELECT intake_type,submitted_at,invalidated_at
+        FROM parent_form_tokens WHERE student_id=?''', (student_id,))
+    if not options['intakes'] and not options['existing']:
+        if not intakes:
+            issues.append(('parent', '没有关联到这位学生的家长表单。新学生转学需提交对应的家长表单。'))
+        else:
+            if any(row['invalidated_at'] is not None for row in intakes):
+                issues.append(('parent', '有关联家长表单已撤销，不能用于本次转学。'))
+            active = [row for row in intakes if row['invalidated_at'] is None]
+            if any(row['intake_type'] != 'new_student_transfer' for row in active):
+                issues.append(('parent', '已有家长表单的申请类型不是“新学生转学”，不能作为新学生转学来源。'))
+            if any(row['intake_type'] == 'new_student_transfer'
+                   and not str(row['submitted_at'] or '').strip() for row in active):
+                issues.append(('parent', '新学生转学家长表单尚未提交，提交后才可选择。'))
+    if not options['existing'] and not options['intakes']:
+        current = _rows(connection, '''SELECT id,confirmed_at FROM student_school_enrolments
+            WHERE student_id=? AND enrolment_role='current' AND status='active' ''', (student_id,))
+        if not current:
+            issues.append(('enrolment', '没有有效的当前在读记录，请先确认当前学校。'))
+        elif any(not str(row['confirmed_at'] or '').strip() for row in current):
+            issues.append(('enrolment', '当前在读记录尚未确认，请先确认当前学校。'))
+        # Include eligible historical proof even when its cycle link is missing,
+        # for explanation only. Never infer or write a historical association.
+        proofs = _rows(connection, '''
+            SELECT id,application_cycle_id,'合同' AS label FROM contracts
+            WHERE student_id=? AND contract_type IN
+              ('NewInternationalStudentContract','LocalStudentApplicationContract')
+              AND contract_status='FullyExecuted' AND deleted_at IS NULL AND voided_at IS NULL
+            UNION ALL SELECT id,application_cycle_id,'私校申请' FROM private_school_applications
+            WHERE student_id=? AND length(trim(COALESCE(submitted_at,'')))>0
+              AND status NOT IN ('draft','not_submitted')
+            UNION ALL SELECT id,application_cycle_id,'公校申请' FROM public_application_groups
+            WHERE student_id=? AND length(trim(COALESCE(submitted_at,'')))>0 AND status<>'draft'
+            ''', (student_id, student_id, student_id))
+        if not proofs:
+            issues.append(('history', '没有可用的已签普通申请合同或已递交学校申请记录。'))
+        for row in proofs:
+            cycle = connection.execute('''SELECT 1 FROM application_cycles
+                WHERE id=? AND student_id=? AND cycle_type='initial'
+                  AND education_stream='school_education' ''',
+                (row['application_cycle_id'], student_id)).fetchone()
+            if not cycle:
+                issues.append(('history', f'{row["label"]} #{row["id"]} 已存在，但未关联到这位学生的普通中小学申请周期；需由管理员核对历史业务关联，修改学生资料或上传材料不会自动建立关联。'))
+    elif options['existing']:
+        count = connection.execute('''SELECT count(*) FROM student_school_enrolments
+            WHERE student_id=? AND enrolment_role='current' AND status='active' ''', (student_id,)).fetchone()[0]
+        if count != 1:
+            issues.append(('enrolment', '存在多条当前在读记录，请先确认唯一的当前学校。'))
+    if options['intakes'] and options['existing']:
+        issues.append(('conflict', '新学生转学表单与已有学生申请记录冲突；请选择正确业务入口核对，不能仅靠选择其中一项消除冲突。'))
+    return options
+
+
 def save_authority(connection, student_id, transfer_contract_id, *, parent_form_token=None,
                    current_enrolment_id=None, ordinary_relationship_cycle_id=None,
                    ordinary_relationship_contract_id=None, private_school_application_id=None,
