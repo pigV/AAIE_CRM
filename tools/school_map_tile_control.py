@@ -35,6 +35,10 @@ def sandbox_profile(c):
         '(deny file-read* (subpath "/Users") (subpath "/Volumes"))',
         f'(allow file-read* (subpath {q(Path(PYTHON).parents[2])}) (literal {q(SCRIPT)}) (subpath {q(root(c))}))',
         *[f'(allow file-read-metadata (literal {q(parent)}))' for parent in SCRIPT.parents],
+        *([f'(allow file-read* (literal {q(SOURCE)}) (literal {q(SOURCE / "runtime_configuration.py")}) (literal {q(c.runtime_configuration.path)}))',
+           f'(allow file-read-metadata (subpath {q(c.root)}))',
+           *[f'(allow file-read-metadata (literal {q(p)}))' for p in c.root.parents]]
+          if getattr(c, 'runtime_configuration', None) is not None else []),
         '(deny network-outbound)', '(deny network-bind)', '(deny network-inbound)',
         f'(allow network-bind network-inbound (local ip "localhost:{port(c)}"))',
         '(allow network-outbound (remote ip "*:443") (remote unix-socket))',
@@ -44,6 +48,9 @@ def sandbox_profile(c):
 
 
 def prepare(c):
+    if getattr(c, 'runtime_configuration', None) is not None:
+        from tools.runtime_control import prepare_managed_map
+        return prepare_managed_map(c)
     folder = root(c)
     folder.mkdir(exist_ok=True)
     (folder/'sandbox.sb').write_text(sandbox_profile(c))
@@ -59,6 +66,9 @@ def health(c):
 
 
 def verify_process(c, record):
+    if getattr(c, 'runtime_configuration', None) is not None:
+        from tools.runtime_control import verify_process
+        return verify_process(c.runtime_configuration, 'map', record)
     observed = subprocess.check_output(['/bin/ps', '-p', str(record['pid']), '-o', 'command='], text=True).strip()
     started = subprocess.check_output(['/bin/ps', '-p', str(record['pid']), '-o', 'lstart='], text=True).strip()
     if (str(SCRIPT) not in observed or f'--root {root(c)} --port {port(c)}' not in observed
@@ -67,6 +77,9 @@ def verify_process(c, record):
 
 
 def start(c):
+    if getattr(c, 'runtime_configuration', None) is not None:
+        from tools.runtime_control import start_managed_map
+        return start_managed_map(c)
     prepare(c)
     state = root(c)/'pid.json'
     if state.exists():
@@ -77,6 +90,8 @@ def start(c):
         return
     command = ['/usr/bin/sandbox-exec', '-f', str(root(c)/'sandbox.sb'), PYTHON, '-B',
                str(SCRIPT), '--root', str(root(c)), '--port', str(port(c))]
+    if getattr(c, 'runtime_configuration', None) is not None:
+        command.extend(['--runtime-config', str(c.runtime_configuration.path)])
     with (root(c)/'service.log').open('ab') as log:
         proc = subprocess.Popen(command, cwd=root(c), env={'PATH':'/usr/bin:/bin',
                                 'PYTHONDONTWRITEBYTECODE':'1', 'PYTHONNOUSERSITE':'1'},
@@ -102,6 +117,9 @@ def start(c):
 
 
 def stop(c):
+    if getattr(c, 'runtime_configuration', None) is not None:
+        from tools.runtime_control import stop_one
+        return stop_one(c.runtime_configuration, 'map')
     state = root(c)/'pid.json'
     if not state.exists():
         return

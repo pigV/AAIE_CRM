@@ -140,9 +140,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', required=True, type=Path)
     parser.add_argument('--port', required=True, type=int)
+    parser.add_argument('--runtime-config')
     args = parser.parse_args()
     expected = Path(__file__).resolve().parent/'STAGING_DATA/map_tile_service'
-    if args.root.resolve() != expected or args.root.is_symlink():
+    if args.runtime_config:
+        from runtime_configuration import RuntimeConfiguration, canonical
+        config = RuntimeConfiguration.load(args.runtime_config, source_root=Path(__file__).resolve().parent)
+        expected = config.root / 'map_tile_service'
+        if canonical(args.root) != expected or args.port != config.map_port:
+            parser.error('Managed map service identity mismatch')
+    elif args.root.resolve() != expected or args.root.is_symlink():
         parser.error('Map service must use this checkout STAGING_DATA/map_tile_service')
     with make_server(args.root, args.port) as server:
         server.serve_forever()

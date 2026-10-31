@@ -64,7 +64,8 @@ class NasManager:
     def status(self):
         if STAGING:
             root = STAGING.check(STAGING.storage)
-            return {"mounted": True, "mode": "staging", "production_enabled": False,
+            mode = getattr(STAGING, "mode", "staging")
+            return {"mounted": True, "mode": mode, "production_enabled": mode == "production",
                     "production_locked": True, "root": str(root), "root_error": "",
                     "root_exists": root.is_dir(), "readable": os.access(root, os.R_OK),
                     "writable": os.access(root, os.W_OK), "access_error_code": "",

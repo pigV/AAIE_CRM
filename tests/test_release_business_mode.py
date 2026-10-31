@@ -75,7 +75,7 @@ class RequestClassificationTests(unittest.TestCase):
     def test_actual_health_reports_gate_capability(self):
         source = ast.parse((Path(__file__).resolve().parents[1] / 'app.py').read_text())
         node = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == 'basic_health_payload')
-        values = {'DB_PATH': SimpleNamespace(is_file=lambda:True),
+        values = {'STAGING': None, 'DB_PATH': SimpleNamespace(is_file=lambda:True),
                   'APP_DIR':SimpleNamespace(is_dir=lambda:True),
                   'os':SimpleNamespace(access=lambda *a:True,R_OK=1,W_OK=2),
                   'nas':SimpleNamespace(status=lambda:{'ready':True}),

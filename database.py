@@ -31,7 +31,7 @@ def _db_perf_log(event, message="", **details):
     if not _db_perf_enabled():
         return
     try:
-        log_dir = Path(__file__).resolve().parent / "logs"
+        log_dir = (STAGING.root if STAGING else Path(__file__).resolve().parent) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         pieces = [now_iso(), event]
         if message:

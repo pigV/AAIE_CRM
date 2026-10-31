@@ -168,7 +168,7 @@ class Staging:
                 with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=2) as response:
                     data = json.load(response)
                 healthy = healthy and all(data.get(k) == v for k, v in {
-                    'status': 'ok', 'environment': 'staging', 'service': role,
+                    'status': 'ok', 'environment': getattr(self, 'mode', 'staging'), 'service': role,
                     'port': port, 'database_path': str(self.db),
                     'storage_path': str(self.storage)}.items())
             except (OSError, ValueError):
@@ -261,8 +261,48 @@ class Staging:
         sys.addaudithook(hook)
 
 
+@dataclass(frozen=True)
+class ManagedRuntime(Staging):
+    """Explicit external data root; legacy Staging.load remains source-local."""
+    runtime_configuration: object
+
+    @classmethod
+    def from_configuration(cls, config):
+        return cls(config.root, config.admin_port, config.parent_port,
+                   config.namespace, config)
+
+    @property
+    def db(self): return self.runtime_configuration.db
+
+    @property
+    def mode(self): return self.runtime_configuration.mode
+
+    def assert_sandbox(self):
+        super().assert_sandbox()
+        lib = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+        lib.sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        lib.sandbox_check.restype = ctypes.c_int
+        # No managed process may modify code. Staging cannot access production.
+        targets = [self.runtime_configuration.source_root / 'app.py']
+        if self.mode == 'staging':
+            targets.append(self.runtime_configuration.source_root.parent /
+                           'runtime/production/database/staging.db')
+        for target in targets:
+            if lib.sandbox_check(os.getpid(), b'file-write-data', 1, str(target).encode()) != 1:
+                raise IsolationError('Managed runtime OS confinement missing')
+
+
 ACTIVE = None
-if os.environ.get('AAIE_CRM_ENV') == 'staging':
+if os.environ.get('AAIE_CRM_RUNTIME_CONFIG'):
+    from runtime_configuration import RuntimeConfiguration
+    config = RuntimeConfiguration.load(os.environ['AAIE_CRM_RUNTIME_CONFIG'], source_root=SOURCE)
+    if os.environ.get('AAIE_STAGING_CONFIG') or os.environ.get('AAIE_CRM_ENV') != config.mode:
+        raise IsolationError('Conflicting runtime environment')
+    ACTIVE = ManagedRuntime.from_configuration(config)
+    ACTIVE.assert_sandbox()
+    config.require_ready()
+    ACTIVE.install_audit()
+elif os.environ.get('AAIE_CRM_ENV') == 'staging':
     ACTIVE = Staging.load(os.environ.get('AAIE_STAGING_CONFIG', ''))
     ACTIVE.assert_sandbox()
     ACTIVE.install_audit()

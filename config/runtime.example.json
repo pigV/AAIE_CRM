@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "mode": "staging",
+  "root": "/Volumes/Zhang/AAIE CodeX/CRM/releases/runtime/staging/example",
+  "database": "staging.db",
+  "admin_port": 29880,
+  "parent_port": 29881,
+  "extraction_port": 29892,
+  "namespace": "aaie_staging_example_"
+}

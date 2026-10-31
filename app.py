@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 from staging_environment import ACTIVE as STAGING, SOURCE as SOURCE_DIR, SCHOOL_REPORT_PDFUNITE
+if STAGING is None and (SOURCE_DIR.parent / "runtime").is_dir():
+    raise RuntimeError("Separated layout requires tools/runtime_control.py and an explicit runtime config")
 if STAGING is None and (SOURCE_DIR / "STAGING_DATA/staging.json").exists():
     raise RuntimeError("Staging must be started through tools/staging_control.py")
 from agent_reach_permissions import can_access_agent_reach
@@ -517,7 +519,7 @@ def safe_production_database_preflight():
 
 if not STAGING:
     load_canonical_production_environment()
-CONTENT_EXTRACTION_VENDOR_DIR = APP_DIR / "vendor" / "content_extraction"
+CONTENT_EXTRACTION_VENDOR_DIR = SOURCE_DIR / "vendor" / "content_extraction"
 CONTENT_EXTRACTION_RUNTIME_DIR = APP_DIR / "cache" / "content_extractions" / "runtime"
 CONTENT_EXTRACTION_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(CONTENT_EXTRACTION_RUNTIME_DIR / "paddlex"))
@@ -2733,6 +2735,10 @@ def extract_school_features_from_official_url(official_url, tags=None, max_pdfs=
 
 
 def ensure_dirs():
+    managed = getattr(STAGING, "runtime_configuration", None)
+    if managed is not None:
+        managed.require_ready()
+        return
     for path in (LOCAL_BACKUP_DIR, PREVIEW_DIR, SCHOOL_PLAN_REPORT_DIR, SCHOOL_PLAN_CONFIRMATION_DIR, CONTRACT_SIGNING_DIR, UPLOAD_REVIEW_DIR, ASSET_DIR, LOG_DIR, TEMPLATE_DIR, MANAGED_TEMPLATE_DIR, TEMPLATE_ARCHIVE_DIR, BETTER_EDUCATION_IMPORT_DIR, SECRET_PATH.parent):
         if not (STAGING and path == ASSET_DIR):
             path.mkdir(parents=True, exist_ok=True)
@@ -3386,7 +3392,8 @@ def basic_health_payload(service_mode, port):
         "port": port,
         "timestamp": now_iso(),
         "version": VERSION,
-        **({"environment": "staging", "database_path": str(DB_PATH), "storage_path": str(STAGING.storage), "pid": os.getpid()} if STAGING else {}),
+        **({"environment": getattr(STAGING, "mode", "staging"), "database_path": str(DB_PATH), "storage_path": str(STAGING.storage), "pid": os.getpid()} if STAGING else {}),
+        **({"source_root": str(SOURCE_DIR), "config_sha256": STAGING.runtime_configuration.config_sha256} if getattr(STAGING, "runtime_configuration", None) is not None else {}),
         "business_write_gate": APP_WRITE_GATE.status() if APP_WRITE_GATE is not None else {"state": "NOT_CONFIGURED"},
         "dependencies": {
             "database": database_status,
@@ -5053,7 +5060,7 @@ def file_manager_root():
 def file_manager_resolve(year="", student="", folder="", file_name=""):
     root = file_manager_root()
     if year and safe_file_manager_component(year, "年份") != root.name:
-        raise NasSafetyError("MVP 阶段 File Manager 只能访问当前 CRM_TEST 根目录")
+        raise NasSafetyError("文件管理只能访问当前已授权的学生存储根目录")
     target = root
     student_name = ""
     module_folder = ""
@@ -17471,7 +17478,7 @@ def bettereducation_playwright_command(payload_path, output_path, artifact_dir):
         node_bin = Path(shutil.which("node") or "")
     if not node_bin or not node_bin.exists():
         raise RuntimeError("Node.js runtime is not available for Better Education Playwright fetch.")
-    script_path = APP_DIR / "scripts" / "bettereducation_playwright_fetch.js"
+    script_path = SOURCE_DIR / "scripts" / "bettereducation_playwright_fetch.js"
     if not script_path.exists():
         raise RuntimeError("Better Education Playwright worker script is missing.")
     env = os.environ.copy()
@@ -18091,7 +18098,7 @@ def content_extraction_dependency_status():
         "whisper": optional_module_available("whisper"),
         "paddleocr": optional_module_available("paddleocr"),
         "opencv": optional_module_available("cv2"),
-        "macos_vision_ocr": (APP_DIR / "tools" / "macos_vision_ocr.swift").exists(),
+        "macos_vision_ocr": (SOURCE_DIR / "tools" / "macos_vision_ocr.swift").exists(),
         "openai": optional_module_available("openai"),
     }
 
@@ -19394,9 +19401,9 @@ def wechat_oauth_startup_messages():
     callback_url = wechat_setting_value(WECHAT_OAUTH_CALLBACK_URL_SETTING) or f"{parent_form_base_url()}{WECHAT_OAUTH_CALLBACK_PATH}"
     scope = wechat_oauth_scope()
     if not app_id:
-        messages.append("WECHAT_APP_ID 未配置，微信网页授权将保持本地测试模式。")
+        messages.append("WECHAT_APP_ID 未配置，微信网页授权暂不可用。")
     if not app_secret:
-        messages.append("WECHAT_APP_SECRET 未配置，微信网页授权将保持本地测试模式。")
+        messages.append("WECHAT_APP_SECRET 未配置，微信网页授权暂不可用。")
     if callback_url != WECHAT_EXPECTED_CALLBACK_URL:
         messages.append(f"WECHAT_OAUTH_CALLBACK_URL 当前为 {callback_url}，正式建议使用 {WECHAT_EXPECTED_CALLBACK_URL}。")
     if scope != "snsapi_userinfo":
@@ -19696,7 +19703,7 @@ def google_drive_api_disabled_message(detail=""):
     )
     return (
         "Google Drive API 尚未在当前 Google Cloud 项目中启用，CRM 暂时无法读取 Drive 文件。"
-        "请用创建 OAuth Client ID 的同一个 Google Cloud 项目打开 Google Drive API，等待几分钟后再测试。"
+        "请用创建 OAuth Client ID 的同一个 Google Cloud 项目打开 Google Drive API，等待几分钟后重试。"
         f" 启用地址：{console_url}"
     )
 
@@ -21481,8 +21488,8 @@ def render_pdf_page(data, page_number=1):
 
 def preview_font(size=18, bold=False):
     candidates = [
-        APP_DIR / "assets" / "fonts" / "noto-sans-cjk-sc" / ("NotoSansSC-Bold.ttf" if bold else "NotoSansSC-Regular.ttf"),
-        APP_DIR / "assets" / "fonts" / "noto-sans-cjk-sc" / ("NotoSansCJKsc-Bold.otf" if bold else "NotoSansCJKsc-Regular.otf"),
+        SOURCE_DIR / "assets" / "fonts" / "noto-sans-cjk-sc" / ("NotoSansSC-Bold.ttf" if bold else "NotoSansSC-Regular.ttf"),
+        SOURCE_DIR / "assets" / "fonts" / "noto-sans-cjk-sc" / ("NotoSansCJKsc-Bold.otf" if bold else "NotoSansCJKsc-Regular.otf"),
         Path("/System/Library/Fonts/PingFang.ttc"),
         Path("/System/Library/Fonts/STHeiti Medium.ttc"),
         Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
@@ -27786,9 +27793,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if method == "GET":
             message, kind = self.message()
             notice = f'<div class="notice {esc(kind)}">{esc(message)}</div>' if message else ""
+            environment_notice = "内部系统 · 正式生产环境" if getattr(STAGING, "mode", None) == "production" else "内部系统 · 员工专用"
             body = f"""
             <div class="login-layout"><div class="login-brand"><div class="brand-mark large-mark">A</div>
-              <h1>AAIE CRM</h1><p>留学服务学生流程管理</p><div class="security-note">内部系统 · Test Mode 默认启用</div></div>
+              <h1>AAIE CRM</h1><p>留学服务学生流程管理</p><div class="security-note">{environment_notice}</div></div>
               <form class="login-card" method="post" action="/login"><h2>员工登录</h2>{notice}
                 <label>用户名<input name="username" autocomplete="username" required autofocus></label>
                 <label>密码<input type="password" name="password" autocomplete="current-password" required></label>
@@ -37575,7 +37583,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     self.headers.get("User-Agent"), json.dumps({"expired_at": stamp, "reason": "manual_test"}, ensure_ascii=False),
                 ),
             )
-            return self.flash_redirect(f"/school-plan-reports/{report_id}", "安全链接已设置为过期，可用于测试过期拦截。")
+            return self.flash_redirect(f"/school-plan-reports/{report_id}", "安全链接已设置为过期，原链接已不可访问。")
         if action == "unbind":
             link = db.one("SELECT * FROM school_plan_report_links WHERE report_id=? AND status='active' ORDER BY id DESC LIMIT 1", (report_id,))
             if not link:
@@ -61059,21 +61067,21 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         else:
             auth_control = f"""
             <form method="post" action="/visa-information-collection/{esc(token)}/wechat-login">
-              <label>微信昵称<input name="wechat_nickname" placeholder="请输入微信昵称" required></label>
-              <label>OpenID / 测试识别码<input name="wechat_openid" placeholder="本地测试可填写微信备注" required><small>正式上线后这里会由微信 OAuth 自动返回，家长无需手动填写。</small></label>
-              <div class="share-actions"><button type="submit">微信验证并继续</button></div>
+              <label>昵称<input name="wechat_nickname" placeholder="请输入昵称" required></label>
+              <label>访问识别码<input name="wechat_openid" placeholder="请设置一个便于记住的识别码" required><small>后续访问请使用相同识别码。</small></label>
+              <div class="share-actions"><button type="submit">确认身份并继续</button></div>
             </form>
-            <p class="muted-line">当前为本地测试模式；正式环境会复用学校方案家长安全链接的微信 OAuth 认证。</p>
+            <p class="muted-line">请记住本次填写的身份信息，以便继续填写、保存和提交。</p>
             """
         body = f"""
         <section class="panel">
-          <h1>请先完成微信身份验证</h1>
-          <p>该信息采集链接为填写人专属链接。首次验证后，本链接将绑定当前微信身份，之后仅允许同一微信继续填写、保存和提交。</p>
+          <h1>请先完成身份确认</h1>
+          <p>该信息采集链接为填写人专属链接。首次确认后，本链接将绑定当前身份，之后请使用相同身份信息继续填写、保存和提交。</p>
           <div class="viewer-lock-note">填写人：{esc(respondent["respondent_name"] or self.visa_information_collection_respondent_type_label(respondent["respondent_type"]))} · 有效期至 {esc(self.visa_information_collection_display_datetime(respondent["expires_at"]))}</div>
           {auth_control}
         </section>
         """
-        return self.visa_information_collection_public_page("微信验证", body)
+        return self.visa_information_collection_public_page("身份确认", body)
 
     def visa_information_collection_wechat_login(self, method, token):
         respondent = self.visa_information_collection_token_row(token)
@@ -70378,20 +70386,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         else:
             auth_control = f"""
             <form method="post" action="/contract-sign/{esc(token)}/login">
-              <label>微信昵称<input name="wechat_nickname" placeholder="请输入微信昵称" required></label>
-              <label>OpenID / 测试识别码<input name="wechat_openid" placeholder="本地测试可填写手机号后四位或微信备注" required><small>正式上线后这里会由微信 OAuth 自动返回，家长无需手动填写。</small></label>
-              <div class="share-actions"><button type="submit">微信验证并查看合同</button></div>
+              <label>昵称<input name="wechat_nickname" placeholder="请输入昵称" required></label>
+              <label>访问识别码<input name="wechat_openid" placeholder="请设置一个便于记住的识别码" required><small>后续访问请使用相同识别码。</small></label>
+              <div class="share-actions"><button type="submit">确认身份并查看合同</button></div>
             </form>
-            <p class="muted-line">当前为本地测试模式；正式家长页面将使用微信服务号授权。</p>
+            <p class="muted-line">请记住本次填写的身份信息，以便再次查看合同。</p>
             """
         body = f"""
         <div class="share-brand"><div><strong>AAIE / AOYA Contract Signing</strong><small>Secure parent access</small></div><small>有效期至<br>{esc(display_datetime(link['expires_at']))}</small></div>
-        <h1>请先完成微信身份验证</h1>
-        <p>该合同为客户专属文件。首次查看后，本链接将绑定当前微信身份，之后仅允许同一微信继续查看。</p>
+        <h1>请先完成身份确认</h1>
+        <p>该合同为客户专属文件。首次确认后，本链接将绑定当前身份，之后请使用相同身份信息继续查看。</p>
         <div class="viewer-lock-note">{esc(student_name)} · {esc(contract_title)}</div>
         {auth_control}
         """
-        return self.school_plan_share_public_page("微信验证", body)
+        return self.school_plan_share_public_page("身份确认", body)
 
     def contract_signing_oauth_start(self, token, link):
         state = new_token(24)
@@ -72344,7 +72352,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     f'<strong>{esc(root.name)}</strong><span>当前允许根目录</span><small>{esc(str(root))}</small></a>'
                 )
             else:
-                cards = '<div class="empty file-manager-empty-state file-manager-error-state">CRM_TEST 目录当前不可用。请先确认 NAS 已挂载。</div>'
+                cards = '<div class="empty file-manager-empty-state file-manager-error-state">学生文件目录当前不可用。请先确认 NAS 已挂载。</div>'
             body = f"""
             <div class="file-manager-page">
             <section class="panel file-manager-panel">
@@ -72374,7 +72382,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             body = f"""
             <div class="file-manager-page">
             <section class="panel file-manager-panel">
-              <div class="panel-head file-manager-header"><div><h2>{esc(year)}</h2><p>年份/测试根目录只读；学生文件夹只能通过 CRM 学生流程创建。</p></div>
+              <div class="panel-head file-manager-header"><div><h2>{esc(year)}</h2><p>存储根目录只读；学生文件夹只能通过 CRM 学生流程创建。</p></div>
               <form class="search file-manager-search" method="get"><input type="hidden" name="year" value="{esc(year)}"><input name="q" value="{esc(search)}" placeholder="在当前目录搜索学生文件夹"><button class="secondary">搜索</button></form></div>
               {notice}
               {self.file_manager_breadcrumb(year)}
@@ -73087,20 +73095,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         else:
             auth_control = f"""
             <form method="post" action="/school-plan-share/{esc(token)}/wechat-login">
-              <label>微信昵称<input name="wechat_nickname" placeholder="请输入微信昵称" required></label>
-              <label>OpenID / 测试识别码<input name="wechat_openid" placeholder="本地测试可填写手机号后四位或微信备注" required><small>正式上线后这里会由微信 OAuth 自动返回，家长无需手动填写。</small></label>
-              <div class="share-actions"><button type="submit">微信验证并查看</button></div>
+              <label>昵称<input name="wechat_nickname" placeholder="请输入昵称" required></label>
+              <label>访问识别码<input name="wechat_openid" placeholder="请设置一个便于记住的识别码" required><small>后续访问请使用相同识别码。</small></label>
+              <div class="share-actions"><button type="submit">确认身份并查看</button></div>
             </form>
-            <p class="muted-line">如果在手机外部浏览器打开，请复制链接到微信中打开。当前为本地测试模式。</p>
+            <p class="muted-line">请记住本次填写的身份信息，以便再次查看方案。</p>
             """
         body = f"""
         <div class="share-brand"><div><strong>AAIE School Advisory Report</strong><small>Secure parent access</small></div><small>有效期至<br>{esc(display_datetime(link['expires_at']))}</small></div>
-        <h1>请先完成微信身份验证</h1>
-        <p>该学校方案为客户专属文件。每位授权家长将使用自己的专属链接查看报告。首次查看后，本链接将绑定当前微信身份，之后仅允许同一微信继续查看。</p>
+        <h1>请先完成身份确认</h1>
+        <p>该学校方案为客户专属文件。每位授权家长将使用自己的专属链接查看报告。首次确认后，本链接将绑定当前身份，之后请使用相同身份信息继续查看。</p>
         <div class="viewer-lock-note">当前方案：{esc(student_name)} · v{esc(link['report_version'])}</div>
         {auth_control}
         """
-        return self.school_plan_share_public_page("微信验证", body)
+        return self.school_plan_share_public_page("身份确认", body)
 
     def school_plan_share_wechat_oauth_start(self, token, link):
         state = new_token(24)
@@ -73347,7 +73355,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             row("服务器公网 IP", esc(checks["public_ip_display"]), checks["public_ip_ok"], f"微信 API IP 白名单应为 {WECHAT_EXPECTED_PUBLIC_IP}。"),
         ])
         oauth_button = (
-            '<a class="primary button-link" href="/settings/wechat-oauth/test/start">微信授权实测</a>'
+            '<a class="primary button-link" href="/settings/wechat-oauth/test/start">微信授权检查</a>'
             if checks["app_id_ok"] and checks["app_secret_ok"] and checks["callback_ok"]
             else '<span class="button-link disabled">先完成 AppID / AppSecret / Callback 配置</span>'
         )
@@ -73357,7 +73365,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <p>用于确认 CRM 正式接入 <strong>{esc(WECHAT_SERVICE_ACCOUNT_NAME)}</strong> 服务号。AppSecret 不会在页面显示，也不会写入前端。</p>
           <div class="row-actions">{oauth_button}<a class="secondary button-link" href="/settings">返回系统设置</a></div>
           <table class="data-table"><tbody>{rows}</tbody></table>
-          <p class="muted-line">微信授权实测会跳转到微信网页授权，成功后应返回 openid、昵称和头像状态。请在微信内或手机上测试。</p>
+          <p class="muted-line">微信授权检查会跳转到微信网页授权，成功后应返回 openid、昵称和头像状态。请在微信内完成验证。</p>
         </section>
         """
         message, kind = self.message()
@@ -73424,9 +73432,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def settings_wechat_oauth_test_start(self, method):
         if method != "GET" or not allowed(self.user, "*"):
-            return self.error_page("仅 Admin 可以发起微信授权实测。", HTTPStatus.FORBIDDEN)
+            return self.error_page("仅 Admin 可以发起微信授权检查。", HTTPStatus.FORBIDDEN)
         if not wechat_oauth_configured():
-            return self.flash_redirect("/settings/wechat-oauth/check", "微信 AppID / AppSecret 未配置，无法发起授权实测。", "error")
+            return self.flash_redirect("/settings/wechat-oauth/check", "微信 AppID / AppSecret 未配置，无法发起微信授权验证。", "error")
         state = new_token(24)
         expires_at = (datetime.now().astimezone() + timedelta(minutes=10)).isoformat(timespec="seconds")
         callback_url = self.school_plan_wechat_oauth_callback_url()
@@ -73455,20 +73463,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if "MicroMessenger" not in user_agent:
             body = f"""
             <section class="panel">
-              <h2>请用微信打开授权测试链接</h2>
+              <h2>请用微信打开授权验证链接</h2>
               <p>微信服务号网页授权需要在微信内置浏览器中完成。当前浏览器看起来不是微信，直接跳转到 <code>open.weixin.qq.com</code> 时，Safari / Chrome 可能会显示 “Oops! Something went wrong”。</p>
-              <p>请复制下面的一次性测试链接，到微信里打开；链接 10 分钟内有效。</p>
-              <label>微信授权测试链接<input readonly value="{esc(auth_url)}" onclick="this.select()"></label>
+              <p>请复制下面的一次性验证链接，到微信里打开；链接 10 分钟内有效。</p>
+              <label>微信授权验证链接<input readonly value="{esc(auth_url)}" onclick="this.select()"></label>
               <div class="row-actions">
-                <button class="copy-button primary" type="button" data-copy="{esc(auth_url)}">复制微信授权测试链接</button>
+                <button class="copy-button primary" type="button" data-copy="{esc(auth_url)}">复制微信授权验证链接</button>
                 <a class="secondary button-link" href="{esc(auth_url)}">继续在当前浏览器打开</a>
                 <a class="ghost button-link" href="/settings/wechat-oauth/check">返回微信接入自检</a>
               </div>
-              <p class="muted-line">如果你在手机上测试，建议把链接复制到微信“文件传输助手”或任意聊天窗口后点击打开。</p>
+              <p class="muted-line">如果你在手机上验证，建议把链接复制到微信“文件传输助手”或任意聊天窗口后点击打开。</p>
             </section>
             """
             message, kind = self.message()
-            return self.send_html(page("微信授权实测", body, self.user, self.csrf, "settings", None, message, kind))
+            return self.send_html(page("微信授权检查", body, self.user, self.csrf, "settings", None, message, kind))
         return self.redirect(auth_url)
 
     def school_plan_wechat_oauth_test_callback(self, state_payload, code):
@@ -73485,11 +73493,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             append_service_log("parent", "wechat_oauth_test_failed", str(exc), callback_url=state_payload.get("callback_url"))
             body = """
-            <h1>微信授权测试失败</h1>
-            <p>微信授权测试未完成，请检查 AppID / AppSecret、网页授权域名、回调地址和 API IP 白名单。</p>
+            <h1>微信授权验证失败</h1>
+            <p>微信授权验证未完成，请检查 AppID / AppSecret、网页授权域名、回调地址和 API IP 白名单。</p>
             <p class="muted-line">错误详情已写入服务端日志；页面不会显示或泄露 AppSecret。</p>
             """
-            return self.school_plan_share_public_page("微信授权测试失败", body, HTTPStatus.BAD_GATEWAY)
+            return self.school_plan_share_public_page("微信授权验证失败", body, HTTPStatus.BAD_GATEWAY)
         rows = "\n".join([
             f"<tr><th>openid</th><td>{esc(self.school_plan_share_masked_openid(openid))}</td></tr>",
             f"<tr><th>unionid</th><td>{esc(self.school_plan_share_masked_openid(unionid)) if unionid else '未返回 / 未绑定开放平台'}</td></tr>",
@@ -73498,18 +73506,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         ])
         avatar_html = f'<p><img src="{esc(avatar_url)}" alt="微信头像" style="width:72px;height:72px;border-radius:50%;object-fit:cover"></p>' if avatar_url else ""
         body = f"""
-        <h1>微信授权测试成功</h1>
+        <h1>微信授权验证成功</h1>
         <p>{esc(WECHAT_SERVICE_ACCOUNT_NAME)} 服务号已成功返回微信身份信息。</p>
         {avatar_html}
         <table class="share-confirm-table"><tbody>{rows}</tbody></table>
         <p class="muted-line">openid 与 unionid 仅显示脱敏结果；AppSecret 不会出现在页面或前端。</p>
         """
         append_service_log("parent", "wechat_oauth_test_passed", nickname=nickname, openid_suffix=re.sub(r"[^A-Za-z0-9]", "", openid)[-6:])
-        return self.school_plan_share_public_page("微信授权测试成功", body)
+        return self.school_plan_share_public_page("微信授权验证成功", body)
 
     def school_plan_share_masked_openid(self, openid):
         suffix = re.sub(r"[^A-Za-z0-9]", "", str(openid or ""))[-6:]
-        return f"****{suffix}" if suffix else "****测试"
+        return f"****{suffix}" if suffix else "****"
 
     def school_plan_share_viewer_watermark(self, link, student_name=None, viewed_at=None):
         link_data = rowdict(link) if link and not isinstance(link, dict) else (link or {})
@@ -76800,14 +76808,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("仅 Admin 可以修改系统设置", 403)
         if method == "POST":
             action = self.form.get("action")
-            if action == "enable_production":
-                db.audit(self.user, "permission_change_blocked", "system_settings", "production_enabled", old_value="false", new_value="blocked_for_mvp")
-                return self.flash_redirect("/settings", "MVP 阶段已锁定 Test Mode，只允许使用 /Volumes/Server/Students/CRM_TEST。", "error")
-            if action == "disable_production":
-                db.execute("UPDATE system_settings SET value='false',updated_by=?,updated_at=? WHERE key='production_enabled'", (self.user["id"], now_iso()))
-                db.execute("UPDATE system_settings SET value='test',updated_by=?,updated_at=? WHERE key='mode'", (self.user["id"], now_iso()))
-                db.audit(self.user, "permission_change", "system_settings", "production_enabled", old_value="true", new_value="false")
-                return self.flash_redirect("/settings", "已切回 Test Mode")
+            if action in {"enable_production", "disable_production"}:
+                return self.flash_redirect("/settings", "运行环境由服务配置管理，不能在此页面切换。", "error")
             if action == "update_parent_form_base":
                 value = str(self.form.get("parent_form_base_url", "")).strip().rstrip("/")
                 if not value.startswith(("http://", "https://")):
@@ -76986,7 +76988,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         ip=self.client_address[0],
                         device=self.headers.get("User-Agent"),
                     )
-                    return self.flash_redirect("/settings", f"Google Drive 连接测试失败：{error_text}", "error")
+                    return self.flash_redirect("/settings", f"Google Drive 连接检查失败：{error_text}", "error")
                 db.audit(
                     self.user,
                     "google_drive_test_connection_passed",
@@ -77081,14 +77083,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         legacy_note = ""
         if asset_status["using_legacy_signature"] or asset_status["using_legacy_stamp"]:
             legacy_note = "<p class='missing-note'>当前正在使用旧 CRM secure_assets 中的素材兜底。建议之后在这里重新上传一次签名和公章，让素材保存到新的正式安全路径。</p>"
-        production_control = "<div class='locked-note'>MVP 阶段 Production Mode 已锁定。当前系统只允许操作 <code>/Volumes/Server/Students/CRM_TEST</code>。</div>"
-        if status["production_enabled"]:
-            production_control += "<form method=post><input type=hidden name=csrf value='"+esc(self.csrf)+"'><input type=hidden name=action value=disable_production><button class='danger'>立即关闭 Production</button></form>"
+        environment_label = {"production": "正式生产环境", "staging": "独立预发布环境"}.get(status.get("mode"), "受限存储环境")
+        production_control = f"<div class='locked-note'>{esc(environment_label)}。运行环境与存储授权由服务配置管理。</div>"
         body = f"""
         <div class="system-settings-page">
         <section class="settings-grid system-settings-grid">
           <div class="panel"><h2>NAS 状态</h2><div class="setting-row"><span>挂载路径</span><code>/Volumes/Server/Students</code></div><div class="setting-row"><span>当前根目录</span><code>{esc(status["root"])}</code></div><div class="setting-row"><span>连接状态</span><strong class="{"done" if status["mounted"] else "missing"}">{"已连接" if status["mounted"] else "Student NAS Drive Not Connected"}</strong></div>{f'<p class="missing-note">{esc(status["root_error"])}</p>' if status["root_error"] else ''}</div>
-          <div class="panel danger-panel"><h2>Production Mode</h2><p>默认关闭。正式学生目录 <code>/Volumes/Server/Students/2026</code> 在 MVP 阶段不可启用。</p>
+          <div class="panel"><h2>运行环境</h2><p>学生资料使用当前已授权的存储目录。</p>
             {production_control}
           </div>
           <div class="panel"><h2>CRM Admin LAN Access</h2><p>CRM Admin 仅供公司内网访问；不要把 8780 接入 Cloudflare。</p><div class="setting-row"><span>CRM Admin LAN URL</span><a href="{esc(crm_admin_lan_url())}">{esc(crm_admin_lan_url())}</a></div><div class="setting-row"><span>监听地址</span><code>{esc(db.setting(CRM_ADMIN_BIND_HOST_SETTING, "0.0.0.0"))}:8780</code></div></div>
@@ -77122,7 +77123,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <label>Required scopes / 必需授权范围<textarea readonly onclick="this.select()" rows="3">{esc(drive_required_scopes_text)}</textarea><small>Google Cloud Console OAuth Consent Screen 需要允许这些范围；CRM 当前需要读取指定 Google Drive 文件夹，所以使用 Drive readonly。</small></label>
             <label>Current granted scopes / 当前授权范围<textarea readonly onclick="this.select()" rows="3">{esc(drive_granted_scopes or '未保存 / Unknown')}</textarea><small>如果这里缺少必需授权范围，请点击“连接 / 重新连接 Google Drive”。</small></label>
             {f'<p class="missing-note">Google Drive 权限不足。请重新连接 Google Drive，并确认授权 CRM 所需的 Drive 权限。缺少：{esc(", ".join(drive_missing_scopes))}</p>' if drive_missing_scopes and (drive_auth_status["access_token"] or drive_auth_status["refresh_token"] or drive_connection_status == "Reconnect Required") else ''}
-            <p class="muted-line">请先到系统设置连接 Google Drive：第 1 步保存 OAuth Client ID / Client Secret，第 2 步点击网页登录认证，第 3 步测试连接。</p>
+            <p class="muted-line">请先到系统设置连接 Google Drive：第 1 步保存 OAuth Client ID / Client Secret，第 2 步点击网页登录认证，第 3 步检查连接。</p>
             <form class="stack-form" method="post"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="action" value="update_google_drive_cloud_sync">
               <label>CONTENT_GOOGLE_DRIVE_VIDEO_FOLDER_ID<input name="google_drive_video_folder_id" value="{esc(drive_folder_id)}" required><small>默认使用已确认的视频文件夹 ID：{esc(DEFAULT_GOOGLE_DRIVE_VIDEO_FOLDER_ID)}</small></label>
               <label>CRM_PUBLIC_BASE_URL<input name="crm_public_base_url" value="{esc(crm_public_base)}" required><small>公网 CRM 地址，不要带结尾斜杠。Google Drive 公网授权会使用这个域名。</small></label>
@@ -77142,7 +77143,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 <p class="muted-line">Google Cloud Console OAuth Consent Screen 也需要加入这些 Required Google Drive OAuth scopes：<code>{esc(' '.join(GOOGLE_DRIVE_REQUIRED_SCOPES))}</code></p>
                 <p class="muted-line">如果 Google Console 已添加公网 URI，但仍报 redirect_uri_mismatch，请点击“用 Public URI 连接”。</p>
               </div>
-              <label>GOOGLE_DRIVE_OAUTH_REDIRECT_URI（可选手动覆盖）<input name="google_drive_oauth_redirect_uri" value="{esc(google_drive_setting_value(GOOGLE_DRIVE_OAUTH_REDIRECT_URI_SETTING))}" placeholder="{esc(drive_oauth_redirect_uri)}"><small>一般保持空白，让系统按当前访问地址自动选择 Local/Public；只有特殊测试时才手动填写。</small></label>
+              <label>GOOGLE_DRIVE_OAUTH_REDIRECT_URI（可选手动覆盖）<input name="google_drive_oauth_redirect_uri" value="{esc(google_drive_setting_value(GOOGLE_DRIVE_OAUTH_REDIRECT_URI_SETTING))}" placeholder="{esc(drive_oauth_redirect_uri)}"><small>一般保持空白，让系统按当前访问地址自动选择 Local/Public；仅需指定回调地址时才手动填写。</small></label>
               <label>GOOGLE_DRIVE_CLIENT_ID<input type="password" name="google_drive_client_id" placeholder="留空则保留现有 Client ID"><small>用于自动刷新 Google Drive access token。</small></label>
               <label class="choice"><input type="checkbox" name="clear_google_drive_client_id" value="true"><span>清除现有 Client ID</span></label>
               <label>GOOGLE_DRIVE_CLIENT_SECRET<input type="password" name="google_drive_client_secret" placeholder="留空则保留现有 Client Secret"><small>不会在页面明文显示现有 secret。</small></label>
@@ -77157,7 +77158,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <label class="choice"><input type="checkbox" name="clear_google_drive_api_key" value="true"><span>清除现有 API Key</span></label>
               <button class="secondary">保存 Google Drive 云端同步设置</button>
             </form>
-            <form method="post" class="row-actions"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="action" value="test_google_drive_cloud_sync"><button class="primary" type="submit">测试 Google Drive 连接</button></form>
+            <form method="post" class="row-actions"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="action" value="test_google_drive_cloud_sync"><button class="primary" type="submit">检查 Google Drive 连接</button></form>
           </div>
           <div class="panel"><h2>AAIE 签名和公章</h2><p>仅 Admin 可上传或替换；素材不提供直接下载，不存入学生文件夹。</p><div class="setting-row"><span>Sonny Zhang 签名</span><strong>{esc(signature_status)}</strong></div><div class="setting-row"><span>当前签名路径</span><code>{esc(signature_active_note)}</code></div><div class="setting-row"><span>AAIE 公司公章</span><strong>{esc(stamp_status)}</strong></div><div class="setting-row"><span>当前公章路径</span><code>{esc(stamp_active_note)}</code></div>{legacy_note}
             <form class="stack-form" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="action" value="upload_contract_asset"><label>素材类型<select name="asset_type" required><option value="sonny_signature">Sonny Zhang signature</option><option value="aaie_company_stamp">AAIE company stamp</option></select></label><label>PNG / JPG 图片<input type="file" name="file" accept=".png,.jpg,.jpeg" required></label><button class="secondary">上传 / 替换安全素材</button></form>
@@ -77261,7 +77262,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         <section class="panel system-health-panel">
           <div class="panel-head"><div><h2>系统健康</h2><p>Admin LaunchAgent + 8780 /health；Parent LaunchAgent + 8781 /health；NAS Recovery heartbeat；Content Extraction 8792。</p></div><div class="row-actions"><a class="secondary button-link" href="/settings/system-logs">查看详细日志</a><a class="secondary button-link" href="/settings">返回系统设置</a></div></div>
           <div class="health-overview {'ok' if health['overall_ok'] else 'warn'}">
-            <div><span>当前状态</span><strong>{esc(health['headline'])}</strong><p>服务、自动恢复、外部链接和 Data Mode 分别判定；TEST MODE 只是数据模式，不是独立 runtime。</p></div>
+            <div><span>当前状态</span><strong>{esc(health['headline'])}</strong><p>服务、自动恢复、外部链接和存储状态分别检查。</p></div>
             <div class="health-ring"><span>{esc(health['symbol'])}</span></div>
           </div>
           <div class="health-card-grid">
@@ -78003,7 +78004,7 @@ sqlite3 database/aaie_crm.db 'PRAGMA quick_check;'"""
           <div class="notice">{esc(archive_status["retention_note"])}</div>
         </section>
         <section class="panel backup-auto-control-section backup-auto-section">
-          <div class="panel-head"><div><h2>Auto Backup Controls / 自动备份开关</h2><p>需要输入精确确认文字后，才会启用、停用或测试运行 launchd 自动备份。</p></div></div>
+          <div class="panel-head"><div><h2>Auto Backup Controls / 自动备份开关</h2><p>需要输入精确确认文字后，才会启用、停用或验证运行 launchd 自动备份。</p></div></div>
           <div class="notice">本区只管理 Hourly / Daily Snapshot 的 launchd 服务，不执行恢复，不删除备份，不修改数据库 schema。Daily Auto Backup 时间为 21:30。</div>
           <div class="auto-backup-control-grid">{auto_backup_controls}</div>
         </section>
@@ -79081,7 +79082,7 @@ def release_readonly_database_preflight():
     if not SAFE_PRODUCTION_REQUIRED_TABLES.issubset(tables):
         raise RuntimeError("release_readonly_schema_missing")
     versions = tuple(row["version"] for row in db.all("SELECT version FROM schema_migrations ORDER BY version"))
-    expected = tuple(sorted({match.group(1) for path in (APP_DIR / "migrations").glob("*.sql")
+    expected = tuple(sorted({match.group(1) for path in (SOURCE_DIR / "migrations").glob("*.sql")
                              if (match := re.match(r"^(\d{8}_\d{3})_", path.name))}))
     if not expected or versions != expected:
         raise RuntimeError("release_readonly_migration_mismatch")
@@ -79117,6 +79118,10 @@ def run_server(
     previous_safe_production = SAFE_PRODUCTION_ACTIVE
     SAFE_PRODUCTION_ACTIVE = bool(safe_production)
     try:
+        managed = getattr(STAGING, "runtime_configuration", None)
+        if managed is not None:
+            managed.require_ready()
+            startup_preflight_done = True
         if not startup_readonly(APP_WRITE_GATE):
             ensure_dirs()
         if not startup_preflight_done:
@@ -79165,7 +79170,7 @@ def run_server(
         try:
             if not SAFE_PRODUCTION_ACTIVE and not STAGING and service == "parent":
                 start_optional_startup_task(service, "reminder", run_reminder_engine)
-            if not SAFE_PRODUCTION_ACTIVE and service == "admin":
+            if not SAFE_PRODUCTION_ACTIVE and not STAGING and service == "admin":
                 start_optional_startup_task(service, "backup", startup_backup)
             server.serve_forever()
         except KeyboardInterrupt:
@@ -79192,6 +79197,8 @@ def main():
     parser.add_argument("--bettereducation-no-pause", action="store_true")
     parser.add_argument("--safe-production", action="store_true")
     args = parser.parse_args()
+    if getattr(STAGING, "runtime_configuration", None) is not None:
+        parser.error("Separated runtime must use tools/runtime_control.py; initialization is disabled")
     try:
         safe_production = resolve_safe_production(
             args.safe_production, os.environ

@@ -10,6 +10,8 @@ from datetime import datetime
 import http.client
 import json
 import math
+import os
+from pathlib import Path
 import re
 from typing import Any
 
@@ -58,6 +60,23 @@ class GatewayError(RuntimeError):
         self.code = code if code in _ERRORS else 'backend_response_invalid'
         self.status, self.message = _ERRORS[self.code]
         super().__init__(self.message)
+
+
+def backend_port():
+    """A managed staging request must never use the legacy production backend."""
+    path = os.environ.get('AAIE_CRM_RUNTIME_CONFIG')
+    if path:
+        from runtime_configuration import RuntimeConfiguration, RuntimeConfigurationError
+        try:
+            config = RuntimeConfiguration.load(path, source_root=Path(__file__).resolve().parent)
+            if os.environ.get('AAIE_CRM_ENV') != config.mode:
+                raise GatewayError('backend_unavailable')
+            return config.agent_reach_port
+        except (RuntimeConfigurationError, OSError, ValueError) as exc:
+            raise GatewayError('backend_unavailable') from exc
+    if os.environ.get('AAIE_CRM_ENV') == 'staging':
+        raise GatewayError('backend_unavailable')
+    return _PORT
 
 
 def _bad_response() -> None:
@@ -490,7 +509,7 @@ class FoundationGateway:
         error_code = None
         dispatch_attempted = False
         try:
-            connection = http.client.HTTPConnection(_HOST, _PORT, timeout=120 if operation in {'search_submit', 'monitoring_keyword_run'} else _TIMEOUT_SECONDS)
+            connection = http.client.HTTPConnection(_HOST, backend_port(), timeout=120 if operation in {'search_submit', 'monitoring_keyword_run'} else _TIMEOUT_SECONDS)
             dispatch_attempted = True
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()

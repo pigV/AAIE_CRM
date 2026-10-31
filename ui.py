@@ -155,9 +155,10 @@ def _nav_items(active, user):
 def page(title, body, user=None, csrf="", active="", nas=None, message=None, message_kind="success", asset_version=""):
     asset_version = asset_version or ASSET_VERSION
     if user:
-        mode = (nas or {}).get("mode", "test").upper()
+        mode = (nas or {}).get("mode", "unknown").upper()
         mode_label = {"TEST": "测试模式", "PRODUCTION": "生产模式",
-                      "STAGING": "预发布模式", "PREPROD": "预发布模式"}.get(mode, f"{mode} MODE")
+                      "STAGING": "预发布模式", "PREPROD": "预发布模式",
+                      "UNKNOWN": "运行状态待确认"}.get(mode, f"{mode} MODE")
         nas_ready = bool((nas or {}).get("ready"))
         nas_error_code = str(
             (nas or {}).get("access_error_code")
@@ -332,16 +333,17 @@ def parent_form_login(token, expires_at, *, oauth_enabled):
     else:
         auth_control = f"""
         <form class="parent-ui-local-auth" method="post" action="/parent-form/{quote(token)}/wechat-login">
-          <label>微信昵称<input name="wechat_nickname" placeholder="请输入微信昵称" required></label>
-          <label>测试识别码<input name="wechat_openid" placeholder="本地测试可填写微信备注" required><small>正式环境由微信自动完成，家长无需填写。</small></label>
-          <button class="parent-ui-wechat-action" type="submit">微信验证并继续</button>
+          <label>昵称<input name="wechat_nickname" placeholder="请输入昵称" required></label>
+          <label>访问识别码<input name="wechat_openid" placeholder="请设置一个便于记住的识别码" required><small>后续访问请使用相同识别码。</small></label>
+          <button class="parent-ui-wechat-action" type="submit">确认身份并继续</button>
         </form>"""
-        mode_note = "当前为本地测试模式；正式家长页面使用微信服务号授权。"
+        mode_note = "请记住本次填写的身份信息，以便继续填写资料。"
+    identity_title = "验证微信身份" if oauth_enabled else "确认访问身份"
     content = f"""
     <section class="parent-ui-login-card">
       <div class="parent-ui-secure-hero">
         <span class="parent-ui-eyebrow">SECURE ACCESS</span>
-        <h1>验证微信身份<br>继续填写资料</h1>
+        <h1>{identity_title}<br>继续填写资料</h1>
         <p>该链接仅用于本次学生资料收集。验证后可在有效期内安全保存并继续填写。</p>
       </div>
       <div class="parent-ui-trust-chips" aria-label="表单安全说明">
@@ -446,7 +448,7 @@ def internal_student_form(action, csrf, errors=None, values=None, error_names=No
     <form class="parent-form internal-form" method="post" action="{esc(action)}">
       <input type="hidden" name="csrf" value="{esc(csrf)}">
       {error_box}
-      <div class="intro-band internal-band"><h1>手动新建学生</h1><p>后台直接填写学生资料。提交后会自动生成 Student ID，并在 CRM_TEST 中建立学生文件夹。</p></div>
+      <div class="intro-band internal-band"><h1>手动新建学生</h1><p>后台直接填写学生资料。提交后会自动生成 Student ID，并在已配置的学生存储目录中建立学生文件夹。</p></div>
       {"".join(sections)}
       <div class="form-submit"><a class="ghost button-link" href="/students">取消</a><button class="primary large" type="submit">创建学生</button></div>
     </form>"""

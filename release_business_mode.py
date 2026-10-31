@@ -34,9 +34,21 @@ def request_kind(method, target):
     return 'business'
 
 
+def managed_production_root():
+    return Path(__file__).resolve().parent.parent / 'runtime/production'
+
+
 def configured_gate(root):
     """Only the formal runtime auto-binds; isolated tests explicitly inject a Gate."""
     root = Path(root).resolve()
+    if root == managed_production_root():
+        from runtime_configuration import RuntimeConfiguration
+        from business_write_gate import Gate, install_sqlite_guard
+        config = RuntimeConfiguration.load(root / 'config/runtime.json',
+                                           source_root=Path(__file__).resolve().parent)
+        gate = Gate(config.db, root / 'config/business-write-gate', required=True)
+        install_sqlite_guard(gate)
+        return gate
     if root != Path('/Volumes/Zhang/AAIE CodeX/CRM').resolve():
         return None
     from business_write_gate import Gate, install_sqlite_guard
