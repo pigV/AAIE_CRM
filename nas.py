@@ -63,8 +63,23 @@ class NasManager:
 
     def status(self):
         if STAGING:
-            root = STAGING.check(STAGING.storage)
             mode = getattr(STAGING, "mode", "staging")
+            if mode == "production":
+                root_error = ""
+                try:
+                    root = self.active_root()
+                except NasSafetyError as exc:
+                    root, root_error = TEST_ROOT, str(exc)
+                access = inspect_nas_access(STUDENTS_MOUNT, root)
+                return {"mounted": access.mounted, "mode": mode,
+                        "production_enabled": True, "production_locked": True,
+                        "root": str(root), "root_error": root_error,
+                        "root_exists": access.root_exists, "readable": access.readable,
+                        "writable": access.writable and not root_error,
+                        "access_error_code": "write_denied" if root_error else access.error_code,
+                        "access_message": root_error or access.message,
+                        "ready": access.ready and not root_error}
+            root = STAGING.check(STAGING.storage)
             return {"mounted": True, "mode": mode, "production_enabled": mode == "production",
                     "production_locked": True, "root": str(root), "root_error": "",
                     "root_exists": root.is_dir(), "readable": os.access(root, os.R_OK),
@@ -114,6 +129,15 @@ class NasManager:
 
     def active_root(self):
         if STAGING:
+            if getattr(STAGING, "mode", "staging") == "production":
+                # Managed production retains the original CRM_TEST business NAS.
+                # Runtime storage still holds local reports, caches and legacy files.
+                try:
+                    if TEST_ROOT not in STAGING.nas_write_roots:
+                        raise NasSafetyError("CRM 学生 NAS 写入授权未启用。")
+                    return STAGING.check(TEST_ROOT)
+                except (RuntimeError, OSError, ValueError) as exc:
+                    raise NasSafetyError(str(exc)) from exc
             return STAGING.check(STAGING.storage)
         isolated = self.isolated_safe_production_root()
         if isolated is not None:
@@ -147,6 +171,11 @@ class NasManager:
 
     def create_student_tree(self, student_id, first_name, last_name):
         root = self.require_ready()
+        if STAGING and getattr(STAGING, "mode", "staging") == "production":
+            try:
+                require_writable_directory(root)
+            except NasAccessError as exc:
+                raise NasSafetyError(str(exc)) from exc
         if self.db.setting("mode", "test") == "test":
             root.mkdir(parents=True, exist_ok=True)
         base_name = sanitize_component(f"{first_name} {last_name}")
@@ -161,6 +190,13 @@ class NasManager:
     def student_folder(self, student):
         if not student["folder_path"]:
             raise NasSafetyError("Student folder has not been created")
+        if STAGING and getattr(STAGING, "mode", "staging") == "production":
+            # Existing local folders do not depend on NAS availability or grants.
+            # This never changes where new student folders are created.
+            try:
+                return ensure_within(student["folder_path"], STAGING.check(STAGING.storage))
+            except NasSafetyError:
+                pass
         root = self.active_root()
         try:
             return ensure_within(student["folder_path"], root)
@@ -169,14 +205,21 @@ class NasManager:
                 return STAGING.nas_read_path(student["folder_path"], TEST_ROOT)
             raise
 
+    def _require_student_folder(self, student):
+        folder = self.student_folder(student)
+        local = (STAGING and getattr(STAGING, "mode", "staging") == "production"
+                 and folder.is_relative_to(STAGING.check(STAGING.storage)))
+        if not local:
+            self.require_ready()
+        return folder
+
     def category_folder(self, student, category):
         return self.require_category_access(student, category, write=True)
 
     def require_category_access(self, student, category, *, read=False, write=False):
-        self.require_ready()
         if category not in STANDARD_FOLDERS:
             raise NasSafetyError("Unknown folder category")
-        student_root = self.student_folder(student)
+        student_root = self._require_student_folder(student)
         folder = ensure_within(student_root / category, student_root)
         if write and STAGING:
             try:
@@ -198,8 +241,7 @@ class NasManager:
         return folder
 
     def require_student_file_readable(self, student, source):
-        self.require_ready()
-        student_root = self.student_folder(student)
+        student_root = self._require_student_folder(student)
         target = ensure_within(source, student_root)
         try:
             return require_readable_file(target)
