@@ -302,6 +302,8 @@ if os.environ.get('AAIE_CRM_RUNTIME_CONFIG'):
     ACTIVE.assert_sandbox()
     config.require_ready()
     ACTIVE.install_audit()
+    from wechat_runtime import install_runtime_wechat_network_guard
+    install_runtime_wechat_network_guard(config)
 elif os.environ.get('AAIE_CRM_ENV') == 'staging':
     ACTIVE = Staging.load(os.environ.get('AAIE_STAGING_CONFIG', ''))
     ACTIVE.assert_sandbox()

@@ -7,6 +7,8 @@ import argparse
 import base64
 from http.cookiejar import CookieJar
 import io
+import re
+import html
 import json
 from pathlib import Path
 from urllib import parse, request
@@ -81,7 +83,7 @@ def main() -> None:
     for marker in (
         "合同已完成签署",
         "双方签名及 AAIE 公章已加盖完成",
-        "/final/view",
+        'href="#final-contract-preview"',
         "/final/download",
     ):
         if marker not in signed_html:
@@ -91,7 +93,11 @@ def main() -> None:
 
     view = get(opener, portal_url + "/final/view", args.user_agent)
     view_bytes = view.read()
-    download = get(opener, portal_url + "/final/download", args.user_agent)
+    download_link = re.search(r'href="([^"<>]*?/final/download\?download_grant=[^"<>]+)"', signed_html)
+    if not download_link:
+        raise AssertionError("completed page has no authorized external-browser download")
+    external_browser = request.build_opener()  # Deliberately no shared cookie jar.
+    download = get(external_browser, parse.urljoin(portal_url, html.unescape(download_link.group(1))), args.user_agent)
     download_bytes = download.read()
     if not view_bytes.startswith(b"%PDF-") or view_bytes != download_bytes:
         raise AssertionError("view/download did not return the same final PDF artifact")
@@ -107,6 +113,7 @@ def main() -> None:
         "signing_status": signed_status,
         "view_status": view.status,
         "download_status": download.status,
+        "external_browser_without_cookie": True,
         "reopen_status": reopened.status,
         "final_pdf_bytes": len(download_bytes),
         "final_pdf": str(args.output.resolve()),

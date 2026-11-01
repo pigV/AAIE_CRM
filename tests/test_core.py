@@ -27704,6 +27704,7 @@ class CoreTests(unittest.TestCase):
                     (contract_id, "TCON003", link_id, stamp, "127.0.0.1", "UnitTest", "openidABC123", "张妈妈", str(root / "signature.png"), "confirmed", "signed", stamp, stamp),
                 )
                 db.execute("UPDATE contract_signatures SET archive_status='archived' WHERE link_id=?", (link_id,))
+                db.execute("UPDATE contract_signing_links SET signed_signature_id=(SELECT MAX(id) FROM contract_signatures WHERE link_id=?) WHERE id=?", (link_id, link_id))
                 handler = object.__new__(app_module.CRMHandler)
                 handler.headers = {"Cookie": f"aaie_csl_{link_id}={handler.contract_signing_cookie_value(db.one('SELECT * FROM contract_signing_links WHERE id=?', (link_id,)), 'openidABC123')}"}
                 handler.client_address = ("127.0.0.1", 12345)
@@ -27712,12 +27713,14 @@ class CoreTests(unittest.TestCase):
                 handler.send_html = lambda html, *args, **kwargs: captured.setdefault("html", html)
                 handler.contract_signing_preview_pages_data_uris = lambda contract: ["data:image/png;base64,ZmFrZQ=="]
 
-                handler.contract_signing_portal("GET", token)
+                with mock.patch.object(app_module, "fernet", return_value=app_module.Fernet(app_module.Fernet.generate_key())):
+                    handler.contract_signing_portal("GET", token)
 
                 html = captured["html"]
                 self.assertIn("合同已完成签署", html)
                 self.assertIn("双方签名及 AAIE 公章已加盖完成", html)
-                self.assertIn(f"/contract-sign/{token}/final/view", html)
+                self.assertIn('href="#final-contract-preview"', html)
+                self.assertIn("download_grant=", html)
                 self.assertIn(f"/contract-sign/{token}/final/download", html)
                 self.assertNotIn("确认并签署", html)
 

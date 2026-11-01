@@ -52,7 +52,7 @@ def forbidden(*args, **kwargs):
 
 def handler(kind, enabled=True, expired=False):
     from parent_form_service import ParentFormIdentityMismatch
-    ns = dict(HTTPStatus=HTTPStatus, esc=ui.esc, quote=quote, urlencode=urlencode,
+    ns = dict(STAGING=SimpleNamespace(mode='staging'), HTTPStatus=HTTPStatus, esc=ui.esc, quote=quote, urlencode=urlencode,
               parent_form_login=ui.parent_form_login, page=ui.page,
               display_datetime=str, parse_request_body=lambda h: ({"wechat_nickname": "Parent", "wechat_openid": "identity-a"}, []),
               re=re, hashlib=hashlib, ParentFormIdentityMismatch=ParentFormIdentityMismatch,
@@ -130,6 +130,10 @@ class PublicWechatProductionTests(unittest.TestCase):
                     h = handler(kind, enabled)
                     status, html = getattr(h, LOGINS[kind])("POST", "token-a")
                     self.assertEqual(status, 302)
+                    if kind == "school" and enabled:
+                        self.assertTrue(html.startswith("https://open.weixin.qq.com/"))
+                        self.assertEqual(h.cookies, [])
+                        continue
                     self.assertEqual(html, PATHS[kind].rsplit('/', 1)[0])
                     self.assertEqual(len(h.cookies), 1)
                     self.assertIn("HttpOnly", h.cookies[0])

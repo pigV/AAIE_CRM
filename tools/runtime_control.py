@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from runtime_configuration import RuntimeConfiguration, RuntimeConfigurationError, canonical, preflight
 from staging_environment import ManagedRuntime, IsolationError, SCHOOL_REPORT_PDFUNITE
 from tools import school_map_tile_control
+from wechat_runtime import runtime_wechat_environment, runtime_wechat_network_rules
 
 PYTHON = "/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
 ROLES = ("admin", "parent")
@@ -221,7 +222,7 @@ def cleanup_started(config, processes, map_started, adapter, *, process_groups=F
     return errors
 
 
-def environment(config):
+def environment(config, *, include_wechat=True):
     # A deliberately explicit environment: credentials are not inherited from
     # the terminal or loaded from another deployment's .env file.
     root = config.root
@@ -240,6 +241,7 @@ def environment(config):
         "AAIE_CRM_CONTENT_REPORT_DIR": str(root / "import_reports"),
         "REVENUE_SECURE_STORAGE_ROOT": str(root / "revenue_documents"),
         "XDG_CACHE_HOME": str(root / "cache"), "HF_HOME": str(root / "cache/huggingface"),
+        **(runtime_wechat_environment(config) if include_wechat else {}),
     }
 
 
@@ -265,6 +267,7 @@ def sandbox_profile(config):
         *([f'(allow network-bind network-inbound (local ip "*:{config.admin_port}"))']
           if adapter.admin_lan_ip else []),
         *[f'(allow network-outbound (remote ip "localhost:{p}"))' for p in config.ports],
+        *runtime_wechat_network_rules(config),
         "(allow process-fork)", "(deny signal)", "(deny process-exec)",
         f"(allow process-exec (literal {q(PYTHON)}) (literal {q(Path(PYTHON).resolve())}))",
         *([f"(allow process-exec (literal {q(SCHOOL_REPORT_PDFUNITE)}))"] if adapter.school_library_read_roots else []),

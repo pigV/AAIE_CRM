@@ -48,6 +48,10 @@ from zoneinfo import ZoneInfo
 from xml.etree import ElementTree as ET
 
 from cryptography.fernet import Fernet
+from contract_download_grants import (
+    issue_contract_download_grant, verify_contract_download_grant,
+    redact_contract_download_grants,
+)
 from docx import Document
 from docx.oxml.ns import qn
 from openpyxl import Workbook, load_workbook
@@ -26794,7 +26798,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         with (LOG_DIR / "access.log").open("a", encoding="utf-8") as fh:
-            fh.write(f"{now_iso()} {self.address_string()} {fmt % args}\n")
+            fh.write(f"{now_iso()} {self.address_string()} {redact_contract_download_grants(fmt % args)}\n")
 
     def do_GET(self):
         with db.request_scope():
@@ -70483,6 +70487,28 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         contract_output_debug_log("contract_signing_preview", contract, actual_parent_link_source=source)
         return self.contract_signing_pdf_preview_pages_data_uris(source, f"contract_signing_{contract['id']}")
 
+    def contract_signing_final_actions(self, token, link):
+        if not self.contract_signing_cookie_valid(link):
+            raise ValueError("请先完成微信身份验证。")
+        try:
+            path = self.contract_signing_final_pdf_path(link)
+            grant = issue_contract_download_grant(fernet(), link, path)
+        except Exception as exc:
+            # Download controls are presentation: never undo successful archiving.
+            try:
+                append_service_log("parent", "contract_download_grant_failed", type(exc).__name__, contract_id=link["contract_id"])
+            except Exception:
+                pass
+            return '<div class="share-actions"><a class="button-link" href="#final-contract-preview">查看已签署合同</a></div><p>下载链接暂时无法生成，请在微信中刷新本页后重试；无需重新签名。</p>'
+        download_url = f"/contract-sign/{quote(token, safe='')}/final/download?download_grant={quote(grant, safe='')}"
+        return f"""
+        <div class="share-actions">
+          <a class="button-link" href="#final-contract-preview">查看已签署合同</a>
+          <a class="button-link secondary" href="{esc(download_url)}" referrerpolicy="no-referrer">下载完整合同 PDF</a>
+        </div>
+        <p class="muted-line">下载链接 5 分钟内有效；如已失效，请在微信中刷新本页后重试。无需重新签名。</p>
+        """
+
     def contract_signing_final_pdf(self, method, token, action):
         if method != "GET":
             return self.school_plan_share_public_page("无法完成操作", "<h1>无法完成操作</h1><p>请从合同签署完成页面打开最终合同。</p>", HTTPStatus.METHOD_NOT_ALLOWED)
@@ -70492,19 +70518,35 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.school_plan_share_public_page(title, f"<h1>{esc(title)}</h1><p>{esc(message)}</p>", status)
         if str(link["status"] or "").lower() != "signed":
             return self.school_plan_share_public_page("最终合同未生成", "<h1>最终合同未生成</h1><p>请先完成合同在线签署。</p>", HTTPStatus.FORBIDDEN)
-        if not self.contract_signing_cookie_valid(link):
+        authenticated = self.contract_signing_cookie_valid(link)
+        grant_values = getattr(self, "query", {}).get("download_grant", [])
+        grant = grant_values[0] if len(grant_values) == 1 else ""
+        if not authenticated and not (action == "download" and grant):
             return self.contract_signing_login_required_page(token, link)
         try:
             path = self.contract_signing_final_pdf_path(link)
         except Exception as exc:
             return self.school_plan_share_public_page("最终合同暂不可用", "<h1>最终合同暂不可用</h1><p>请联系 AAIE 顾问处理；已提交的签名会保留，无需重新签名。</p>", HTTPStatus.NOT_FOUND)
         payload = path.read_bytes()
+        if not authenticated:
+            # A grant carries download authority across browsers, never a login.
+            # An explicitly different/invalid identity cookie cannot be overridden.
+            cookies = SimpleCookie(self.headers.get("Cookie", ""))
+            if (self.contract_signing_cookie_name(link["id"]) in cookies
+                    or not verify_contract_download_grant(fernet(), grant, link, path, payload=payload)):
+                return self.school_plan_share_public_page(
+                    "下载授权已失效",
+                    "<h1>请重新获取下载链接</h1><p>请回到微信，重新打开并刷新原合同页面，再点击下载完整合同 PDF；无需重新签名。</p>",
+                    HTTPStatus.FORBIDDEN,
+                )
         disposition = "inline" if action == "view" else "attachment"
         self.send_response(200)
         self.send_header("Content-Type", "application/pdf")
         self.send_header("Content-Disposition", f"{disposition}; filename*=UTF-8''{quote(path.name)}")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -70569,12 +70611,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if final_pdf_available:
                 completion_title = "合同已完成签署"
                 completion_message = "双方签名及 AAIE 公章已加盖完成，签署日期已填写。您可以查看或下载包含全部正文的完整合同 PDF。"
-                final_actions = f"""
-                <div class="share-actions">
-                  <a class="button-link" href="/contract-sign/{esc(token)}/final/view" target="_blank" rel="noopener">查看已签署合同</a>
-                  <a class="button-link secondary" href="/contract-sign/{esc(token)}/final/download">下载完整合同 PDF</a>
-                </div>
-                """
+                final_actions = self.contract_signing_final_actions(token, link)
             else:
                 completion_title = "家长签署已提交，完整合同尚未就绪"
                 completion_message = "您的签名已保存，甲方签章或合同归档尚未完成。请联系 AAIE 顾问处理；无需重新签名。处理完成后，重新打开此链接即可下载完整合同 PDF。"
@@ -70645,7 +70682,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         html_doc = f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>合同在线签署</title><style>{css}</style></head><body>
         <div class="contract-secure">
           <div class="contract-head"><div><strong>AAIE / AOYA 合同安全签署</strong><small>微信身份已验证；不提供原始文件下载。</small></div><small>{esc(signer)}</small></div>
-          <div class="contract-shell"><section class="contract-preview">{preview_html}</section><aside>{meta}{sign_area}</aside></div>
+          <div class="contract-shell"><section class="contract-preview" id="final-contract-preview">{preview_html}</section><aside>{meta}{sign_area}</aside></div>
         </div><script>{js}</script></body></html>"""
         return self.send_html(html_doc, headers=[("Cache-Control", "no-store"), ("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'")])
 
@@ -70730,17 +70767,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             body = f"""
             <h1>合同已完成签署</h1>
             <p>双方签名及 AAIE 公章已加盖完成。您可以在下方查看或下载最终合同。</p>
-            <div class="share-actions">
-              <a class="button-link" href="/contract-sign/{esc(token)}/final/view" target="_blank" rel="noopener">查看已签署合同</a>
-              <a class="button-link secondary" href="/contract-sign/{esc(token)}/final/download">下载完整合同 PDF</a>
-            </div>
+            {self.contract_signing_final_actions(token, self.contract_signing_row_by_id(link['id']))}
             {signature_preview}
             <table class="share-confirm-table"><tbody>
               <tr><th>签署时间</th><td>{esc(display_datetime(stamp))}</td></tr>
               <tr><th>微信身份</th><td>{esc(link['bound_wechat_nickname'] or '已验证用户')} / {esc(self.school_plan_share_masked_openid(link['bound_wechat_openid']))}</td></tr>
               <tr><th>合同文件</th><td>Final Signed Contract / 双方已签署合同</td></tr>
             </tbody></table>
-            {final_preview_html}
+            <div id="final-contract-preview">{final_preview_html}</div>
             """
             return self.school_plan_share_public_page("合同已签署", body)
         except Exception as exc:
@@ -73087,7 +73121,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def school_plan_share_login_required_page(self, token, link):
         student_name = " ".join(part for part in [link["passport_first_name"], link["passport_last_name"]] if part) or link["student_id"]
-        if self.school_plan_wechat_oauth_enabled():
+        oauth_enabled = self.school_plan_wechat_oauth_enabled()
+        if not oauth_enabled and getattr(STAGING, "mode", None) == "production":
+            return self.school_plan_share_public_page(
+                "微信验证暂不可用",
+                "<h1>微信验证暂不可用</h1><p>请联系 AAIE 顾问处理后重新打开原链接。</p>",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        if oauth_enabled:
             auth_control = f"""
             <div class="share-actions"><a class="button-link" href="/school-plan-share/{esc(token)}/wechat-login">微信验证后查看方案</a></div>
             <p class="muted-line">请在微信中打开此链接完成身份验证。首次查看后，本链接将绑定当前微信身份。</p>
@@ -73101,14 +73142,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             </form>
             <p class="muted-line">请记住本次填写的身份信息，以便再次查看方案。</p>
             """
+        identity_title = "请先完成微信身份验证" if oauth_enabled else "请先完成身份确认"
+        identity_note = (
+            "该学校方案为客户专属文件。每位授权家长将使用自己的专属链接查看报告。首次查看后，本链接将绑定当前微信身份，之后仅允许同一微信继续查看。"
+            if oauth_enabled else
+            "该学校方案为客户专属文件。每位授权家长将使用自己的专属链接查看报告。首次确认后，本链接将绑定当前身份，之后请使用相同身份信息继续查看。"
+        )
         body = f"""
         <div class="share-brand"><div><strong>AAIE School Advisory Report</strong><small>Secure parent access</small></div><small>有效期至<br>{esc(display_datetime(link['expires_at']))}</small></div>
-        <h1>请先完成身份确认</h1>
-        <p>该学校方案为客户专属文件。每位授权家长将使用自己的专属链接查看报告。首次确认后，本链接将绑定当前身份，之后请使用相同身份信息继续查看。</p>
+        <h1>{identity_title}</h1>
+        <p>{identity_note}</p>
         <div class="viewer-lock-note">当前方案：{esc(student_name)} · v{esc(link['report_version'])}</div>
         {auth_control}
         """
-        return self.school_plan_share_public_page("身份确认", body)
+        return self.school_plan_share_public_page("微信验证" if oauth_enabled else "身份确认", body)
 
     def school_plan_share_wechat_oauth_start(self, token, link):
         state = new_token(24)
@@ -73144,9 +73191,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         title, message, status = self.school_plan_share_status_problem(link)
         if status != 200:
             return self.school_plan_share_public_page(title, f"<h1>{esc(title)}</h1><p>{esc(message)}</p>", status)
-        if method != "POST":
-            if self.school_plan_wechat_oauth_enabled():
-                return self.school_plan_share_wechat_oauth_start(token, link)
+        if self.school_plan_wechat_oauth_enabled():
+            return self.school_plan_share_wechat_oauth_start(token, link)
+        if method != "POST" or getattr(STAGING, "mode", None) == "production":
             return self.school_plan_share_login_required_page(token, link)
         form, _files = parse_request_body(self)
         nickname = str(form.get("wechat_nickname") or "").strip() or "微信家长"

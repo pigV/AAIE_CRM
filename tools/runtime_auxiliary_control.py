@@ -87,7 +87,7 @@ def process_command(config, role):
 
 
 def environment(config, role, deps):
-    env = control.environment(config)
+    env = control.environment(config, include_wechat=False)
     # Auxiliary processes use their own entrypoints and OS sandbox, not the
     # legacy staging audit hook that assumes an Admin/Parent process.
     env.pop("AAIE_CRM_ENV")
