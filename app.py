@@ -23289,6 +23289,101 @@ def decode_pdf_numeric_glyph_text(text):
     return decoded
 
 
+PDF_TEXT_MAX_PAGES = 12
+PDF_OCR_MAX_PAGES = 8
+
+
+def pdf_native_page_texts(data, max_pages=PDF_TEXT_MAX_PAGES):
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(data))
+        return [page.extract_text() or "" for page in reader.pages[:max_pages]]
+    except Exception:
+        return []
+
+
+def pdf_page_needs_ocr(text):
+    sample = str(text or "").strip()
+    if not sample:
+        return True
+    return len(re.findall(r"[A-Za-z]{2,}", sample[:5000])) < 3
+
+
+def pdfplumber_page_texts(data, page_indexes):
+    try:
+        import pdfplumber
+    except Exception:
+        return {}
+    try:
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            return {
+                index: (pdf.pages[index].extract_text() or "")
+                for index in page_indexes
+                if 0 <= index < len(pdf.pages)
+            }
+    except Exception:
+        return {}
+
+
+def pdfplumber_all_page_texts(data, max_pages=PDF_TEXT_MAX_PAGES):
+    try:
+        import pdfplumber
+    except Exception:
+        return []
+    try:
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            return [(page.extract_text() or "") for page in pdf.pages[:max_pages]]
+    except Exception:
+        return []
+
+
+def ocr_pdf_page_texts(data, page_indexes, diagnostics=None):
+    from document_ocr import extract_pdf_pages
+
+    return extract_pdf_pages(data, page_indexes, data_root=APP_DIR, source_root=SOURCE_DIR,
+                             staging=bool(STAGING), diagnostics=diagnostics if diagnostics is not None else {})
+
+
+def extract_pdf_upload_text(upload, diagnostics):
+    """Read every page, then OCR only the pages with no usable text layer."""
+    pages = pdf_native_page_texts(upload.data)
+    if not pages:
+        pages = pdfplumber_all_page_texts(upload.data)
+    if not pages:
+        return "", []
+    if not any(pdf_text_layer_is_usable(page) for page in pages):
+        decoded = [decode_pdf_numeric_glyph_text(page) for page in pages]
+        if any(pdf_text_layer_is_usable(page) for page in decoded):
+            pages = decoded
+            diagnostics["text_layer"] = "numeric_glyph_decoded"
+    missing = [index for index, page in enumerate(pages) if pdf_page_needs_ocr(page)]
+    if missing:
+        for index, text in pdfplumber_page_texts(upload.data, missing).items():
+            if not pdf_page_needs_ocr(text):
+                pages[index] = text
+    missing = [index for index, page in enumerate(pages) if pdf_page_needs_ocr(page)]
+    diagnostics["pages_read"] = len(pages)
+    diagnostics["text_layer_pages"] = len(pages) - len(missing)
+    ocr_indexes = [index for index in missing if index < PDF_OCR_MAX_PAGES]
+    if ocr_indexes:
+        page_diagnostics = {}
+        ocr_pages = ocr_pdf_page_texts(upload.data, ocr_indexes, page_diagnostics)
+        diagnostics.update(page_diagnostics)
+        diagnostics["ocr_pages"] = len(ocr_indexes)
+        used = False
+        for index, text in ocr_pages.items():
+            if str(text or "").strip():
+                pages[index] = text
+                used = True
+        if used:
+            diagnostics["ocr_used"] = True
+    diagnostics["unread_pages"] = len([page for page in pages if pdf_page_needs_ocr(page)])
+    if "status" not in diagnostics:
+        diagnostics["status"] = "text_layer"
+    return "\n".join(pages), pages
+
+
 def mark_upload_text_extraction(upload, text, source="", ocr_fallback_used=False):
     try:
         setattr(upload, "_extracted_text_cache", text)
@@ -23320,22 +23415,38 @@ def extract_uploaded_text(upload):
             except UnicodeDecodeError:
                 pass
     if suffix == ".pdf":
-        try:
-            from pypdf import PdfReader
-
-            reader = PdfReader(io.BytesIO(upload.data))
-            text = "\n".join(page.extract_text() or "" for page in reader.pages[:8])
-            if pdf_text_layer_is_usable(text):
-                return mark_upload_text_extraction(upload, text, "pdf_text_layer", False)
-            decoded_text = decode_pdf_numeric_glyph_text(text)
-            if pdf_text_layer_is_usable(decoded_text):
-                return mark_upload_text_extraction(upload, decoded_text, "pdf_text_layer_decoded", False)
-        except Exception:
-            pass
         diagnostics = {}
+        text, pages = extract_pdf_upload_text(upload, diagnostics)
+        if pages:
+            setattr(upload, "_pdf_page_texts", pages)
+            native_pages = int(diagnostics.get("text_layer_pages") or 0)
+            ocr_attempted = bool(diagnostics.get("ocr_pages"))
+            if diagnostics.get("ocr_used"):
+                source = "pdf_text_layer_and_ocr" if native_pages else "pdf_ocr"
+            elif not native_pages:
+                source = "pdf_ocr"
+            else:
+                source = "pdf_text_layer"
+            label = {
+                "pdf_text_layer_and_ocr": "PDF/Word 文字层 + 本地 OCR，请核对",
+                "pdf_ocr": "本地 OCR 识别，请核对",
+            }.get(source, "PDF/Word 文字层")
+            if int(diagnostics.get("unread_pages") or 0):
+                label += "（部分页面未能识别）"
+            result = mark_upload_text_extraction(upload, text, source, ocr_attempted)
+            upload_text_extraction_meta(upload).update({
+                "source_label": label,
+                "ocr_status": diagnostics.get("status", "no_text"),
+                **{k: v for k, v in diagnostics.items() if k != "status"},
+            })
+            return result
         ocr_text = ocr_pdf_text(upload.data, diagnostics=diagnostics)
         result = mark_upload_text_extraction(upload, ocr_text, "pdf_ocr", True)
-        upload_text_extraction_meta(upload).update({"ocr_status": diagnostics.get("status", "no_text"), **{k: v for k, v in diagnostics.items() if k != "status"}})
+        upload_text_extraction_meta(upload).update({
+            "source_label": "本地 OCR 识别，请核对" if str(ocr_text or "").strip() else "",
+            "ocr_status": diagnostics.get("status", "no_text"),
+            **{k: v for k, v in diagnostics.items() if k != "status"},
+        })
         return result
     if suffix in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tif", ".tiff"} or str(upload.content_type or "").startswith("image/"):
         diagnostics = {}
@@ -23577,6 +23688,9 @@ def sa_gov_offer_total_deposit(text):
 def offer_pdf_page_texts(upload):
     if Path(upload.filename or "").suffix.lower() != ".pdf":
         return []
+    cached = getattr(upload, "_pdf_page_texts", None)
+    if cached:
+        return list(cached)
     try:
         from pypdf import PdfReader
 
@@ -23668,7 +23782,7 @@ def nsw_offer_school_name(text):
 
 def nsw_offer_page_texts(upload, text):
     pages = offer_pdf_page_texts(upload)
-    if pages:
+    if any(str(page or "").strip() for page in pages):
         return pages
     parts = re.split(r"(?=\bSCHEDULE\s+OF\s+FEES\b)", text or "", maxsplit=1, flags=re.I)
     if len(parts) == 2:
@@ -24492,14 +24606,14 @@ def extraction_review_data(upload, module, doc_type=""):
         }
     return {
         "text_found": text_found,
-        "source": ("本地 OCR 识别，请核对" if upload_text_extraction_meta(upload).get("ocr_fallback_used") else "PDF/Word 文字层") if text_found else {
+        "source": ((upload_text_extraction_meta(upload).get("source_label") or ("本地 OCR 识别，请核对" if upload_text_extraction_meta(upload).get("ocr_fallback_used") else "PDF/Word 文字层")) if text_found else {
             "engine_unavailable": "本地 OCR 未就绪，请联系管理员",
             "renderer_unavailable": "PDF 扫描组件未就绪，请联系管理员",
             "engine_failed": "本地 OCR 执行失败，请重试或人工填写",
             "timeout": "本地 OCR 超时，请重试或人工填写",
             "pdf_failed": "PDF 无法读取，请检查文件是否损坏或加密",
             "image_failed": "图片无法读取，请检查文件",
-        }.get(upload_text_extraction_meta(upload).get("ocr_status"), "未读取到可用文字"),
+        }.get(upload_text_extraction_meta(upload).get("ocr_status"), "未读取到可用文字")),
         "document_type": details.get("document_kind") or doc_type or "",
         "detected_document_type": details.get("document_type") or details.get("document_kind") or "",
         "text_extraction": upload_text_extraction_meta(upload),
