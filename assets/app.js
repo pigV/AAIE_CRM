@@ -1629,17 +1629,32 @@
     const rounded = Math.round(value * 100) / 100;
     return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
   };
-  function calculatePublishedContractPricing({standardFee, paymentMethod, discountAmount = 0, gstFree = false}) {
-    const cents = (value) => Math.round((Number(value) || 0) * 100);
+  function calculatePublishedContractPricing({standardFee, paymentMethod, discountAmount = 0, netFee, gstFree = false}) {
+    const cents = (value) => {
+      const text = String(value ?? "").trim();
+      if (!/^[0-9]+(?:\.[0-9]{1,2})?$/.test(text)) return null;
+      const [whole, fraction = ""] = text.split(".");
+      const amount = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
+      return Number.isSafeInteger(amount) ? amount : null;
+    };
+    const invalid = (error) => ({net: null, gst: null, total: null, treatment: "INVALID", error});
     const standardCents = cents(standardFee);
-    const discountCents = Math.min(Math.max(cents(discountAmount), 0), standardCents);
-    const netCents = standardCents - discountCents;
-    if (!paymentMethod) {
-      return {net: netCents / 100, gst: null, total: null, treatment: "UNSELECTED"};
+    if (standardCents === null || standardCents <= 0) return invalid("标准服务费无效");
+    let netCents;
+    if (netFee !== undefined) {
+      netCents = cents(netFee);
+      if (netCents === null || netCents <= 0 || netCents > standardCents)
+        return invalid("折后服务费须大于0、不超过标准费，且最多两位小数");
+    } else {
+      const discountCents = cents(discountAmount);
+      if (discountCents === null || discountCents < 0 || discountCents >= standardCents)
+        return invalid("折扣须为非负金额、小于标准费，且最多两位小数");
+      netCents = standardCents - discountCents;
     }
+    if (!paymentMethod) return {net: netCents / 100, gst: null, total: null, treatment: "UNSELECTED"};
     const publicAccount = paymentMethod === "澳洲公户";
     const treatment = publicAccount ? (gstFree ? "GST_FREE" : "EXCLUSIVE") : "NOT_APPLICABLE";
-    const gstCents = treatment === "EXCLUSIVE" ? Math.round(netCents * 0.1) : 0;
+    const gstCents = treatment === "EXCLUSIVE" ? Math.floor((netCents + 5) / 10) : 0;
     return {net: netCents / 100, gst: gstCents / 100, total: (netCents + gstCents) / 100, treatment};
   }
   const syncContractPaymentPlan = (form) => {
@@ -1679,25 +1694,50 @@
       gstFree.disabled = !publicAccount;
       if (!publicAccount) gstFree.value = "no";
     }
+    const net = q("[data-contract-published-net-fee]", form);
+    const editableNet = !!net?.hasAttribute("data-contract-net-editable");
+    const fromNet = editableNet && form.dataset.contractPriceEntry === "net";
     const result = calculatePublishedContractPricing({
       standardFee: standard || 0,
       paymentMethod: payment,
-      discountAmount: discountToggle?.value === "yes" ? (parseMoney(discountInput?.value) || 0) : 0,
+      discountAmount: discountToggle?.value === "yes" ? discountInput?.value : 0,
+      ...(fromNet ? {netFee: net.value} : {}),
       gstFree: gstFree?.value === "yes",
     });
-    const net = q("[data-contract-published-net-fee]", form);
     const gst = q("[data-contract-published-gst-amount]", form);
     const total = q("[data-contract-published-final-total]", form);
     const treatment = q("[data-contract-published-gst]", form);
+    if (editableNet) net.disabled = sourceHold;
     if (sourceHold) {
-      if (net) net.value = "SOURCE VERIFICATION HOLD";
+      if (net) net.value = editableNet ? "" : "SOURCE VERIFICATION HOLD";
       if (gst) gst.value = "HOLD";
       if (total) total.value = "HOLD";
       if (treatment) treatment.value = "请确认本次业务资料后生成合同";
       return;
     }
     const displayAmount = (value) => Number.isFinite(value) ? `AUD ${value.toFixed(2)}` : "待计算";
-    if (net) net.value = `AUD ${result.net.toFixed(2)}`;
+    if (editableNet) net.setCustomValidity("");
+    if (discountInput) discountInput.setCustomValidity("");
+    const reason = q('[name="discount_reason"]', form);
+    if (reason) reason.required = Number.isFinite(result.net) && result.net < standard;
+    if (result.treatment === "INVALID") {
+      const invalidInput = fromNet ? net : discountInput;
+      if (invalidInput) invalidInput.setCustomValidity(result.error);
+      if (net && !fromNet) net.value = "";
+      if (gst) gst.value = "待计算";
+      if (total) total.value = "待计算";
+      if (treatment) treatment.value = result.error;
+      return;
+    }
+    if (fromNet) {
+      const discount = Math.round((standard - result.net) * 100) / 100;
+      if (discountToggle) discountToggle.value = discount > 0 ? "yes" : "no";
+      if (discountInput) discountInput.value = discount > 0 ? discount.toFixed(2) : "";
+      const amountField = q("[data-contract-discount-amount]", form);
+      if (amountField) amountField.hidden = discount === 0;
+    } else if (net) {
+      net.value = `${editableNet ? "" : "AUD "}${result.net.toFixed(2)}`;
+    }
     if (gst) gst.value = displayAmount(result.gst);
     if (total) total.value = displayAmount(result.total);
     if (treatment) treatment.value = {
@@ -1736,6 +1776,7 @@
     qa("input, select, textarea", amountField).forEach((control) => {
       if (!visible) control.value = "";
     });
+    form.dataset.contractPriceEntry = "discount";
     syncContractFees(form);
     syncPublishedContractFees(form);
   };
@@ -1814,6 +1855,13 @@
             const displayedFee = selectedType === "TransferApplicationContract"
               ? transferFee
               : (commercial.standard_service_fee || "");
+            form.dataset.contractPriceEntry = "discount";
+            const discountToggle = q("[data-contract-discount-toggle]", form);
+            const discountInput = q("[data-contract-discount-input]", form);
+            if (discountToggle) discountToggle.value = "no";
+            if (discountInput) discountInput.value = "";
+            const amountField = q("[data-contract-discount-amount]", form);
+            if (amountField) amountField.hidden = true;
             if (fee) fee.value = displayedFee ? `AUD ${displayedFee}` : "SOURCE VERIFICATION HOLD";
             if (gst) gst.value = commercial.gst_display || "未配置";
             if (terms) terms.value = commercial.payment_terms || "";
@@ -1887,6 +1935,7 @@
       if (input.dataset.contractDiscountInputBound !== "true") {
         input.dataset.contractDiscountInputBound = "true";
         input.addEventListener("input", () => {
+          form.dataset.contractPriceEntry = "discount";
           syncContractFees(form);
           syncPublishedContractFees(form);
         });
@@ -1898,6 +1947,19 @@
         select.addEventListener("change", () => syncContractDiscount(select));
       }
       syncContractDiscount(select);
+    });
+    qa("[data-contract-net-editable]", root).forEach((input) => {
+      const form = input.closest("form");
+      if (input.dataset.contractNetBound !== "true") {
+        input.dataset.contractNetBound = "true";
+        input.addEventListener("input", () => {
+          form.dataset.contractPriceEntry = "net";
+          syncPublishedContractFees(form);
+        });
+        input.addEventListener("blur", () => {
+          if (input.value && input.validity.valid) input.value = Number(input.value).toFixed(2);
+        });
+      }
     });
     qa("[data-contract-published-payment-method], [data-contract-published-gst-free], [data-contract-payment-plan-toggle]", root).forEach((control) => {
       const form = control.closest("form");

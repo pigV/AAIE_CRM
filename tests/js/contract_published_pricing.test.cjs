@@ -29,3 +29,17 @@ assert.deepEqual(
   {net: 2400, gst: 0, total: 2400, treatment: "GST_FREE"},
 );
 console.log("contract published pricing browser matrix: PASS");
+
+assert.deepEqual(JSON.parse(JSON.stringify(calculate({standardFee: 2400, paymentMethod: "澳洲公户", netFee: "2200.00"}))),
+  {net: 2200, gst: 220, total: 2420, treatment: "EXCLUSIVE"});
+for (const netFee of ["", "0", "-1", "2400.01", "2200.005", "NaN", "Infinity", "2e3"]) {
+  const result = calculate({standardFee: 2400, paymentMethod: "澳洲公户", netFee});
+  assert.equal(result.treatment, "INVALID", `reject net fee ${netFee}`);
+  assert.equal(result.total, null);
+}
+for (const discountAmount of ["-1", "2400", "2500", "1.005", "NaN", "Infinity", "2e2"]) {
+  const result = calculate({standardFee: 2400, paymentMethod: "澳洲公户", discountAmount});
+  assert.equal(result.treatment, "INVALID", `reject discount ${discountAmount}`);
+  assert.equal(result.total, null);
+}
+console.log("editable net fee and monetary validation: PASS");

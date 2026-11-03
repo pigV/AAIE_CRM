@@ -10,6 +10,7 @@ import copy
 import hashlib
 import inspect
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -25,6 +26,8 @@ from contract_template_editor import (
     render_published_contract_artifacts,
 )
 
+
+CONTRACT_PRICE_ADJUST_PERMISSION = "contracts.price.adjust"
 
 AUTHORITY_ID = "PublishedContractTemplateV2"
 RENDERER_SCHEMA = {
@@ -127,6 +130,14 @@ def _money(value: object, label: str) -> Decimal:
     if amount < 0:
         raise PublishedTemplateIntegrityError(f"{label}无效。")
     return amount
+
+
+def _input_money(value: object, label: str) -> Decimal:
+    """User-entered money must be finite plain decimal with at most two places."""
+    text = str(value if value is not None else "").strip()
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", text):
+        raise PublishedTemplateIntegrityError(f"{label}必须为最多两位小数的有效金额。")
+    return _money(text, label)
 
 
 def _money_text(value: Decimal) -> str:
@@ -327,25 +338,31 @@ def _actor_permissions(actor: Mapping[str, object]) -> set[str]:
     return {str(value) for value in raw}
 
 
+def can_adjust_contract_price(actor: Mapping[str, object]) -> bool:
+    # A broad legacy wildcard on a non-Admin role is not a price delegation.
+    return (str(actor.get("role_name") or "") == "Admin"
+            or CONTRACT_PRICE_ADJUST_PERMISSION in _actor_permissions(actor))
+
+
 def _approval(
     value: Mapping[str, object] | None, actor: Mapping[str, object], label: str, *,
-    permission: str | None = None,
+    permission: str | None = None, allow_wildcard: bool = True,
 ) -> dict[str, object] | None:
     if value is None:
         return None
     approval = copy.deepcopy(dict(value))
     authorized = str(actor.get("role_name") or "") == "Admin"
     if permission:
-        authorized = authorized or permission in _actor_permissions(actor) or "*" in _actor_permissions(actor)
+        authorized = authorized or permission in _actor_permissions(actor) or (allow_wildcard and "*" in _actor_permissions(actor))
     if not authorized:
-        raise PublishedTemplateIntegrityError(f"只有Admin可以批准{label}。")
+        raise PublishedTemplateIntegrityError(f"当前账号无权批准{label}。")
     for field in ("reason", "approved_by", "operator_id", "approved_at"):
         if not str(approval.get(field) or "").strip():
             raise PublishedTemplateIntegrityError(f"{label}审批信息不完整。")
     if int(approval["approved_by"]) != int(actor.get("id") or 0):
-        raise PublishedTemplateIntegrityError(f"{label}批准人与当前Admin不一致。")
+        raise PublishedTemplateIntegrityError(f"{label}批准人与当前审批人不一致。")
     if int(approval["operator_id"]) != int(actor.get("id") or 0):
-        raise PublishedTemplateIntegrityError(f"{label}操作者与当前Admin不一致。")
+        raise PublishedTemplateIntegrityError(f"{label}操作者与当前审批人不一致。")
     return approval
 
 
@@ -447,6 +464,7 @@ def validate_transfer_fee_authority(bound: Mapping[str, object]) -> None:
 def bind_new_contract(
     package: PublishedTemplatePackage, payload: Mapping[str, object], *,
     actor: Mapping[str, object], discount_approval: Mapping[str, object] | None = None,
+    net_fee_override: Mapping[str, object] | None = None,
     payment_plan_approval: Mapping[str, object] | None = None,
     gst_free_approval: Mapping[str, object] | None = None,
     trusted_transfer_source: Mapping[str, object] | None = None,
@@ -518,10 +536,24 @@ def bind_new_contract(
     payment_method = str(payload.get("payment_method") or "").strip()
     if payment_method not in payment_methods:
         raise PublishedTemplateIntegrityError("付款方式不在Published允许目录中。")
-    discount = _approval(discount_approval, actor, "合同折扣")
+    if net_fee_override is not None:
+        if not can_adjust_contract_price(actor):
+            raise PublishedTemplateIntegrityError("当前账号无权编辑折后服务费。")
+        if discount_approval is not None:
+            raise PublishedTemplateIntegrityError("折后服务费与折扣不能同时作为金额来源。")
+        net_input = _input_money(net_fee_override.get("net_service_fee_ex_gst"), "折后服务费")
+        if net_input <= 0 or net_input > standard:
+            raise PublishedTemplateIntegrityError("折后服务费必须大于0且不得超过标准服务费。")
+        if net_input < standard:
+            discount_approval = {
+                **dict(net_fee_override),
+                "discount_amount": _money_text(standard - net_input),
+            }
+    discount = _approval(discount_approval, actor, "合同折扣",
+                         permission=CONTRACT_PRICE_ADJUST_PERMISSION, allow_wildcard=False)
     discount_amount = Decimal("0.00")
     if discount:
-        discount_amount = _money(discount.get("discount_amount"), "折扣金额")
+        discount_amount = _input_money(discount.get("discount_amount"), "折扣金额")
         if discount_amount <= 0 or discount_amount >= standard:
             raise PublishedTemplateIntegrityError("折扣金额无效。")
     net_ex_gst = standard - discount_amount

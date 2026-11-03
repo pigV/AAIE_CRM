@@ -623,6 +623,46 @@ def attach_student_case(
     )
 
 
+def _validate_school_plan_supersession_chain(
+    conn: sqlite3.Connection,
+    predecessor_id: int,
+    report_id: int,
+    student_id: str,
+    city_id: int,
+    cycle_id: int,
+) -> None:
+    """Prove every supersession hop without rewriting historical pointers."""
+
+    seen = set()
+    cursor_id = int(predecessor_id)
+    while cursor_id != int(report_id):
+        if cursor_id in seen:
+            raise CycleConflictError(
+                "current cycle school-plan predecessor is not safely superseded"
+            )
+        seen.add(cursor_id)
+        row = conn.execute(
+            """SELECT student_id,city_id,plan_sector,status,is_current,
+                      application_cycle_id,superseded_by_report_id
+                 FROM school_plan_reports WHERE id=?""",
+            (cursor_id,),
+        ).fetchone()
+        if (
+            row is None
+            or str(row[0]) != str(student_id)
+            or row[1] is None or int(row[1]) != int(city_id)
+            or str(row[2] or "").strip().lower() != "public"
+            or str(row[3] or "").strip().lower() != "superseded"
+            or int(row[4] or 0) != 0
+            or (row[5] is not None and int(row[5]) != int(cycle_id))
+            or row[6] is None
+        ):
+            raise CycleConflictError(
+                "current cycle school-plan predecessor is not safely superseded"
+            )
+        cursor_id = int(row[6])
+
+
 def _attach_school_plan_report_ownership(
     conn: sqlite3.Connection,
     report_id: int,
@@ -676,15 +716,10 @@ def _attach_school_plan_report_ownership(
             (cycle.id, int(report[2]), int(report_id)),
         ).fetchall()
         for predecessor in predecessors:
-            if (
-                str(predecessor[1]) != str(report[1])
-                or str(predecessor[2] or "").strip().lower() != "superseded"
-                or int(predecessor[3] or 0) != 0
-                or int(predecessor[4] or 0) != int(report_id)
-            ):
-                raise CycleConflictError(
-                    "current cycle school-plan predecessor is not safely superseded"
-                )
+            _validate_school_plan_supersession_chain(
+                conn, int(predecessor[0]), int(report_id),
+                str(report[1]), int(report[2]), cycle.id,
+            )
             demoted = conn.execute(
                 """UPDATE school_plan_reports
                       SET cycle_is_current=0,updated_at=?
@@ -698,7 +733,7 @@ def _attach_school_plan_report_ownership(
                     str(report[1]),
                     int(report[2]),
                     cycle.id,
-                    int(report_id),
+                    int(predecessor[4]),
                 ),
             )
             if demoted.rowcount != 1:

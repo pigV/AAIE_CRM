@@ -176,6 +176,8 @@ from contract_template_editor import (
     render_template_editor_index,
 )
 from contract_generation_authority import (
+    CONTRACT_PRICE_ADJUST_PERMISSION,
+    can_adjust_contract_price,
     PublishedTemplateAuthorityError,
     bind_new_contract as bind_published_contract,
     is_published_v2_snapshot,
@@ -564,6 +566,9 @@ report_i18n_zh_CN = {
 UPLOAD_REVIEW_DIR = APP_DIR / "upload_staging"
 ASSET_DIR = SOURCE_DIR / "assets" if STAGING else APP_DIR / "assets"
 WECHAT_VERIFY_DIR = APP_DIR / "secure_assets" / "wechat_verification"
+# Exact file requested for the current WeChat access-restoration application.
+# Its contents stay in the private runtime directory, outside source control.
+WECHAT_RECOVERY_VERIFY_FILENAME = "9edd4124efadbcd28f3214297b13630c.txt"
 SCHOOL_PLAN_BRAND_LOGO_CANDIDATES = (
     ASSET_DIR / "branding" / "aoya_logo_transparent.png",
     ASSET_DIR / "branding" / "aoya_logo_original.png",
@@ -5891,15 +5896,35 @@ def authority_contract_student_snapshot(student):
     }
 
 
+CONTRACT_PRICE_ADJUST_USERS_SETTING = "contract_price_adjust_user_ids"
+
+
+def contract_price_actor(user):
+    """Resolve the narrow grant from server-owned settings, never POST fields."""
+    actor = dict(user or {})
+    permissions = list(get_permissions(user))
+    try:
+        granted_ids = json.loads(db.setting(CONTRACT_PRICE_ADJUST_USERS_SETTING, "[]"))
+    except (TypeError, ValueError):
+        granted_ids = []
+    if (isinstance(granted_ids, list)
+            and all(type(value) is int and value > 0 for value in granted_ids)
+            and type(actor.get("id")) is int and actor["id"] in granted_ids):
+        permissions.append(CONTRACT_PRICE_ADJUST_PERMISSION)
+    actor["actor_permissions"] = permissions
+    return actor
+
+
 def _authority_admin_approval(form, user, *, prefix, amount_field=None):
     enabled = str(form.get(f"{prefix}_enabled") or "no").strip().lower() == "yes"
     if not enabled:
         return None
-    if str(user.get("role_name") or "") != "Admin":
-        raise PublishedTemplateAuthorityError("只有Admin可以批准合同折扣或特殊分期。")
+    delegated_discount = prefix == "discount" and can_adjust_contract_price(contract_price_actor(user))
+    if str(user.get("role_name") or "") != "Admin" and not delegated_discount:
+        raise PublishedTemplateAuthorityError("当前账号无权批准合同折扣或特殊分期。")
     reason = str(form.get(f"{prefix}_reason") or "").strip()
     if not reason:
-        raise PublishedTemplateAuthorityError("Admin审批必须填写原因。")
+        raise PublishedTemplateAuthorityError("合同审批必须填写原因。")
     approval = {
         "reason": reason,
         "approved_by": int(user["id"]),
@@ -5943,9 +5968,20 @@ def authority_contract_bindings(
         except json.JSONDecodeError as exc:
             raise PublishedTemplateAuthorityError("特殊分期付款计划不是有效JSON。") from exc
         payment_plan.update({"mode": "installments", "installments": installments})
-    discount = _authority_admin_approval(
-        form, user, prefix="discount", amount_field="discount_amount"
-    )
+    net_fee_override = None
+    discount = None
+    if "net_service_fee_ex_gst" in form:
+        net_fee_override = {
+            "net_service_fee_ex_gst": str(form.get("net_service_fee_ex_gst") or "").strip(),
+            "reason": str(form.get("discount_reason") or "").strip(),
+            "approved_by": int(user["id"]),
+            "operator_id": int(user["id"]),
+            "approved_at": now_iso(),
+        }
+    else:
+        discount = _authority_admin_approval(
+            form, user, prefix="discount", amount_field="discount_amount"
+        )
     gst_free = _authority_gst_free_approval(form, user)
     signer = authority_contract_signer(student, form)
     student_snapshot = authority_contract_student_snapshot(student)
@@ -5966,10 +6002,9 @@ def authority_contract_bindings(
         "parent_address": str(form.get("parent_address") or student["home_address"] or ""),
         "notes": str(form.get("notes") or ""),
     }
-    actor = dict(user)
-    actor["actor_permissions"] = get_permissions(user)
+    actor = contract_price_actor(user)
     bound = bind_published_contract(
-        package, payload, actor=actor, discount_approval=discount,
+        package, payload, actor=actor, discount_approval=discount, net_fee_override=net_fee_override,
         payment_plan_approval=payment_plan, gst_free_approval=gst_free,
         trusted_transfer_source=trusted_transfer_source,
     )
@@ -26834,6 +26869,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 return self.serve_asset()
             if re.fullmatch(r"/MP_verify[A-Za-z0-9_-]+\.txt", self.parsed.path):
                 return self.serve_wechat_verify_file()
+            if self.parsed.path == f"/{WECHAT_RECOVERY_VERIFY_FILENAME}":
+                if method != "GET":
+                    return self.text("Method not allowed", HTTPStatus.METHOD_NOT_ALLOWED)
+                return self.serve_wechat_verify_file()
             if self.parsed.path == "/version":
                 return self.text(VERSION)
             if self.parsed.path == "/health":
@@ -27780,7 +27819,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def serve_wechat_verify_file(self):
         filename = Path(self.parsed.path).name
-        if not re.fullmatch(r"MP_verify[A-Za-z0-9_-]+\.txt", filename):
+        if (not re.fullmatch(r"MP_verify[A-Za-z0-9_-]+\.txt", filename)
+                and filename != WECHAT_RECOVERY_VERIFY_FILENAME):
             return self.text("Not found", 404)
         target = (WECHAT_VERIFY_DIR / filename).resolve()
         if WECHAT_VERIFY_DIR.resolve() not in target.parents or not target.is_file():
@@ -34214,13 +34254,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return html_doc
 
     def school_plan_render_html(self, snapshot):
-        return self.school_plan_snapshot_report_html(snapshot, {
+        return self.school_plan_strip_duplicate_detailed_comparison_section(self.school_plan_snapshot_report_html(snapshot, {
             "student_id": (snapshot.get("student") or {}).get("student_id", ""),
             "status": "generated",
             "confirmed_at": "",
             "confirmed_by_name": "",
             "report_version": snapshot.get("report_version") or 1,
-        })
+        }))
 
     def school_plan_snapshot_crm_metric(self, label, value, note=""):
         return f"""<div><span>{esc(label)}</span><strong>{esc(self.school_plan_report_value(value, 'no_data'))}</strong><small>{esc(self.school_plan_report_display_text(note or ''))}</small></div>"""
@@ -36175,6 +36215,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             node_bin = Path(shutil.which("node") or "")
         if not node_bin or not node_bin.exists():
             raise RuntimeError("Node.js runtime is not available for HTML PDF rendering.")
+        from school_report_browser import BROWSER, renderer_environment
+        if STAGING and getattr(STAGING, "runtime_configuration", None) and not BROWSER.is_file():
+            raise RuntimeError("学校报告浏览器未安装，无法生成一致样式 PDF。")
         script_path = target_path.with_suffix(".print-pdf.cjs")
         script_path.write_text(
             r"""
@@ -36185,15 +36228,39 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 (async () => {
   const htmlPath = process.argv[2];
   const pdfPath = process.argv[3];
+  const source = fs.readFileSync(htmlPath, 'utf8');
+  const archive = source.includes('data-school-plan-archive');
+  // Archive layout is independent of the parent's device; CSS fixes A4 pages.
+  const viewportWidth = 1240;
 	  const requestedExecutable = process.env.AAIE_CRM_PDF_BROWSER_PATH || '';
 	  const browser = await chromium.launch({
 	    headless: true,
 	    timeout: 30000,
 	    ...(requestedExecutable && fs.existsSync(requestedExecutable) ? { executablePath: requestedExecutable } : {})
 	  });
-  const page = await browser.newPage({ viewport: { width: 1240, height: 1754 }, deviceScaleFactor: 1 });
+  const page = await browser.newPage({ viewport: { width: viewportWidth, height: 1754 }, deviceScaleFactor: 1, javaScriptEnabled: false });
+  await page.route(/^https?:/, route => route.abort());
   await page.goto(pathToFileURL(htmlPath).href, { waitUntil: 'networkidle' });
-  await page.emulateMedia({ media: 'print' });
+  await page.emulateMedia({ media: 'screen' });
+  await page.evaluate(() => document.fonts.ready);
+  await page.evaluate(async () => {
+    await Promise.all(Array.from(document.images, img => img.decode().catch(() => {})));
+  });
+  if (archive) {
+    // A PDF cannot scroll: fit only horizontal scroll contents without
+    // rewrapping/recolouring the parent's table/chart.
+    await page.evaluate(() => {
+      for (const selector of ['.report-dashboard-table', '.report-comparison-chart-chinese_ancestry_count .report-comparison-bars']) {
+        for (const content of document.querySelectorAll(selector)) {
+          const container = content.parentElement;
+          const style = getComputedStyle(container);
+          const available = container.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+          const width = content.getBoundingClientRect().width;
+          if (available > 0 && width > available) content.style.zoom = String(available / width);
+        }
+      }
+    });
+  }
 	  const meta = await page.evaluate(() => ({
 	    student: document.body.dataset.reportStudent || '',
 	    version: document.body.dataset.reportVersion || '',
@@ -36208,7 +36275,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
     displayHeaderFooter: true,
 	    headerTemplate: `<div style="width:100%;font-family:'Noto Sans CJK SC','Source Han Sans SC','Noto Sans SC','Microsoft YaHei',Arial,sans-serif;font-size:7pt;color:#94a3b8;font-weight:400;padding:0 18mm;display:flex;justify-content:space-between;align-items:center;"><span style="display:flex;align-items:center;gap:6px;">${meta.logo ? `<img src="${meta.logo}" style="height:12px;width:auto;object-fit:contain;">` : ''}<span>AAIE School Advisory Report</span></span><span>${meta.student} · ${meta.version} · ${meta.generated}</span></div>`,
 	    footerTemplate: `<div style="width:100%;font-family:'Noto Sans CJK SC','Source Han Sans SC','Noto Sans SC','Microsoft YaHei',Arial,sans-serif;font-size:7pt;color:#94a3b8;font-weight:400;padding:0 18mm;display:flex;justify-content:space-between;"><span>Confidential · Prepared by AAIE</span><span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span></div>`,
-	    margin: { top: '16mm', right: '18mm', bottom: '18mm', left: '18mm' }
+	    margin: { top: '16mm', right: '18mm', bottom: '18mm', left: '18mm' },
+    // Use the same desktop layout as the approved sample. preferCSSPageSize
+    // honours @page size:A4 for physical paper, without triggering mobile CSS.
+    ...(archive ? { width: '1240px', height: '1754px', format: undefined, displayHeaderFooter: false, margin: {top:0,right:0,bottom:0,left:0} } : {})
   });
   await browser.close();
 })().catch((error) => {
@@ -36218,7 +36288,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 """,
             encoding="utf-8",
         )
-        env = os.environ.copy()
+        env = renderer_environment(os.environ)
+        if STAGING and getattr(STAGING, "runtime_configuration", None):
+            env["AAIE_CRM_PDF_BROWSER_PATH"] = str(BROWSER)
+            env["MAC_CHROMIUM_TMPDIR"] = env["TMPDIR"]
         if node_modules.exists():
             env["NODE_PATH"] = str(node_modules)
         if not env.get("AAIE_CRM_PDF_BROWSER_PATH"):
@@ -36306,22 +36379,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             append_service_log(
                 "admin",
-                "school_plan_playwright_pdf_failed_trying_chrome_cli",
+                "school_plan_browser_pdf_failed_preserving_layout",
                 repr(exc),
                 html_preview=str(html_path),
                 target_pdf=str(target_path),
             )
-        try:
-            return self.school_plan_render_html_pdf_with_chrome_cli(html_path, target_path)
-        except Exception as exc:
-            append_service_log(
-                "admin",
-                "school_plan_browser_pdf_failed_using_reportlab_fallback",
-                repr(exc),
-                html_preview=str(html_path),
-                target_pdf=str(target_path),
-            )
-            return self.school_plan_render_pdf_reportlab_fallback(snapshot, target_path)
+        raise RuntimeError("学校方案 PDF 无法按家长页面样式生成，请稍后重试或联系管理员；未生成替代排版。")
 
     def school_plan_render_pdf_reportlab_fallback(self, snapshot, target_path):
         target_path = Path(target_path)
@@ -37126,7 +37189,48 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             copy_text=share_link.get("share_url") or "",
         )
 
-    def school_plan_report_download(self, method, report_id):
+    def school_plan_confirmed_archive_target(self, report):
+        confirmation = db.one(
+            """SELECT id FROM school_plan_report_confirmations WHERE report_id=? AND status='confirmed'
+               ORDER BY confirmed_at DESC,id DESC LIMIT 1""", (report["id"],),
+        )
+        if not confirmation:
+            return None
+        event = db.one(
+            """SELECT metadata_json FROM school_plan_report_events
+               WHERE report_id=? AND event_type='confirmation_archived_to_application'
+                 AND json_extract(metadata_json,'$.confirmation_id')=?
+               ORDER BY id DESC LIMIT 1""", (report["id"], confirmation["id"]),
+        )
+        if not event:
+            requested = db.one(
+                """SELECT id FROM school_plan_report_events
+                   WHERE report_id=? AND event_type='parent_page_archive_requested'
+                     AND json_extract(metadata_json,'$.confirmation_id')=? LIMIT 1""",
+                (report["id"], confirmation["id"]),
+            )
+            if requested:
+                raise ValueError("已收到家长确认，但报告归档尚未完成，请联系管理员处理。")
+            return None
+        metadata = json.loads(event["metadata_json"] or "{}")
+        # Existing historical archives retain their original viewing path.
+        if metadata.get("render_source") != "parent_page":
+            return None
+        document = db.one(
+            """SELECT file_path FROM student_documents WHERE id=? AND student_id=?
+               AND folder_category='Applications' AND document_type='FinalConfirmedSchoolPlan' AND is_active=1""",
+            (metadata["final_document_id"], report["student_id"]),
+        )
+        student = db.one("SELECT * FROM students WHERE student_id=?", (report["student_id"],))
+        if not document or not student:
+            raise ValueError("已确认报告归档记录不可读取，请联系管理员处理。")
+        target = ensure_within(document["file_path"], nas.student_folder(student))
+        if (not target.is_file()
+                or hashlib.sha256(target.read_bytes()).hexdigest() != metadata.get("parent_pdf_sha256")):
+            raise ValueError("已确认报告归档不可读取或校验失败，请联系管理员处理。")
+        return target
+
+    def school_plan_report_download(self, method, report_id, *, inline=False):
         if method != "GET":
             return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
         if not can_access_module(self.user, "school_plan_reports"):
@@ -37134,13 +37238,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         report = db.one("SELECT * FROM school_plan_reports WHERE id=?", (report_id,))
         if not report or not report["file_path"]:
             return self.error_page("报告文件不存在。", HTTPStatus.NOT_FOUND)
-        target = Path(report["file_path"]).resolve()
-        if SCHOOL_PLAN_REPORT_DIR.resolve() not in target.parents or not target.is_file():
-            return self.error_page("报告文件不可访问。", HTTPStatus.NOT_FOUND)
+        target = self.school_plan_confirmed_archive_target(report)
+        if target is None:
+            target = Path(report["file_path"]).resolve()
+            if SCHOOL_PLAN_REPORT_DIR.resolve() not in target.parents or not target.is_file():
+                return self.error_page("报告文件不可访问。", HTTPStatus.NOT_FOUND)
         payload = target.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", "application/pdf")
-        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(target.name)}")
+        self.send_header("Content-Disposition", f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{quote(target.name)}")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -38111,6 +38217,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         report = db.one("SELECT * FROM school_plan_reports WHERE id=?", (report_id,))
         if not report:
             return self.error_page("报告不存在。", HTTPStatus.NOT_FOUND)
+        if self.school_plan_confirmed_archive_target(report) is not None:
+            return self.school_plan_report_download(method, report_id, inline=True)
         snapshot = self.school_plan_snapshot(report)
         self.send_html(self.school_plan_snapshot_report_html(snapshot, report))
 
@@ -66595,6 +66703,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     <label data-contract-payment-plan-fields hidden>分期批准原因<input name="payment_plan_reason" data-contract-payment-plan-input disabled></label>
                     <label class="full" data-contract-payment-plan-fields hidden>分期JSON<textarea name="payment_plan_json" rows="3" data-contract-payment-plan-input disabled></textarea><span>仅批准特殊分期时填写；分期总额必须等于最终合同金额。</span></label>
                     """
+                if not admin_adjustments and can_adjust_contract_price(contract_price_actor(self.user)):
+                    admin_adjustments = '<label>折扣批准原因<input name="discount_reason"></label>'
                 gst_free_adjustment = ""
                 if str(self.user.get("role_name") or "") == "Admin" or allowed(
                     self.user, "contracts.gst_free.approve"
@@ -66603,11 +66713,17 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     <label>GST例外<select name="gst_free_enabled" data-contract-published-gst-free><option value="no" selected>按付款方式应用GST</option><option value="yes">批准GST-free</option></select></label>
                     <label>GST-free税务／业务依据<input name="gst_free_reason"></label>
                     """
+                net_fee_value = esc(default_commercial.get("standard_service_fee_ex_gst") or "")
+                net_fee_field = f'<input value="AUD {net_fee_value}" readonly data-contract-published-net-fee>'
+                if can_adjust_contract_price(contract_price_actor(self.user)):
+                    net_fee_field = (f'<input name="net_service_fee_ex_gst" value="{net_fee_value}" '
+                                     'inputmode="decimal" required data-contract-published-net-fee '
+                                     'data-contract-net-editable><span>单位 AUD；优惠后须填写折扣批准原因。</span>')
                 fee_section = f"""<section class="contract-section"><h3>费用信息 · Published V2唯一权威</h3><div class="dialog-grid">
                   <label>支付方式<select name="service_fee_currency" required data-contract-published-payment-method><option value="">请选择</option>{payment_method_options}</select></label>
                   <label>标准服务费（不含GST）<input value="AUD {esc(default_commercial.get("standard_service_fee_ex_gst") or "")}" readonly data-contract-published-standard-fee></label>
                   <label>GST<input value="{esc(gst_label)}" readonly data-contract-published-gst></label>
-                  <label>折后服务费（不含GST）<input value="AUD {esc(default_commercial.get("standard_service_fee_ex_gst") or "")}" readonly data-contract-published-net-fee></label>
+                  <label>折后服务费（不含GST）{net_fee_field}</label>
                   <label>GST金额<input value="AUD 0.00" readonly data-contract-published-gst-amount></label>
                   <label>最终合同总额<input value="AUD {esc(default_commercial.get("standard_service_fee_ex_gst") or "")}" readonly data-contract-published-final-total></label>
                   <label>默认付款节点<input value="{esc(default_commercial.get("payment_terms") or "")}" readonly data-contract-published-payment-terms></label>
@@ -73867,7 +73983,43 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         return cleaned
 
-    def school_plan_share_viewer_html(self, token, link):
+    def school_plan_confirmation_summary_html(self, confirmation, schools, *, require_signature=False):
+        event = db.one(
+            """SELECT event_by_name FROM school_plan_report_events
+               WHERE report_id=? AND event_type='parent_decision_confirmed'
+                 AND json_extract(metadata_json,'$.confirmation_id')=?
+               ORDER BY id LIMIT 1""",
+            (confirmation["report_id"], confirmation["id"]),
+        )
+        decisions = db.all(
+            "SELECT school_id,rank_order FROM school_plan_confirmed_schools WHERE confirmation_id=? AND is_selected=1",
+            (confirmation["id"],),
+        )
+        if not decisions:
+            decisions = db.all("SELECT school_id,rank_order FROM school_plan_report_school_rankings WHERE confirmation_id=?", (confirmation["id"],))
+        selected = {str(row["school_id"]): row["rank_order"] for row in decisions}
+        rows = []
+        for school in schools:
+            key = str(school["school_id"])
+            value = (str(selected[key]) if selected[key] is not None else "已选择") if key in selected else "本次不申请"
+            rows.append(f'<div class="rank-row"><strong>{esc(school["school_name"])}</strong><span class="confirmed-rank">{esc(value)}</span></div>')
+        signature = self.school_plan_report_signature_data_uri(confirmation["signature_image_path"])
+        if require_signature and not signature:
+            raise ValueError("原始签名图片不可读取，未生成缺少签名的归档报告。")
+        signature_html = f'<img class="confirmed-signature" src="{esc(signature)}" alt="家长电子签名">' if signature else '<p>原始签名暂不可预览，请联系顾问。</p>'
+        # Legacy confirmations did not persist a separate submitted name.
+        # Their own WeChat nickname is safer than another viewer's latest name.
+        parent_name = event["event_by_name"] if event else confirmation["wechat_nickname"]
+        return f"""<div class="secure-confirm" data-confirmation-record>
+          <h2>家长已确认</h2>
+          <p>确认时间：{esc(display_datetime(confirmation['confirmed_at']))}。选择和签名记录已锁定。</p>
+          {''.join(rows)}
+          <p>{esc(confirmation['confirmation_statement'])}</p>
+          <label>家长姓名：{esc(parent_name)}</label>
+          <label>电子签名</label>{signature_html}
+        </div>"""
+
+    def school_plan_share_viewer_html(self, token, link, *, archive=False):
         snapshot = self.school_plan_snapshot(link)
         report_html = self.school_plan_snapshot_report_html(snapshot, link)
         report_html = self.school_plan_strip_duplicate_detailed_comparison_section(report_html)
@@ -73907,13 +74059,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             decision_form_attr = " data-private-school-selection"
         else:
             decision_title = "最终学校排序确认"
-            decision_help = "请根据最终申请意向，为本方案中的学校排序。排序不能重复，也不能漏选。"
+            decision_help = "请选择本次申请的学校并排序，留空表示本次不申请。至少选择一所，已选学校须从 1 开始连续排序，不能重复。"
             rank_options = "".join(f'<option value="{i}">{i}</option>' for i in range(1, len(schools) + 1))
             decision_rows = "".join(
-                f"""<div class="rank-row"><strong>{esc(item['school_name'])}</strong><select name="{esc(self.school_plan_confirmation_rank_field_name(item))}" required><option value="">请选择</option>{rank_options}</select></div>"""
+                f"""<div class="rank-row"><strong>{esc(item['school_name'])}</strong><select name="{esc(self.school_plan_confirmation_rank_field_name(item))}"><option value="">不申请（留空）</option>{rank_options}</select></div>"""
                 for item in schools
             )
-            declaration_text = "我确认已阅读本学校方案报告，并确认以上学校排序为最终申请意向。本人理解该排序将作为后续学校申请递交的重要依据。"
+            declaration_text = "我确认已阅读本学校方案报告，以上已选学校及排序为本次最终申请意向，留空的学校本次不申请。本人理解该选择和排序将作为后续学校申请递交的重要依据。"
             decision_form_attr = ""
         confirmation = db.one(
             "SELECT * FROM school_plan_report_confirmations WHERE report_id=? AND link_id=? AND status='confirmed' ORDER BY id DESC LIMIT 1",
@@ -73921,7 +74073,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         can_submit_confirmation = (not confirmation) and self.school_plan_share_can_confirm(link)
         if confirmation:
-            confirm_body = f"""<div class="secure-confirm"><h2>家长已确认</h2><p>该方案已于 {esc(display_datetime(confirmation['confirmed_at']))} 完成递交。排序和签名记录已锁定，如需修改请联系顾问重新开启确认流程。</p></div>"""
+            confirm_body = self.school_plan_confirmation_summary_html(confirmation, schools, require_signature=archive)
         elif not can_submit_confirmation:
             confirm_body = """<div class="secure-confirm"><h2>只读查看权限</h2><p>您当前为只读查看权限。如需提交最终确认，请联系 AAIE 顾问。</p></div>"""
         else:
@@ -73939,13 +74091,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         secure_css = """
           html,body{margin:0;background:#e5edf7;width:100%;max-width:100%;min-height:100%;height:auto;overflow-x:hidden;overflow-y:auto;position:static;-webkit-overflow-scrolling:touch;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;}
           body.school-plan-secure-body{overflow-x:hidden;overflow-y:auto;position:static;touch-action:pan-y;overscroll-behavior-y:auto;}
-          .secure-toolbar{position:sticky;top:0;z-index:100;background:rgba(248,250,252,.96);backdrop-filter:blur(10px);border-bottom:1px solid #d8e0ea;padding:12px 18px;display:flex;justify-content:space-between;gap:14px;align-items:center;font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif;}
+          .secure-toolbar{position:sticky;top:0;z-index:100;background:rgba(248,250,252,.96);backdrop-filter:blur(10px);border-bottom:1px solid #d8e0ea;padding:12px 18px;display:flex;justify-content:space-between;gap:14px;align-items:center;font-family:"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif;}
           .secure-toolbar strong{color:#10233f}.secure-toolbar small{display:block;color:#64748b}.secure-toolbar span{color:#145cc8;font-weight:800}
           .secure-report{padding:18px 0 34px;max-width:100%;overflow:visible;height:auto;min-height:100%;position:relative;-webkit-overflow-scrolling:touch;}.secure-report .school-plan-snapshot-report{box-shadow:0 18px 60px rgba(15,39,66,.18);max-width:100%;overflow-x:hidden;overflow-y:visible;height:auto;}
           .report-overview-mobile-cards,.report-dashboard-mobile-cards,.report-final-ranking-mobile-cards,.report-fee-mobile-cards{display:none;}
           .secure-watermark-overlay{position:fixed;inset:0;z-index:95;pointer-events:none;display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));grid-auto-rows:210px;gap:52px;align-content:start;overflow:hidden;padding:50px 24px;opacity:.28;mix-blend-mode:multiply;}
-          .secure-watermark-overlay span{display:flex;align-items:center;justify-content:center;min-width:0;transform:rotate(-28deg);color:rgba(20,92,200,.10);font:700 clamp(10px,1.8vw,14px)/1.45 "Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif;letter-spacing:.01em;text-align:center;white-space:pre-line;text-shadow:0 1px 0 rgba(255,255,255,.28);}
-          .school-plan-brochure-appendix{max-width:980px;margin:24px auto;background:#fff;border-radius:14px;padding:24px;box-shadow:0 12px 36px rgba(15,39,66,.12);font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif;overflow:visible;}
+          .secure-watermark-overlay span{display:flex;align-items:center;justify-content:center;min-width:0;transform:rotate(-28deg);color:rgba(20,92,200,.10);font:700 clamp(10px,1.8vw,14px)/1.45 "Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif;letter-spacing:.01em;text-align:center;white-space:pre-line;text-shadow:0 1px 0 rgba(255,255,255,.28);}
+          .school-plan-brochure-appendix{max-width:980px;margin:24px auto;background:#fff;border-radius:14px;padding:24px;box-shadow:0 12px 36px rgba(15,39,66,.12);font-family:"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif;overflow:visible;}
           .school-plan-brochure-appendix h2{margin:0 0 8px;color:#10233f;font-size:22px;line-height:1.25}
           .school-brochure-intro,.school-brochure-card p{color:#475569;font-size:13px;line-height:1.6;margin:0 0 12px}
           .school-brochure-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;overflow:visible;}
@@ -74009,14 +74161,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             .secure-report .report-school-profile-table th,.secure-report .report-school-profile-table td,.secure-report .report-area-profile-table th,.secure-report .report-area-profile-table td,.secure-report .report-final-ranking-table th,.secure-report .report-final-ranking-table td{min-width:0;word-break:normal;overflow-wrap:break-word;}
             .secure-watermark-overlay{display:none!important;position:static!important;inset:auto!important;width:0!important;height:0!important;overflow:hidden!important;}
             .secure-report section[data-secure-watermark]{position:relative;overflow:hidden;}
-            .secure-report section[data-secure-watermark]::after{content:attr(data-secure-watermark);position:absolute;left:-10%;right:-10%;top:16%;z-index:1;pointer-events:none;white-space:pre-line;transform:rotate(-28deg);color:rgba(20,92,200,.095);font:700 10px/1.45 "Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif;text-align:center;opacity:.42;}
+            .secure-report section[data-secure-watermark]::after{content:attr(data-secure-watermark);position:absolute;left:-10%;right:-10%;top:16%;z-index:1;pointer-events:none;white-space:pre-line;transform:rotate(-28deg);color:rgba(20,92,200,.095);font:700 10px/1.45 "Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif;text-align:center;opacity:.42;}
             .secure-report section[data-secure-watermark] > *{position:relative;z-index:2;}
           }
           body.ios-scroll-root-fallback{height:100dvh;overflow:hidden;position:static;}
           body.ios-scroll-root-fallback .secure-report{height:calc(100dvh - 72px);min-height:0;overflow-x:hidden!important;overflow-y:auto!important;-webkit-overflow-scrolling:touch;touch-action:pan-y;}
-          .secure-confirm{max-width:980px;margin:24px auto 40px;background:#fff;border-radius:14px;padding:24px;box-shadow:0 12px 36px rgba(15,39,66,.14);font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif;}
+          .secure-confirm{max-width:980px;margin:24px auto 40px;background:#fff;border-radius:14px;padding:24px;box-shadow:0 12px 36px rgba(15,39,66,.14);font-family:"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",Arial,sans-serif;}
           .secure-confirm h2{margin:0 0 10px;color:#10233f}.secure-confirm p{color:#334155;line-height:1.6}.rank-row{display:grid;grid-template-columns:1fr 140px;gap:12px;align-items:center;border-bottom:1px solid #e2e8f0;padding:10px 0}.rank-row select,.secure-confirm input{padding:10px 12px;border:1px solid #cbd5e1;border-radius:9px;font:inherit}.secure-confirm label{display:block;margin:14px 0;color:#10233f;font-weight:700}.secure-confirm label small{display:block;color:#64748b;font-weight:500}.signature-pad{display:block;width:100%;height:190px;border:1px dashed #94a3b8;border-radius:12px;background:#f8fafc;touch-action:none}.share-actions{display:flex;gap:10px;flex-wrap:wrap}.share-actions button{border:0;border-radius:9px;padding:11px 16px;background:#145cc8;color:#fff;font-weight:800}.share-actions .secondary{background:#e8f0fb;color:#10233f}.privacy-mask{display:none;pointer-events:none;position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,.92);color:#fff;align-items:center;justify-content:center;text-align:center;padding:30px;font:600 18px/1.5 "Noto Sans SC",Arial,sans-serif;}.school-plan-scroll-debug-panel{position:fixed;right:8px;bottom:8px;left:8px;z-index:2147483647;max-height:45vh;overflow-y:auto;-webkit-overflow-scrolling:touch;background:rgba(0,0,0,.86);color:#fff;border-radius:12px;padding:10px;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;pointer-events:auto;box-shadow:0 10px 30px rgba(0,0,0,.35)}.school-plan-scroll-debug-panel strong{display:block;margin-bottom:6px;color:#fff}.school-plan-scroll-debug-panel button{appearance:none;border:0;border-radius:8px;background:#2563eb;color:#fff;font:700 12px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:7px 9px;margin:4px 5px 6px 0}@media(min-width:761px){.school-plan-scroll-debug-panel{left:auto;width:430px}}@media print{body{display:none!important}}
         """.replace(".signature-pad{display:block;width:100%;height:190px;border:1px dashed #94a3b8;border-radius:12px;background:#f8fafc;touch-action:none}", signature_css)
+        secure_css += "\n.rank-row .confirmed-rank{padding:10px 12px;border:1px solid #cbd5e1;border-radius:9px;font:inherit}.confirmed-signature{display:block;width:100%;height:190px;object-fit:contain;object-position:left center;border:1px dashed #94a3b8;border-radius:12px;background:#f8fafc;}"
         signature_js = ""
         if can_submit_confirmation:
             signature_js = """
@@ -74050,8 +74203,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           document.querySelector('[data-confirm-form]')?.addEventListener('submit', e => {
             const selects = Array.from(e.currentTarget.querySelectorAll('select[name^="rank_"]'));
             const values = selects.map(s => s.value).filter(Boolean);
-            if (values.length !== selects.length || new Set(values).size !== values.length) {
-              e.preventDefault(); alert('请完整选择学校排序，且不能重复。'); return;
+            const ranks = values.map(Number).sort((a, b) => a - b);
+            if (selects.length && (!ranks.length || ranks.some((rank, index) => rank !== index + 1))) {
+              e.preventDefault(); alert('请至少选择一所申请学校，已选学校须从 1 开始连续排序且不能重复。留空表示本次不申请。'); return;
             }
             if (e.currentTarget.hasAttribute('data-private-school-selection') && !e.currentTarget.querySelector('input[name="selected_school_ids"]:checked')) {
               e.preventDefault(); alert('请至少选择一所最终私校。'); return;
@@ -74315,6 +74469,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         <div class="secure-report">{report_body}{brochure_body}{confirm_body}</div><div class="privacy-mask"><div>为保护学生方案，离开当前页面时内容会自动遮罩。<br>请回到页面继续查看。</div></div>
         {debug_panel_html}
         <script>{secure_js}</script></body></html>"""
+        if archive:
+            if not confirmation:
+                raise ValueError("仅能归档已确认的学校方案。")
+            # Share the parent's report markup and colours, with the approved
+            # A4 pagination for archiving. Browser controls are not archived.
+            html_doc = re.sub(r'<script\b[^>]*>[\s\S]*?</script>', '', html_doc, flags=re.I)
+            html_doc = re.sub(r'<a\b[^>]*>', lambda match: re.sub(r"\s+href\s*=\s*([\"']).*?\1", '', match.group(0), flags=re.I), html_doc, flags=re.I)
+            html_doc = html_doc.replace('<body class="school-plan-secure-body">', '<body class="school-plan-secure-body" data-school-plan-archive>')
+            html_doc = html_doc.replace('</head>', f'<style>.secure-toolbar,.privacy-mask,.school-plan-scroll-debug-panel{{display:none!important}} .secure-confirm{{break-inside:avoid;page-break-inside:avoid}} *{{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}} @page{{size:A4;margin:10mm}} @media print{{body{{display:block!important}}}}</style></head>')
+            return html_doc
         return self.send_html(
             html_doc,
             headers=[
@@ -74463,12 +74627,19 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return target
 
     def school_plan_archive_confirmation_documents(self, confirmation_id, user=None):
+        from school_report_browser import exclusive_file_lock
+        lock_folder = SCHOOL_PLAN_CONFIRMATION_DIR / "archive_locks"
+        lock_folder.mkdir(parents=True, exist_ok=True)
+        with exclusive_file_lock(lock_folder / f"confirmation_{int(confirmation_id)}.lock"):
+            return self.school_plan_archive_confirmation_documents_locked(confirmation_id, user)
+
+    def school_plan_archive_confirmation_documents_locked(self, confirmation_id, user=None):
         confirmation = db.one("SELECT * FROM school_plan_report_confirmations WHERE id=?", (confirmation_id,))
         if not confirmation:
             raise ValueError("家长确认记录不存在。")
         report = db.one("SELECT * FROM school_plan_reports WHERE id=?", (confirmation["report_id"],))
-        if not report or not report["file_path"]:
-            raise FileNotFoundError("学校方案报告 PDF 不存在。")
+        if not report:
+            raise FileNotFoundError("学校方案报告不存在。")
         student = db.one("SELECT * FROM students WHERE student_id=?", (confirmation["student_id"],))
         if not student:
             raise ValueError("学生记录不存在。")
@@ -74496,6 +74667,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     (signature_doc_id, student["student_id"]),
                 )
                 if final_doc and signature_doc:
+                    if existing_metadata.get("render_source") == "parent_page":
+                        final_path = ensure_within(final_doc["file_path"], nas.student_folder(student))
+                        signature_path = ensure_within(signature_doc["file_path"], nas.student_folder(student))
+                        if (not final_path.is_file() or not signature_path.is_file()
+                                or hashlib.sha256(final_path.read_bytes()).hexdigest() != existing_metadata.get("parent_pdf_sha256")):
+                            raise ValueError("正式归档文件缺失或校验失败，请联系管理员恢复原始归档。")
                     existing_metadata.update({
                         "final_document_id": final_doc["id"],
                         "signature_document_id": signature_doc["id"],
@@ -74503,9 +74680,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         "signature_document_path": signature_doc["file_path"],
                     })
                     return existing_metadata
-        report_pdf = Path(report["file_path"]).resolve()
-        if not report_pdf.is_file():
-            raise FileNotFoundError("学校方案报告 PDF 文件不存在。")
+        requested = db.one(
+            """SELECT id FROM school_plan_report_events WHERE report_id=? AND event_type='parent_page_archive_requested'
+               AND json_extract(metadata_json,'$.confirmation_id')=? LIMIT 1""", (report["id"], confirmation_id),
+        )
+        if not requested:
+            db.execute(
+                "INSERT INTO school_plan_report_events(report_id,event_type,event_at,metadata_json) VALUES(?,?,?,?)",
+                (report["id"], "parent_page_archive_requested", now_iso(), json.dumps({"confirmation_id": confirmation_id})),
+            )
         confirmation_pdf = Path(confirmation["confirmation_pdf_path"]).resolve() if confirmation["confirmation_pdf_path"] else None
         if not confirmation_pdf or not confirmation_pdf.is_file():
             confirmation_pdf = self.school_plan_generate_confirmation_pdf(confirmation_id)
@@ -74515,27 +74698,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         signature_name = f"{prefix}_Parent_Signature_Page_{date_part}.pdf"
         archive_folder = SCHOOL_PLAN_CONFIRMATION_DIR / str(report["id"]) / "archive"
         archive_folder.mkdir(parents=True, exist_ok=True)
-        temp_merged = archive_folder / f"confirmation_{confirmation_id}_merged.pdf"
-        temp_final = archive_folder / f"confirmation_{confirmation_id}_final_watermarked.pdf"
-        merge_pdf_files([report_pdf, confirmation_pdf], temp_merged)
-        viewer = db.one("SELECT * FROM school_plan_report_viewers WHERE id=?", (confirmation["viewer_id"],)) if confirmation["viewer_id"] else None
-        confirmed_dt = parse_local_datetime(confirmation["confirmed_at"]) or datetime.now().astimezone()
-        viewer_label = "Primary Parent"
-        if viewer:
-            viewer_label = viewer["viewer_role"] or "Primary Parent"
-            if viewer["viewer_name"]:
-                viewer_label = f"{viewer_label} / {viewer['viewer_name']}"
-        add_school_plan_archive_watermark(
-            temp_merged,
-            temp_final,
-            [
-                "AAIE 客户专属报告",
-                f"微信：{confirmation['wechat_nickname'] or '已验证用户'}",
-                f"确认日期：{confirmed_dt.strftime('%Y-%m-%d')}",
-                f"确认时间：{confirmed_dt.strftime('%H:%M:%S')}",
-                f"查看人：{viewer_label}",
-                f"识别码：{self.school_plan_share_masked_openid(confirmation['wechat_openid'])}",
-            ],
+        frozen_html = archive_folder / f"confirmation_{confirmation_id}_parent.html"
+        if not frozen_html.is_file():
+            link = self.school_plan_share_row_by_token_by_id(confirmation["link_id"])
+            if not link or int(link["report_id"]) != int(report["id"]):
+                raise ValueError("确认记录与家长链接不一致。")
+            rendered = self.school_plan_share_viewer_html("", link, archive=True)
+            from school_report_browser import save_html_snapshot
+            save_html_snapshot(frozen_html, rendered)
+        temp_final = archive_folder / f"confirmation_{confirmation_id}_parent.pdf"
+        self.school_plan_render_html_pdf_with_playwright(frozen_html, temp_final)
+        generated_event = db.one(
+            "SELECT metadata_json FROM school_plan_report_events WHERE report_id=? AND event_type='report_generated' ORDER BY id DESC LIMIT 1",
+            (report["id"],),
+        )
+        generated_metadata = json.loads(generated_event["metadata_json"] or "{}") if generated_event else {}
+        from school_report_browser import append_original_brochures
+        appendix_page_count = append_original_brochures(
+            temp_final, report["file_path"], expected=bool(generated_metadata.get("attached_school_brochures")),
         )
         final_doc = save_generated_application_pdf(
             student,
@@ -74563,6 +74743,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "wechat_nickname": confirmation["wechat_nickname"] or "",
             "wechat_openid_suffix": str(confirmation["wechat_openid"] or "")[-6:],
             "confirmed_at": confirmation["confirmed_at"] or "",
+            "render_source": "parent_page",
+            "original_appendix_page_count": appendix_page_count,
+            "parent_html_path": str(frozen_html),
+            "parent_html_sha256": hashlib.sha256(frozen_html.read_bytes()).hexdigest(),
+            "parent_pdf_sha256": hashlib.sha256(Path(final_doc["path"]).read_bytes()).hexdigest(),
         }
         db.execute(
             """INSERT INTO school_plan_report_events(report_id,event_type,event_by_user_id,event_by_name,event_at,ip_address,user_agent,metadata_json)
@@ -74604,7 +74789,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         statement = (
             "我确认已阅读本学校方案报告，并确认以上所选私校为最终申请意向。本人理解该选择将作为后续学校申请递交的重要依据。"
             if decision.mode == "selected"
-            else "我确认已阅读本学校方案报告，并确认以上学校排序为最终申请意向。本人理解该排序将作为后续学校申请递交的重要依据。"
+            else "我确认已阅读本学校方案报告，以上已选学校及排序为本次最终申请意向，留空的学校本次不申请。本人理解该选择和排序将作为后续学校申请递交的重要依据。"
         )
         with db.transaction() as connection:
             confirmation_id = save_parent_confirmation(
@@ -74626,6 +74811,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     "confirmed_by_name": str(form.get("parent_name") or link["bound_wechat_nickname"] or "家长"),
                 },
                 decision,
+            )
+            connection.execute(
+                "INSERT INTO school_plan_report_events(report_id,event_type,event_at,metadata_json) VALUES(?,?,?,?)",
+                (link["report_id"], "parent_page_archive_requested", stamp, json.dumps({"confirmation_id": confirmation_id})),
             )
         confirmation_pdf = self.school_plan_generate_confirmation_pdf(confirmation_id)
         db.execute(

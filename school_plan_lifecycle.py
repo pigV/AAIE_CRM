@@ -203,14 +203,16 @@ def normalize_parent_decision(report, schools, form) -> ParentDecision:
         total = len(normalized_schools)
         for school in normalized_schools:
             raw_rank = _mapping_value(form, f"rank_{school['rank_key']}")
-            if raw_rank in (None, ""):
+            if raw_rank is None:
                 raw_rank = _mapping_value(form, f"rank_{school['school_id']}")
             text = str(raw_rank or "").strip()
-            if not text.isdigit():
-                raise ParentDecisionError("请完整选择学校排序。")
+            if not text:
+                continue
+            if not text.isascii() or not text.isdigit():
+                raise ParentDecisionError("请选择有效的学校排序。")
             rank = int(text)
             if rank < 1 or rank > total or rank in used_ranks:
-                raise ParentDecisionError("学校排序不能重复，也不能漏选。")
+                raise ParentDecisionError("已选学校排序不能重复，且须从 1 开始连续排列。")
             used_ranks.add(rank)
             decision_rows.append(
                 ParentDecisionSchool(
@@ -219,8 +221,10 @@ def normalize_parent_decision(report, schools, form) -> ParentDecision:
                     rank_order=rank,
                 )
             )
-        if len(used_ranks) != total:
-            raise ParentDecisionError("请完整选择学校排序。")
+        if not decision_rows:
+            raise ParentDecisionError("请至少选择一所申请学校，留空表示本次不申请。")
+        if used_ranks != set(range(1, len(decision_rows) + 1)):
+            raise ParentDecisionError("已选学校排序须从 1 开始连续排列，不能跳号。")
         return ParentDecision(
             mode="ranked",
             schools=tuple(sorted(decision_rows, key=lambda item: item.rank_order or 0)),

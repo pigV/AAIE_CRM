@@ -20,6 +20,7 @@ from runtime_configuration import RuntimeConfiguration, RuntimeConfigurationErro
 from staging_environment import ManagedRuntime, IsolationError, SCHOOL_REPORT_PDFUNITE
 from tools import school_map_tile_control
 from wechat_runtime import runtime_wechat_environment, runtime_wechat_network_rules
+from school_report_browser import sandbox_rules as school_report_browser_sandbox_rules
 
 PYTHON = "/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
 ROLES = ("admin", "parent")
@@ -270,6 +271,7 @@ def sandbox_profile(config):
         *runtime_wechat_network_rules(config),
         "(allow process-fork)", "(deny signal)", "(deny process-exec)",
         f"(allow process-exec (literal {q(PYTHON)}) (literal {q(Path(PYTHON).resolve())}))",
+        *school_report_browser_sandbox_rules(config.root / "tmp"),
         *([f"(allow process-exec (literal {q(SCHOOL_REPORT_PDFUNITE)}))"] if adapter.school_library_read_roots else []),
         *(['(allow process-exec (literal "/sbin/mount"))'] if config.mode == "production" else []),
     ]) + "\n"

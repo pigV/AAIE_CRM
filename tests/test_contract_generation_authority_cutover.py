@@ -596,6 +596,66 @@ class ContractGenerationAuthorityCutoverTests(unittest.TestCase):
                         package, payload, actor={"id": 1, "role_name": "Admin"}
                     )
 
+    def test_admin_net_fee_derives_discount_and_rejects_invalid_or_unauthorized_edits(self):
+        self._published_v2()
+        package = authority.load_published_template(self.conn, "NewInternationalStudentContract")
+        payload = self._payload()
+        payload["payment_method"] = "澳洲公户"
+        edit = {"net_service_fee_ex_gst": "2200.00", "reason": "Approved net fee",
+                "approved_by": 1, "operator_id": 1,
+                "approved_at": "2026-11-02T00:00:00+00:00"}
+        bound = authority.bind_new_contract(package, payload,
+            actor={"id": 1, "role_name": "Admin"}, net_fee_override=edit)
+        commercial = bound["commercial"]
+        self.assertEqual(commercial["discount_amount"], "200.00")
+        self.assertEqual(commercial["net_service_fee_ex_gst"], "2200.00")
+        self.assertEqual(commercial["gst_amount"], "220.00")
+        self.assertEqual(commercial["final_total"], "2420.00")
+        self.assertEqual(commercial["discount_approval"]["reason"], "Approved net fee")
+        for value in ("", "0", "-1", "2400.01", "2200.005", "NaN", "Infinity", "2e3"):
+            with self.subTest(value=value), self.assertRaises(authority.PublishedTemplateIntegrityError):
+                authority.bind_new_contract(package, payload,
+                    actor={"id": 1, "role_name": "Admin"},
+                    net_fee_override={**edit, "net_service_fee_ex_gst": value})
+        for changed in ({"reason": ""}, {"approved_by": 2}):
+            with self.assertRaises(authority.PublishedTemplateIntegrityError):
+                authority.bind_new_contract(package, payload,
+                    actor={"id": 1, "role_name": "Admin"}, net_fee_override={**edit, **changed})
+        with self.assertRaises(authority.PublishedTemplateIntegrityError):
+            authority.bind_new_contract(package, payload,
+                actor={"id": 1, "role_name": "Manager"}, net_fee_override=edit)
+        full_price = authority.bind_new_contract(package, payload,
+            actor={"id": 1, "role_name": "Admin"},
+            net_fee_override={**edit, "net_service_fee_ex_gst": "2400", "reason": ""})
+        self.assertEqual(full_price["commercial"]["final_total"], "2640.00")
+        self.assertIsNone(full_price["commercial"]["discount_approval"])
+        for value in ("1.005", "NaN", "Infinity", "2e2"):
+            with self.subTest(discount=value), self.assertRaises(authority.PublishedTemplateIntegrityError):
+                authority.bind_new_contract(package, payload,
+                    actor={"id": 1, "role_name": "Admin"},
+                    discount_approval={**edit, "discount_amount": value})
+
+    def test_transfer_net_fee_respects_verified_1200_source_price(self):
+        self._published_v2("TransferApplicationContract")
+        package = authority.load_published_template(self.conn, "TransferApplicationContract")
+        payload = self._payload("TransferApplicationContract")
+        payload["payment_method"] = "澳洲公户"
+        source = {**self._trusted_transfer_source(payload), "source_classification": "aaie_existing"}
+        edit = {"net_service_fee_ex_gst": "1100.00", "reason": "Approved transfer discount",
+                "approved_by": 1, "operator_id": 1, "approved_at": "2026-11-02T00:00:00+00:00"}
+        bound = authority.bind_new_contract(package, payload,
+            actor={"id": 1, "role_name": "Admin"}, net_fee_override=edit,
+            trusted_transfer_source=source)
+        self.assertEqual(bound["commercial"]["standard_service_fee_ex_gst"], "1200.00")
+        self.assertEqual(bound["commercial"]["discount_amount"], "100.00")
+        self.assertEqual(bound["commercial"]["final_total"], "1210.00")
+        authority.validate_transfer_fee_authority(bound)
+        with self.assertRaises(authority.PublishedTemplateIntegrityError):
+            authority.bind_new_contract(package, payload,
+                actor={"id": 1, "role_name": "Admin"},
+                net_fee_override={**edit, "net_service_fee_ex_gst": "2200.00"},
+                trusted_transfer_source=source)
+
     def test_only_admin_can_freeze_discount_approval(self):
         self._published_v2()
         package = authority.load_published_template(self.conn, "NewInternationalStudentContract")
@@ -1814,6 +1874,154 @@ class ContractGenerationAuthorityCutoverTests(unittest.TestCase):
         finally:
             app_module.db = old_db
 
+    def _delegated_price_context(self):
+        import app as app_module
+        database = self._persistence_database(all_types=True)
+        database.set_setting(app_module.CONTRACT_GENERATION_AUTHORITY_SETTING,
+                             app_module.CONTRACT_GENERATION_AUTHORITY_PUBLISHED_V2, 1)
+        database.set_setting("contract_price_adjust_user_ids", "[1]", 1)
+        previous = app_module.db
+        app_module.db = database
+        self.addCleanup(setattr, app_module, "db", previous)
+        student = database.one("SELECT * FROM students WHERE student_id='T-AUTH-001'")
+        connection = database.connect()
+        try:
+            package = authority.load_published_template(connection, "NewInternationalStudentContract")
+        finally:
+            connection.close()
+        user = {"id": 1, "username": "delegated-manager", "role_name": "Manager + Student Cases",
+                "permissions_json": json.dumps(["contracts.generate", "contracts.view"])}
+        form = {"contract_type": "NewInternationalStudentContract", "contract_date": "2026-08-20",
+                "generation_request_id": "delegated-price-request",
+                "parent_signer_source": "father", "parent_signer_name": "Father Only",
+                "parent_signer_relationship": "父亲", "parent_phone": "0411111111",
+                "parent_email": "father@example.test", "service_scope": self._payload()["service_scope_ids"],
+                "service_fee_currency": "澳洲公户", "net_service_fee_ex_gst": "2200.00",
+                "discount_reason": "Approved negotiated fee", "final_total": "1"}
+        return app_module, database, student, package, user, form
+
+    def test_delegated_price_recalculates_and_records_real_operator(self):
+        app_module, database, student, package, user, form = self._delegated_price_context()
+        for method, gst, total in [("澳洲公户", "220.00", "2420.00"), ("澳洲私户", "0.00", "2200.00")]:
+            with self.subTest(method=method):
+                bound, _ = app_module.authority_contract_bindings(student, {**form, "service_fee_currency": method}, user, package, "DELEGATED")
+                commercial = bound["commercial"]
+                self.assertEqual(commercial["final_total"], total)
+                self.assertEqual(commercial["gst_amount"], gst)
+                self.assertEqual(commercial["discount_amount"], "200.00")
+                self.assertEqual(commercial["discount_approval"]["operator_id"], user["id"])
+                self.assertEqual(commercial["discount_approval"]["reason"], form["discount_reason"])
+        self.assertEqual(user["role_name"], "Manager + Student Cases")
+        self.assertNotIn("*", app_module.get_permissions(user))
+
+    def test_delegated_price_ui_is_individual_and_revocable(self):
+        app_module, database, student, package, user, form = self._delegated_price_context()
+        handler = object.__new__(app_module.CRMHandler)
+        handler.user = user
+        handler.csrf = "test"
+        handler._student_lifecycle_record_contexts = {}
+        html = handler.contract_panel(student, [], [])
+        self.assertIn('data-contract-net-editable', html)
+        self.assertIn('name="discount_reason"', html)
+        self.assertNotIn('name="payment_plan_enabled"', html)
+        self.assertNotIn('name="gst_free_enabled"', html)
+        for actor in [{**user, "id": 2}, {**user, "id": 2, "permissions_json": '["*"]'}]:
+            handler.user = actor
+            self.assertNotIn('data-contract-net-editable', handler.contract_panel(student, [], []))
+            with self.assertRaises(authority.PublishedTemplateIntegrityError):
+                app_module.authority_contract_bindings(student, form, actor, package, "DENIED")
+        database.set_setting("contract_price_adjust_user_ids", "[]", 1)
+        handler.user = user
+        self.assertNotIn('data-contract-net-editable', handler.contract_panel(student, [], []))
+        with self.assertRaises(authority.PublishedTemplateIntegrityError):
+            app_module.authority_contract_bindings(student, form, user, package, "REVOKED")
+
+    def test_delegated_price_rejects_invalid_amounts_and_unrelated_approvals(self):
+        app_module, database, student, package, user, form = self._delegated_price_context()
+        for changes in [{"discount_reason": ""}, {"net_service_fee_ex_gst": "0"},
+                        {"net_service_fee_ex_gst": "2400.01"}, {"net_service_fee_ex_gst": "2200.001"},
+                        {"payment_plan_enabled": "yes", "payment_plan_reason": "not authorized"},
+                        {"gst_free_enabled": "yes", "gst_free_reason": "not authorized"}]:
+            with self.subTest(changes=changes), self.assertRaises(authority.PublishedTemplateAuthorityError):
+                app_module.authority_contract_bindings(student, {**form, **changes}, user, package, "INVALID")
+        for setting in ['invalid', '{}', '[true]', '["1"]']:
+            database.set_setting("contract_price_adjust_user_ids", setting, 1)
+            with self.subTest(setting=setting), self.assertRaises(authority.PublishedTemplateIntegrityError):
+                app_module.authority_contract_bindings(student, {**form, "actor_permissions": ["contracts.price.adjust"]}, user, package, "BAD-GRANT")
+
+    def test_form_net_fee_recalculates_discount_and_contract_outputs(self):
+        import app as app_module
+
+        database = self._persistence_database()
+        database.set_setting("company_authorised_person", "", 1)
+        student = database.one("SELECT * FROM students WHERE student_id='T-AUTH-001'")
+        connection = database.connect()
+        try:
+            package = authority.load_published_template(
+                connection, "NewInternationalStudentContract"
+            )
+        finally:
+            connection.close()
+        form = {
+            "contract_type": "NewInternationalStudentContract",
+            "contract_date": "2026-08-20",
+            "generation_request_id": "blank-company-representative",
+            "parent_signer_source": "father",
+            "parent_signer_name": "Father Only",
+            "parent_signer_relationship": "父亲",
+            "parent_phone": "0411111111",
+            "parent_email": "father@example.test",
+            "service_scope": list(
+                contract_domain.contract_type_config(
+                    "NewInternationalStudentContract"
+                ).default_services
+            ),
+            "service_fee_currency": "澳洲公户",
+            "net_service_fee_ex_gst": "2200.00",
+            "discount_reason": "Approved net price",
+            "discount_enabled": "yes",
+            "discount_amount": "999",
+            "final_total": "1",
+        }
+        user = {
+            "id": 1, "username": "admin", "role_name": "Admin",
+            "permissions_json": json.dumps(["*"]),
+        }
+        old_db = app_module.db
+        try:
+            app_module.db = database
+            bound, _rendered = app_module.authority_contract_bindings(
+                student, form, user, package, "AUTH-BLANK-REP"
+            )
+            self.assertEqual(
+                bound["contract_instance"]["company_authorised_person"],
+                "Sonny Zhang",
+            )
+            self.assertEqual(bound["commercial"]["discount_amount"], "200.00")
+            self.assertEqual(bound["commercial"]["final_total"], "2420.00")
+            self.assertIn("2200.00", _rendered.authority_content)
+            self.assertIn("2420.00", _rendered.authority_content)
+            for role in ("Manager", "Consultant"):
+                with self.subTest(role=role), self.assertRaises(authority.PublishedTemplateIntegrityError):
+                    app_module.authority_contract_bindings(
+                        student, form, {**user, "role_name": role}, package, "FORGED-NET")
+            self.assertEqual(database.one("SELECT COUNT(*) n FROM contracts")["n"], 0)
+            result = create_contract_atomic(
+                database, bound=bound, rendered=_rendered, student_data=self._student(),
+                student_id="T-AUTH-001", contract_uid="AUTH-BLANK-REP",
+                target=self.root / "forms" / "EditedNetFee.docx", file_version=1,
+                user=user, occurred_at="2026-11-02T00:00:00+00:00")
+            stored = database.one("SELECT * FROM contracts WHERE id=?", (result.contract_id,))
+            self.assertEqual(stored["discount_amount"], "200.00")
+            self.assertEqual(stored["final_fee_amount"], "2420.00")
+            frozen = contract_domain.snapshot_payload(stored["standalone_data_json"])
+            self.assertEqual(frozen["commercial"]["net_service_fee_ex_gst"], "2200.00")
+            self.assertEqual(authority.render_bound_contract(frozen).semantic_hashes,
+                             _rendered.semantic_hashes)
+
+        finally:
+            app_module.db = old_db
+
     def test_application_route_fails_closed_before_persistence_when_published_is_incomplete(self):
         import app as app_module
 
@@ -1919,6 +2127,21 @@ class ContractGenerationAuthorityCutoverTests(unittest.TestCase):
             self.assertIn('data-contract-published-payment-method', html)
             self.assertIn('data-contract-published-standard-fee', html)
             self.assertIn('data-contract-published-net-fee', html)
+            from html.parser import HTMLParser
+            class NetFieldParser(HTMLParser):
+                def handle_starttag(self, tag, attrs):
+                    fields = dict(attrs)
+                    if tag == "input" and "data-contract-published-net-fee" in fields:
+                        self.net = fields
+            parser = NetFieldParser()
+            parser.feed(html)
+            self.assertNotIn("readonly", parser.net)
+            self.assertEqual(parser.net["name"], "net_service_fee_ex_gst")
+            handler.user = {**handler.user, "role_name": "Manager"}
+            parser.feed(handler.contract_panel(student, [], []))
+            self.assertIn("readonly", parser.net)
+            self.assertNotIn("name", parser.net)
+
             self.assertIn('data-contract-published-gst-amount', html)
             self.assertIn('data-contract-published-final-total', html)
             self.assertIn('data-contract-published-refund', html)
