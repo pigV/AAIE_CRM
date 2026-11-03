@@ -192,6 +192,106 @@ Date: 11/03/2026'''
         self.assertIn('未就绪', data['source'])
         self.assertEqual(data['text_extraction']['ocr_status'], 'engine_unavailable')
 
+    def hybrid_pdf(self):
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.utils import ImageReader
+        from PIL import Image, ImageDraw
+
+        data = io.BytesIO()
+        pdf = canvas.Canvas(data)
+        pdf.setFont("Helvetica", 11)
+        pdf.drawString(50, 780, "Victorian College")
+        pdf.drawString(50, 760, "International Student Offer")
+        pdf.drawString(50, 740, "Offer Date: 26/02/2026")
+        pdf.drawString(50, 720, "Offer Expiry Date: 05/03/2026")
+        pdf.drawString(50, 700, "Student Name: Test Example")
+        pdf.showPage()
+        image = Image.new("RGB", (1200, 500), "white")
+        draw = ImageDraw.Draw(image)
+        draw.text((20, 20), "Course Details", fill="black")
+        draw.text((20, 60), "School:", fill="black")
+        draw.text((20, 100), "East Doncaster Secondary College", fill="black")
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        buffer.seek(0)
+        pdf.drawImage(ImageReader(buffer), 40, 500, width=520, height=217)
+        pdf.showPage()
+        pdf.save()
+        return data.getvalue()
+
+    def test_hybrid_pdf_ocrs_only_pages_without_text_layer(self):
+        u = upload(self.hybrid_pdf(), 'offer.pdf', 'application/pdf')
+        calls = []
+
+        def fake_ocr_pages(data, page_indexes, diagnostics=None):
+            calls.append(list(page_indexes))
+            if diagnostics is not None:
+                diagnostics['status'] = 'ok'
+            return {index: ('Course Details\nSchool:\nEast Doncaster Secondary College\n'
+                            'English Language Centre:\nAddress:\n20 George Street\nYear Level:\n10')
+                    for index in page_indexes}
+
+        with patch.dict(self.ns, ocr_pdf_page_texts=fake_ocr_pages):
+            text = self.ns['extract_uploaded_text'](u)
+            meta = self.ns['upload_text_extraction_meta'](u)
+            details = self.ns['infer_offer_details'](u)
+        self.assertEqual(calls, [[1]])
+        self.assertIn('East Doncaster Secondary College', text)
+        self.assertEqual(details['school_name'], 'East Doncaster Secondary College')
+        self.assertEqual(meta['source'], 'pdf_text_layer_and_ocr')
+        self.assertTrue(meta['ocr_fallback_used'])
+        self.assertEqual(meta['text_layer_pages'], 1)
+        self.assertEqual(meta['unread_pages'], 0)
+
+    def test_text_only_pdf_never_runs_ocr(self):
+        from reportlab.pdfgen import canvas
+
+        data = io.BytesIO()
+        pdf = canvas.Canvas(data)
+        pdf.setFont("Helvetica", 11)
+        for offset, line in enumerate(('Victorian College', 'International Student Offer',
+                                       'Offer Date: 26/02/2026', 'Offer Expiry Date: 05/03/2026',
+                                       'Student Name: Test Example', 'Year Level: 10')):
+            pdf.drawString(50, 780 - offset * 20, line)
+        pdf.showPage()
+        pdf.save()
+        u = upload(data.getvalue(), 'offer.pdf', 'application/pdf')
+        calls = []
+        with patch.dict(self.ns,
+                        ocr_pdf_page_texts=lambda *a, **kw: calls.append(a) or {},
+                        ocr_pdf_text=lambda *a, **kw: calls.append(a) or ''):
+            self.ns['extract_uploaded_text'](u)
+        self.assertEqual(calls, [])
+        meta = self.ns['upload_text_extraction_meta'](u)
+        self.assertFalse(meta['ocr_fallback_used'])
+        self.assertEqual(meta['source'], 'pdf_text_layer')
+        self.assertEqual(meta['unread_pages'], 0)
+
+    def test_pdf_falls_back_to_second_text_parser_when_pypdf_cannot_read(self):
+        u = upload(b'%PDF broken', 'scan.pdf', 'application/pdf')
+        with patch.dict(self.ns,
+                        pdf_native_page_texts=lambda data, max_pages=12: [],
+                        pdfplumber_all_page_texts=lambda data, max_pages=12: [
+                            'Course Details\nSchool:\nEast Doncaster Secondary College\n'
+                            'Address:\n20 George Street\nYear Level:\n10']):
+            text = self.ns['extract_uploaded_text'](u)
+        self.assertIn('East Doncaster Secondary College', text)
+        self.assertEqual(self.ns['upload_text_extraction_meta'](u)['source'], 'pdf_text_layer')
+
+    def test_offer_page_texts_reuses_extracted_pages(self):
+        u = upload(b'%PDF-1.4 stub', 'offer.pdf', 'application/pdf')
+        setattr(u, '_pdf_page_texts', ['Page one offer text', 'Page two SCHEDULE OF FEES text'])
+        pages = self.ns['nsw_offer_page_texts'](u, 'SCHEDULE OF FEES fallback')
+        self.assertEqual(pages, ['Page one offer text', 'Page two SCHEDULE OF FEES text'])
+
+    def test_nsw_offer_falls_back_to_split_text_when_pages_are_empty(self):
+        u = upload(b'%PDF-1.4 stub', 'offer.pdf', 'application/pdf')
+        setattr(u, '_pdf_page_texts', ['', ''])
+        pages = self.ns['nsw_offer_page_texts'](u, 'Main offer body\nSCHEDULE OF FEES\nDeposit')
+        self.assertEqual(len(pages), 2)
+        self.assertIn('Main offer body', pages[0])
+        self.assertIn('SCHEDULE OF FEES', pages[1])
+
     def test_language_persistence_is_scoped_and_transactional(self):
         self.assertIn('save_offer_language_school', self.ns)
         with sqlite3.connect(':memory:') as conn:
