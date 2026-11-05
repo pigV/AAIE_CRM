@@ -2003,6 +2003,45 @@
     const previewThumbObjectUrls = new Map();
     const previewLoadingPages = new Set();
     const previewLoadingThumbs = new Set();
+    let previewGeneration = 0;
+    let previewController = new AbortController();
+    let previewActiveRequests = 0;
+    const previewRequestQueue = [];
+    const drainPreviewRequests = () => {
+      previewRequestQueue.sort((a, b) => a.priority - b.priority);
+      while (previewActiveRequests < 2 && previewRequestQueue.length) {
+        const job = previewRequestQueue.shift();
+        if (job.generation !== previewGeneration) {
+          job.reject(new DOMException("Aborted", "AbortError"));
+          continue;
+        }
+        previewActiveRequests += 1;
+        (async () => {
+          try {
+            const response = await fetch(job.url, {
+              credentials: "same-origin", cache: "no-store", signal: job.signal
+            });
+            const blob = await response.blob();
+            job.resolve({ response, blob });
+          } catch (error) {
+            job.reject(error);
+          } finally {
+            previewActiveRequests -= 1;
+            drainPreviewRequests();
+          }
+        })();
+      }
+    };
+    const fetchPreview = (url, generation, priority) => new Promise((resolve, reject) => {
+      previewRequestQueue.push({ url, generation, priority, resolve, reject, signal: previewController.signal });
+      drainPreviewRequests();
+    });
+    const cancelPreviewRequests = () => {
+      previewGeneration += 1;
+      previewController.abort();
+      previewController = new AbortController();
+      previewRequestQueue.splice(0).forEach((job) => job.reject(new DOMException("Aborted", "AbortError")));
+    };
     const previewUrl = (page, size = "large") => {
       if (!previewBaseSrc) return "";
       const url = new URL(previewBaseSrc, window.location.origin);
@@ -2083,18 +2122,19 @@
       const button = thumbnailButton(page);
       if (!button || previewThumbObjectUrls.has(page) || previewLoadingThumbs.has(page)) return;
       previewLoadingThumbs.add(page);
+      const generation = previewGeneration;
       try {
-        const response = await fetch(previewUrl(page, "thumb"), { credentials: "same-origin", cache: "no-store" });
+        const { response, blob } = await fetchPreview(previewUrl(page, "thumb"), generation, 1);
+        if (generation !== previewGeneration) return;
         if (!response.ok || !String(response.headers.get("Content-Type") || "").startsWith("image/")) throw new Error("thumbnail unavailable");
-        const blob = await response.blob();
         const objectUrl = URL.createObjectURL(blob);
         previewThumbObjectUrls.set(page, objectUrl);
         const image = q("img", button);
         if (image) image.src = objectUrl;
       } catch (_) {
-        button.dataset.error = "true";
+        if (generation === previewGeneration) button.dataset.error = "true";
       } finally {
-        previewLoadingThumbs.delete(page);
+        if (generation === previewGeneration) previewLoadingThumbs.delete(page);
       }
     };
     const observePreviewThumbnails = () => {
@@ -2159,10 +2199,12 @@
     const loadPreviewPageImage = async (page) => {
       if (!previewBaseSrc || previewObjectUrls.has(page) || previewLoadingPages.has(page)) return;
       previewLoadingPages.add(page);
+      const generation = previewGeneration;
       const layer = pageLayer(page);
       if (layer) layer.setAttribute("aria-busy", "true");
       try {
-        const response = await fetch(previewUrl(page), { credentials: "same-origin", cache: "no-store" });
+        const { response, blob } = await fetchPreview(previewUrl(page), generation, 0);
+        if (generation !== previewGeneration) return;
         if (!response.ok) throw new Error("preview unavailable");
         if (!String(response.headers.get("Content-Type") || "").startsWith("image/")) {
           throw new Error("preview is not an image");
@@ -2171,14 +2213,15 @@
         const errorCode = response.headers.get("X-Preview-Error-Code") || "";
         const total = parseInt(response.headers.get("X-Preview-Page-Count") || "1", 10);
         const current = parseInt(response.headers.get("X-Preview-Page") || String(page), 10);
-        previewPageCount = Number.isFinite(total) && total > 0 ? total : 1;
+        if (Number.isFinite(total) && total > 0) {
+          previewPageCount = status === "ok" ? total : Math.max(previewPageCount, total);
+        }
         renderPreviewPages();
         renderPreviewThumbnails();
-        const safePage = Number.isFinite(current) && current > 0 ? current : page;
+        const safePage = status === "ok" && Number.isFinite(current) && current > 0 ? current : page;
         const targetLayer = pageLayer(safePage);
         const image = q("[data-preview-page-image]", targetLayer || document);
         const placeholder = q(".preview-page-placeholder", targetLayer || document);
-        const blob = await response.blob();
         const objectUrl = URL.createObjectURL(blob);
         previewObjectUrls.set(safePage, objectUrl);
         if (image) {
@@ -2191,19 +2234,22 @@
           setPreviewMessage(message, "error");
           if (previewMain) previewMain.dataset.error = message;
         }
-        setPreviewPage(safePage);
+        if (page === previewPage) setPreviewPage(safePage);
         applyPreviewZoom();
         window.requestAnimationFrame(loadVisiblePreviewPages);
       } catch (error) {
+        if (generation !== previewGeneration) return;
         const targetLayer = pageLayer(page);
         const placeholder = q(".preview-page-placeholder", targetLayer || document);
         const message = error?.message || "文件预览暂时不可用，请下载原文件查看。";
         if (placeholder) placeholder.textContent = message;
         if (previewMain) previewMain.dataset.error = message;
       } finally {
-        const targetLayer = pageLayer(page);
-        if (targetLayer) targetLayer.setAttribute("aria-busy", "false");
-        previewLoadingPages.delete(page);
+        if (generation === previewGeneration) {
+          const targetLayer = pageLayer(page);
+          if (targetLayer) targetLayer.setAttribute("aria-busy", "false");
+          previewLoadingPages.delete(page);
+        }
       }
     };
     const loadVisiblePreviewPages = () => {
@@ -2245,6 +2291,9 @@
     document.addEventListener("click", (event) => {
       const button = event.target.closest("[data-preview-open]");
       if (!button) return;
+      cancelPreviewRequests();
+      if (previewPageObserver) previewPageObserver.disconnect();
+      if (previewThumbnailObserver) previewThumbnailObserver.disconnect();
       previewBaseSrc = button.dataset.previewSrc || "";
       previewPage = 1;
       previewPageCount = 1;
@@ -2299,6 +2348,7 @@
       button.addEventListener("click", () => previewDialog.close());
     });
     previewDialog.addEventListener("close", () => {
+      cancelPreviewRequests();
       if (previewPageObserver) previewPageObserver.disconnect();
       if (previewThumbnailObserver) previewThumbnailObserver.disconnect();
       clearPreviewObjectUrls();

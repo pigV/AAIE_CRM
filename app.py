@@ -59,6 +59,10 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from PIL import Image, ImageDraw, ImageFont
+from document_preview_cache import (
+    PDF_PREVIEW_SLOTS, cached_pdf_page_count, load_preview_cache,
+    preview_source_signature, save_preview_cache, save_preview_image, synchronize_preview,
+)
 from school_map_tiles import load_tile as load_school_map_tile
 from pypdf import PdfReader, PdfWriter
 from production_environment import load_canonical_production_environment
@@ -21490,14 +21494,15 @@ finally:
             pass
 """
     try:
-        result = subprocess.run(
-            [sys.executable, "-c", worker, mode, str(max(1, int(page_number or 1)))],
-            input=data,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=PREVIEW_PDF_WORKER_TIMEOUT_SECONDS,
-            check=False,
-        )
+        with PDF_PREVIEW_SLOTS:
+            result = subprocess.run(
+                [sys.executable, "-c", worker, mode, str(max(1, int(page_number or 1)))],
+                input=data,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=PREVIEW_PDF_WORKER_TIMEOUT_SECONDS,
+                check=False,
+            )
     except subprocess.TimeoutExpired as exc:
         raise PreviewRenderError("pdf preview worker timed out") from exc
     if result.returncode != 0:
@@ -21710,6 +21715,7 @@ def log_document_preview_fallback(reason, document_id="", filename="", file_path
     )
 
 
+@synchronize_preview(0)
 def make_preview(document_id, filename, data=None, content_type="", size="thumb", page=1, error_collector=None, fallback_code=""):
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
     target = preview_target(document_id, size, page)
@@ -21732,7 +21738,7 @@ def make_preview(document_id, filename, data=None, content_type="", size="thumb"
         else:
             try:
                 image = fit_preview_image(render_pdf_page(data, page), size, "white")
-                image.save(target)
+                save_preview_image(image, target)
                 return str(target)
             except BaseException as exc:
                 active_fallback_code = preview_render_error_code(exc)
@@ -21752,7 +21758,7 @@ def make_preview(document_id, filename, data=None, content_type="", size="thumb"
         try:
             with Image.open(io.BytesIO(data)) as source:
                 image = fit_preview_image(source, size)
-                image.save(target)
+                save_preview_image(image, target)
                 return str(target)
         except Exception as exc:
             active_fallback_code = "image_render_failed"
@@ -21771,7 +21777,7 @@ def make_preview(document_id, filename, data=None, content_type="", size="thumb"
     if data and suffix == ".docx":
         try:
             image = docx_preview_image(data, size, page)
-            image.save(target)
+            save_preview_image(image, target)
             return str(target)
         except Exception as exc:
             active_fallback_code = "docx_render_failed"
@@ -21810,7 +21816,7 @@ def make_preview(document_id, filename, data=None, content_type="", size="thumb"
     draw.text((int(36 * scale), int(200 * scale)), PREVIEW_FALLBACK_MESSAGE, fill="#60727d")
     if size == "large":
         draw.text((int(36 * scale), int(242 * scale)), reason[:72], fill="#60727d")
-    image.save(target)
+    save_preview_image(image, target)
     return str(target)
 
 
@@ -72300,6 +72306,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    @synchronize_preview(2)
     def document_preview(self, method, document_id):
         if method != "GET" or not self.require("documents.view"):
             return
@@ -72352,11 +72359,26 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     preview_status = "error"
                     preview_error_code = "empty_file"
                 else:
+                    source_signature = preview_source_signature(source_path)
+                    cached_pages = load_preview_cache(source_path, target, page_number)
+                    if cached_pages is not None:
+                        payload = target.read_bytes()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "image/png")
+                        self.send_header("Content-Length", str(len(payload)))
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("X-Preview-Status", "ok")
+                        self.send_header("X-Preview-Error-Code", "")
+                        self.send_header("X-Preview-Page", str(page_number))
+                        self.send_header("X-Preview-Page-Count", str(cached_pages))
+                        self.end_headers()
+                        self.wfile.write(payload)
+                        return
                     source_data = source_path.read_bytes()
                 if source_data and suffix == ".pdf":
                     try:
                         preview_data = source_data
-                        total_pages = max(1, preview_pdf_page_count(source_data, doc, name))
+                        total_pages = max(1, cached_pdf_page_count(source_path, source_data, doc, name, preview_pdf_page_count))
                         page_number = max(1, min(total_pages, page_number))
                         target = preview_target(document_id, size, page_number).resolve()
                     except Exception as exc:
@@ -72378,7 +72400,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             preview_data = preview_pdf.read_bytes()
                             preview_name = f"{Path(name).stem}.pdf"
                             preview_content_type = "application/pdf"
-                            total_pages = max(1, preview_pdf_page_count(preview_data, doc, preview_name))
+                            total_pages = max(1, cached_pdf_page_count(source_path, preview_data, doc, preview_name, preview_pdf_page_count))
                             page_number = max(1, min(total_pages, page_number))
                             target = preview_target(document_id, size, page_number).resolve()
                         except Exception as exc:
@@ -72414,11 +72436,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         else:
             preview_status = "unavailable"
             preview_error_code = "unsupported"
-        should_refresh_preview = bool(preview_data) and (
-            suffix in {".pdf", ".docx"}
-            or not target.is_file()
-            or (source_path and target.stat().st_mtime < source_path.stat().st_mtime)
-        )
+        # Successful, current cache entries already returned above. A legacy
+        # or failed placeholder must be regenerated for every supported type.
+        should_refresh_preview = bool(preview_data)
         def build_preview(data=None):
             kwargs = {
                 "size": size,
@@ -72453,6 +72473,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if size == "thumb" and page_number == 1:
                 db.execute("UPDATE student_documents SET preview_path=? WHERE id=?", (preview_path, document_id))
             target = Path(preview_path).resolve()
+        if preview_status == "ok" and not preview_error_code and source_data:
+            save_preview_cache(source_path, target, page_number, total_pages, source_signature)
         if preview_status != "ok" or preview_error_code:
             log_document_preview_fallback(
                 preview_error_code or preview_status,
@@ -72477,6 +72499,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    @synchronize_preview(2)
     def document_preview_regenerate(self, method, document_id):
         if method != "POST" or not self.require("documents.manage"):
             return
@@ -72514,7 +72537,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     preview_data = preview_pdf.read_bytes()
                     preview_name = f"{Path(name).stem}.pdf"
                     preview_content_type = "application/pdf"
-                    total_pages = max(1, preview_pdf_page_count(preview_data, doc, preview_name))
+                    total_pages = max(1, cached_pdf_page_count(source_path, preview_data, doc, preview_name, preview_pdf_page_count))
                 else:
                     total_pages = max(1, docx_preview_page_count(data))
             else:
@@ -79147,6 +79170,7 @@ class CRMHandler(VisaWorkspaceCandidateMixin, VisaFormsCandidateMixin, VisaEvide
         self.end_headers()
         self.wfile.write(payload)
 
+    @synchronize_preview(2)
     def document_preview(self, method, document_id):
         if method != "GET" or not self.require("documents.view"):
             return
@@ -79201,11 +79225,26 @@ class CRMHandler(VisaWorkspaceCandidateMixin, VisaFormsCandidateMixin, VisaEvide
                     preview_status = "error"
                     preview_error_code = "empty_file"
                 else:
+                    source_signature = preview_source_signature(source_path)
+                    cached_pages = load_preview_cache(source_path, target, page_number)
+                    if cached_pages is not None:
+                        payload = target.read_bytes()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "image/png")
+                        self.send_header("Content-Length", str(len(payload)))
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("X-Preview-Status", "ok")
+                        self.send_header("X-Preview-Error-Code", "")
+                        self.send_header("X-Preview-Page", str(page_number))
+                        self.send_header("X-Preview-Page-Count", str(cached_pages))
+                        self.end_headers()
+                        self.wfile.write(payload)
+                        return
                     source_data = source_path.read_bytes()
                 if source_data and suffix == ".pdf":
                     try:
                         preview_data = source_data
-                        total_pages = max(1, preview_pdf_page_count(source_data, doc, name))
+                        total_pages = max(1, cached_pdf_page_count(source_path, source_data, doc, name, preview_pdf_page_count))
                         page_number = max(1, min(total_pages, page_number))
                         target = preview_target(document_id, size, page_number).resolve()
                     except Exception as exc:
@@ -79227,7 +79266,7 @@ class CRMHandler(VisaWorkspaceCandidateMixin, VisaFormsCandidateMixin, VisaEvide
                             preview_data = preview_pdf.read_bytes()
                             preview_name = f"{Path(name).stem}.pdf"
                             preview_content_type = "application/pdf"
-                            total_pages = max(1, preview_pdf_page_count(preview_data, doc, preview_name))
+                            total_pages = max(1, cached_pdf_page_count(source_path, preview_data, doc, preview_name, preview_pdf_page_count))
                             page_number = max(1, min(total_pages, page_number))
                             target = preview_target(document_id, size, page_number).resolve()
                         except Exception as exc:
@@ -79263,11 +79302,9 @@ class CRMHandler(VisaWorkspaceCandidateMixin, VisaFormsCandidateMixin, VisaEvide
         else:
             preview_status = "unavailable"
             preview_error_code = "unsupported"
-        should_refresh_preview = bool(preview_data) and (
-            suffix in {".pdf", ".docx"}
-            or not target.is_file()
-            or (source_path and target.stat().st_mtime < source_path.stat().st_mtime)
-        )
+        # Successful, current cache entries already returned above. A legacy
+        # or failed placeholder must be regenerated for every supported type.
+        should_refresh_preview = bool(preview_data)
         def build_preview(data=None):
             kwargs = {
                 "size": size,
@@ -79302,6 +79339,8 @@ class CRMHandler(VisaWorkspaceCandidateMixin, VisaFormsCandidateMixin, VisaEvide
             if size == "thumb" and page_number == 1:
                 db.execute("UPDATE student_documents SET preview_path=? WHERE id=?", (preview_path, document_id))
             target = Path(preview_path).resolve()
+        if preview_status == "ok" and not preview_error_code and source_data:
+            save_preview_cache(source_path, target, page_number, total_pages, source_signature)
         if preview_status != "ok" or preview_error_code:
             log_document_preview_fallback(
                 preview_error_code or preview_status,

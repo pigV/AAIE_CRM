@@ -3337,6 +3337,10 @@ dialog > .dialog-actions { padding: 0 20px 20px; }
   border-radius: var(--radius);
   box-shadow: 0 10px 35px rgba(15, 23, 42, .20);
 }
+.preview-page-placeholder[hidden],
+.preview-page-layer img[hidden] {
+  display: none;
+}
 .preview-canvas[data-error]:not([data-error=""])::before {
   content: attr(data-error);
   color: var(--muted-foreground);
