@@ -14,8 +14,10 @@ class WorkspaceTests(unittest.TestCase):
         html=document_workspace_html(1,'csrf',[],[],[extraction])
         for removed in ('Review source letter','Method:','Original extraction / Audit','Extraction proposal','Letter type','Official document date','Expiry date'):
             self.assertNotIn(removed,html)
-        for retained in ('Grant / Refusal Date','Length of Stay','Medical Completed Date'):
+        for retained in ('Grant / Refusal Date','Length of Stay'):
             self.assertIn(retained,html)
+        from visa_document_processing_ui import processing_dates_html
+        self.assertIn('name="medical_completed_date"',processing_dates_html(1,'csrf',{},[]))
 
     def test_unknown_document_is_recoverable_with_manual_type_and_category(self):
         from visa_workspace_candidate import document_workspace_html

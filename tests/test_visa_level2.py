@@ -37,10 +37,10 @@ class VisaLevel2Tests(unittest.TestCase):
   self.assertEqual('审理中',case_projection(self.c,1)['workflow_status'])
   documents.set_document_archived(self.c,1,ack['id'],archived=True,**self.actor)
   self.assertEqual('未开始',case_projection(self.c,1)['workflow_status'])
- def test_completed_health_only_and_letter_dates(self):
-  text='Health Examination\nDate: 1 September 2026\nGenerated 2 September 2026\nAppointment: 3 September 2026\nExamination completed: 4 September 2026'
+ def test_health_sent_on_and_letter_dates(self):
+  text='Health Examination\nSent on: 1 September 2026\nGenerated 2 September 2026\nAppointment: 3 September 2026\nExamination completed: 4 September 2026'
   p=dates.parse_processing_dates(text,today='2026-09-08')
-  self.assertEqual('2026-09-04',p['fields']['health_exam_date']['value'])
+  self.assertEqual('2026-09-01',p['fields']['health_exam_date']['value'])
   for title,key in [('Acknowledgement of application','acknowledge_sent_on'),('IMMI Grant Notification','grant_sent_on')]:
    p=dates.parse_processing_dates(title+'\nDate: 5 September 2026'+('\nDate of Grant: 4 September 2026' if key=='grant_sent_on' else ''),today='2026-09-08')
    self.assertEqual('2026-09-05',p['fields'][key]['value'])

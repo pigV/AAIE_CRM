@@ -797,6 +797,97 @@ class SchoolPlanParentConfirmationWriteTests(unittest.TestCase):
             actor_name="Parent",
         )
 
+    def test_replayed_confirmation_preserves_original_decision_and_submission(self):
+        from school_plan_lifecycle import normalize_parent_decision, save_parent_confirmation
+
+        decision = normalize_parent_decision(
+            {"plan_sector": "public"}, self.schools,
+            {"rank_school_1": "1", "rank_school_2": "2"},
+        )
+        first = save_parent_confirmation(self.connection, self.context, decision)
+        self.connection.execute(
+            "UPDATE school_plan_confirmed_schools SET submission_status='submitted'"
+        )
+        changed = normalize_parent_decision(
+            {"plan_sector": "public"}, self.schools,
+            {"rank_school_1": "2", "rank_school_2": "1"},
+        )
+        second = save_parent_confirmation(self.connection, self.context, changed)
+
+        self.assertEqual(second, first)
+        self.assertEqual(self.connection.execute(
+            "SELECT COUNT(*) FROM school_plan_report_confirmations"
+        ).fetchone()[0], 1)
+        self.assertEqual([tuple(row) for row in self.connection.execute(
+            "SELECT school_id,rank_order,submission_status FROM school_plan_confirmed_schools ORDER BY rank_order"
+        )], [(11, 1, "submitted"), (12, 2, "submitted")])
+        self.assertEqual(self.connection.execute(
+            "SELECT COUNT(*) FROM school_plan_report_school_rankings"
+        ).fetchone()[0], 2)
+        self.assertEqual(self.connection.execute(
+            "SELECT COUNT(*) FROM school_plan_report_events"
+        ).fetchone()[0], 1)
+
+    def test_simultaneous_confirmations_with_separate_connections_save_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from school_plan_lifecycle import normalize_parent_decision, save_parent_confirmation
+
+        decision = normalize_parent_decision(
+            {"plan_sector": "public"}, self.schools,
+            {"rank_school_1": "1", "rank_school_2": "2"},
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "concurrent.db"
+            with sqlite3.connect(path) as target:
+                self.connection.backup(target)
+            ready = Barrier(2)
+
+            def submit():
+                connection = sqlite3.connect(path, timeout=10)
+                connection.row_factory = sqlite3.Row
+                try:
+                    # Both requests pass the old check before either transaction starts.
+                    self.assertIsNone(connection.execute(
+                        "SELECT id FROM school_plan_report_confirmations WHERE report_id=1 AND link_id=5"
+                    ).fetchone())
+                    ready.wait(timeout=10)
+                    connection.execute("BEGIN IMMEDIATE")
+                    result = save_parent_confirmation(connection, self.context, decision)
+                    connection.commit()
+                    return result
+                finally:
+                    connection.close()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(lambda _: submit(), range(2)))
+            self.assertEqual(results[0], results[1])
+            with sqlite3.connect(path) as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT COUNT(*) FROM school_plan_confirmed_schools"
+                ).fetchone()[0], 2)
+
+    def test_new_report_keeps_its_own_confirmation(self):
+        from school_plan_lifecycle import normalize_parent_decision, save_parent_confirmation
+
+        decision = normalize_parent_decision(
+            {"plan_sector": "public"}, self.schools,
+            {"rank_school_1": "1", "rank_school_2": "2"},
+        )
+        first = save_parent_confirmation(self.connection, self.context, decision)
+        self.connection.execute(
+            """INSERT INTO school_plan_reports(id,student_id,city_id,city_name_snapshot,
+               plan_sector,status,updated_at) VALUES(2,'S001',10,'Melbourne','public','active','later')"""
+        )
+        self.connection.execute("INSERT INTO school_plan_report_links(id,report_id) VALUES(6,2)")
+        second = save_parent_confirmation(
+            self.connection, {**self.context, "report_id": 2, "link_id": 6}, decision
+        )
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.connection.execute(
+            "SELECT COUNT(*) FROM school_plan_report_confirmations"
+        ).fetchone()[0], 2)
+
     def test_event_failure_rolls_back_confirmation_and_report_status(self):
         from school_plan_lifecycle import normalize_parent_decision, save_parent_confirmation
 

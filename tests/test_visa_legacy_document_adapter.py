@@ -3,7 +3,9 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 class LegacyTests(unittest.TestCase):
  def setUp(self):
-  base=ROOT/'SAFEBOX/visa-corrective-20260910/legacy-tests';base.mkdir(parents=True,exist_ok=True)
+  from staging_environment import ACTIVE as staging
+  base=(staging.root/'tmp/visa-legacy-tests') if staging else ROOT/'SAFEBOX/visa-corrective-20260910/legacy-tests'
+  base.mkdir(parents=True,exist_ok=True)
   self.temp=tempfile.TemporaryDirectory(dir=base);self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
   self.path=self.root/'stored-uuid.txt';self.path.write_text('synthetic')
   self.c=sqlite3.connect(':memory:');self.c.row_factory=sqlite3.Row;self.addCleanup(self.c.close)

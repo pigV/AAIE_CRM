@@ -201,8 +201,28 @@ def case_projection(conn, case_id, *, read_text=None):
     manual = _row(conn, "SELECT after_json FROM visa_document_audit WHERE visa_case_id=? AND action='grant_date_corrected' ORDER BY id DESC LIMIT 1", (case_id,)) if 'visa_document_audit' in present else None
     if grants and manual:
         grant_date = json.loads(manual['after_json']).get('value') or auto_grant_date
+    # Current active evidence supplies missing display fields without confirming
+    # an official decision or overwriting retained staff-reviewed values.
+    official = dict(retained)
+    if len(grants) == 1:
+        document, parsed = grants[0]
+        original_values = json.loads(proposal['proposed_json']) if proposal else {}
+        for key in ('length_of_stay', 'expiry_date'):
+            kept = retained.get(key) or ''
+            # As with the grant date, a delta from the original extraction is
+            # a staff correction. Automatic values follow the active letter.
+            staff_corrected = kept and (not original_values.get(key) or kept != original_values[key])
+            official[key] = kept if staff_corrected else parsed.get(key) or ''
+        if not official.get('source_href'):
+            if document.get('student_document_id'):
+                official['source_href'] = f'/documents/{int(document["student_document_id"])}/download'
+            elif document.get('id'):
+                official['source_href'] = f'/visa-management/cases/{int(case_id)}/documents/{int(document["id"])}/file'
+    official['grant_date'] = grant_date
+    acknowledgement = choices['acknowledge_sent_on']
+    acknowledge_letter_date = acknowledgement[0]['value'] if len(acknowledgement) == 1 and acknowledgement[0]['status'] == 'detected' else ''
     result = 'Granted' if grants else 'Pending'
-    return {'documents':docs,'workflow_status':'已完成' if grants else '审理中' if ack else '未开始','result_status':result,'grant_date':grant_date,'processing':processing}
+    return {'documents':docs,'workflow_status':'已完成' if grants else '审理中' if ack else '未开始','result_status':result,'grant_date':grant_date,'official_decision':official,'acknowledge_letter_date':acknowledge_letter_date,'processing':processing}
 
 
 def student_projection(conn, student_id):

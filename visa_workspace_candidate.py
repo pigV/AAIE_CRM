@@ -61,15 +61,8 @@ def document_workspace_html(case_id, csrf, documents, submissions, extractions, 
     current_result=str(result.get('effective_result') or 'Pending')
     result_options=''.join(f'<option'+(' selected' if item==current_result else '')+f'>{item}</option>' for item in ('Pending','Granted','Refused','Withdrawn'))
     correction=form('correct-result-status',f'<label>Correct Result<select name="result_status">{result_options}</select></label><label>Reason<input name="reason" required maxlength="500"></label><button>Save correction</button>')
-    history=''
-    if result.get('history'):
-        items=[]
-        for event in reversed(result['history']):
-            detected=' · Detected '+escape(str(event['detected_result'])) if event.get('detected_result') else ''
-            marker=' · Conflict' if event.get('conflict') else ''
-            items.append('<li>'+escape(str(event['occurred_at']))+' · '+escape(str(event['event_kind']).title())+detected+' · Effective '+escape(str(event['effective_result']))+marker+'</li>')
-        history='<details class="visa-result-history"><summary>Result History</summary><ol>'+''.join(items)+'</ol></details>'
-    return '<section class="panel" id="visa-documents"><h2>Prepared / Case Documents</h2>'+form('upload','<label>Document Upload<input type="file" name="document" required accept=".pdf,.png,.jpg,.jpeg,.docx,.txt"></label><button>Upload prepared document</button>')+form('link','<label>Existing linked Student Document ID<input name="student_document_id" required inputmode="numeric"></label><button>Link existing physical file</button>')+'<div class="visa-document-grid">'+''.join(prepared)+'</div></section><section class="panel" id="immi-submitted"><h2>IMMI Submitted Documents</h2><p>Only these submitted versions enter Visa Submission Analysis. Prepared records and physical files are retained.</p>'+submitted+'</section><section class="panel" id="visa-result"><h2>Visa Result</h2>'+result_card+correction+history+'<div class="visa-result-documents">'+''.join(reviews)+'</div></section>'
+    # Result events remain retained in the audit store; daily UI omits their history.
+    return '<section class="panel" id="visa-documents"><h2>Prepared / Case Documents</h2>'+form('upload','<label>Document Upload<input type="file" name="document" required accept=".pdf,.png,.jpg,.jpeg,.docx,.txt"></label><button>Upload prepared document</button>')+form('link','<label>Existing linked Student Document ID<input name="student_document_id" required inputmode="numeric"></label><button>Link existing physical file</button>')+'<div class="visa-document-grid">'+''.join(prepared)+'</div></section><section class="panel" id="immi-submitted"><h2>IMMI Submitted Documents</h2><p>Only these submitted versions enter Visa Submission Analysis. Prepared records and physical files are retained.</p>'+submitted+'</section><section class="panel" id="visa-result"><h2>Visa Result</h2>'+result_card+correction+'<div class="visa-result-documents">'+''.join(reviews)+'</div></section>'
 
 
 def submitted_analysis_context(conn,case_id,read_text,ownership):
@@ -265,39 +258,39 @@ class VisaWorkspaceCandidateMixin:
         except ValueError as exc:return self.error_page(str(exc),409)
         data=p.read_bytes();self.send_response(200);self.send_header('Content-Type','application/pdf' if p.suffix.lower()=='.pdf' else 'application/octet-stream');self.send_header('Content-Disposition',"inline; filename*=UTF-8''"+quote(doc['original_name']));self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
 
+    def _visa_display_projection(self,case):
+        """Share attachment reads only within the current database request scope."""
+        db=self._visa_runtime()['db'];cid=int(case['id'])
+        state=getattr(db,'_request_state',lambda:None)()
+        cache=state.setdefault('visa_display_projections',{}) if state is not None else {}
+        if cid not in cache:
+            from visa_document_lifecycle import case_projection
+            with db.transaction() as conn:
+                cache[cid]=case_projection(conn,cid,read_text=lambda d:self._visa_read_text(dict(case),d))
+        return cache[cid]
+
     def visa_processing_panel_html(self,case):
         db=self._visa_runtime()['db'];cid=int(case['id'])
         if not db.one("SELECT 1 FROM sqlite_master WHERE name='visa_processing_date_revisions'"):
             return '<section class="panel"><p>Visa processing dates require the approved migration.</p></section>'
-        from visa_processing_dates import processing_summary
         from visa_document_processing_ui import processing_dates_html
+        projection=self._visa_display_projection(case)
+        summary=projection['processing']
         with db.transaction() as conn:
-            from visa_document_lifecycle import case_projection
-            projection=case_projection(conn,cid,read_text=lambda d:self._visa_read_text(dict(case),d))
-            summary=projection['processing']
             documents=[dict(r) for r in conn.execute('SELECT * FROM visa_case_documents WHERE visa_case_id=?',(cid,))]
-        from visa_legacy_document_adapter import official_case_projection
-        with db.transaction() as conn:official=official_case_projection(conn,dict(case))
-        official['grant_date']=projection['grant_date']
+        official=projection['official_decision']
         source=f'<a href="{escape(official["source_href"],quote=True)}">Review original official letter / retained record</a>' if official['source_href'] else ''
         html='<section class="panel"><h2>Official Visa decision</h2><p>Date of Grant: '+escape(official['grant_date'] or 'No exact confirmed grant source')+'</p><p>Length of Stay: '+escape(official['length_of_stay'] or 'Not retained as a separate field; review original linked letter')+'</p><p>Visa expiry date: '+escape(official['expiry_date'] or 'Not retained')+'</p>'+source+'<p>Retained official values; separate from processing sent-on dates. Original notes remain in the Student VISA record.</p></section>'
         html+=f'<p><a href="/visa-management/cases/{cid}/workspace#visa-result">Confirm official Visa decision</a></p>'
         html+=processing_dates_html(cid,self.csrf,summary,documents)
         html+=f'<form method="post" action="/visa-management/cases/{cid}/workspace"><input type="hidden" name="csrf" value="{escape(self.csrf,quote=True)}"><input type="hidden" name="action" value="correct-grant-date"><label>Date of Grant<input type="date" name="grant_date" value="{escape(projection["grant_date"],quote=True)}"></label><button>Save Date of Grant</button></form>'
-        active_ids={d.get('id') for d in projection['documents']}
-        extractions=[dict(r) for r in db.all('SELECT * FROM visa_letter_extractions WHERE visa_case_id=? ORDER BY id DESC',(cid,)) if r['document_id'] in active_ids]
-        for x in extractions:
-            source=next((d for d in documents if d['id']==x['document_id']),None)
-            x['document_label']=source['original_name'] if source else 'Retained source letter'
-            review=db.one('SELECT * FROM visa_letter_reviews WHERE extraction_id=? ORDER BY id DESC LIMIT 1',(x['id'],))
-            if review:x['effective_json']=review['confirmed_json']
-        # Keep result correction/history and classification recovery on the normal Case page.
-        # Official letter confirmation is available separately in the workspace.
+        # The normal Case page shows business results and dates, without a
+        # second document-analysis form. Explicit review stays in the workspace.
         result=None
         if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'"):
             from visa_result_status import result_summary
             with db.transaction() as conn:result=result_summary(conn,cid)
-        review_html=document_workspace_html(cid,self.csrf,[],[],extractions,result,show_official_review=False)
+        review_html=document_workspace_html(cid,self.csrf,[],[],[],result,show_official_review=False)
         marker='<section class="panel" id="visa-result">'
         html+=marker+review_html.partition(marker)[2]
         return html.replace('<input type="hidden" name="action"', '<input type="hidden" name="return_legacy" value="1"><input type="hidden" name="action"')

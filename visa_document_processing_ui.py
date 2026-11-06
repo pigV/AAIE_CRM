@@ -33,7 +33,7 @@ def processing_dates_html(case_id, csrf, summary, documents):
         state=summary.get('fields',{}).get(key,{})
         control=f'<label>{label}<input type="date" name="{key}" value="{escape(str(state.get("value") or ""),quote=True)}"></label>'
         fields.append(control)
-    return '<section class="panel" id="visa-processing-dates"><h2>Processing speed</h2><p>Calendar days. Grant Sent On is separate from Date of Grant. Medical Completed is entered by Staff.</p><p>Enter or correct the dates below. Health Exam Date is the completed examination date. Manual corrections are retained.</p>'+cards+validation+_form(case_id,csrf,'correct-processing-dates',''.join(fields)+'<button>Save processing dates</button>')+'</section>'
+    return '<section class="panel" id="visa-processing-dates"><h2>Processing speed</h2><p>Calendar days. Grant Sent On is separate from Date of Grant. Medical Completed is entered by Staff.</p><p>Enter or correct the dates below. Health Exam Date is the Sent on date of the Health Examinations letter. Manual corrections are retained.</p>'+cards+validation+_form(case_id,csrf,'correct-processing-dates',''.join(fields)+'<button>Save processing dates</button>')+'</section>'
 
 def keyword_rules_html(case_id, csrf, rules):
     from visa_document_metadata import CATEGORIES

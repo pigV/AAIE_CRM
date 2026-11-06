@@ -345,9 +345,7 @@ from student_lifecycle.fact_binding import (
     record_current_payment_evidence,
 )
 from student_lifecycle.workbench import (
-    load_external_transfer_contract_actions,
     load_enrolment_workbench,
-    render_external_transfer_contract_actions,
     render_enrolment_workbench,
     resolve_school_snapshot,
 )
@@ -27941,8 +27939,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         target = (ASSET_DIR / relative).resolve()
         if ASSET_DIR.resolve() not in target.parents or not target.is_file():
             return self.text("Not found", 404)
-        stat = target.stat()
-        etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+        from static_asset_encoding import asset_representation
+        payload, etag, encoding = asset_representation(
+            target, self.headers.get("Accept-Encoding", ""),
+            self.headers.get("If-None-Match")
+        )
         requested_version = str((self.query.get("v") or [""])[0])
         cache_control = (
             "public, max-age=31536000, immutable"
@@ -27953,14 +27954,17 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.NOT_MODIFIED)
             self.send_header("Cache-Control", cache_control)
             self.send_header("ETag", etag)
+            self.send_header("Vary", "Accept-Encoding")
             self.end_headers()
             return
-        payload = target.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "application/octet-stream")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", cache_control)
         self.send_header("ETag", etag)
+        self.send_header("Vary", "Accept-Encoding")
+        if encoding:
+            self.send_header("Content-Encoding", encoding)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -57709,18 +57713,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     lifecycle_connection, str(student_id), "document",
                     (document["id"] for document in normalized_docs),
                 )
-                transfer_contract_decisions = load_external_transfer_contract_actions(
-                    lifecycle_connection, str(student_id)
-                )
             finally:
                 db._release_connection(lifecycle_connection)
-            transfer_contract_actions = render_external_transfer_contract_actions(
-                transfer_contract_decisions,
-                csrf=self.csrf,
-                action_allowed=can_orchestrate_external_transfer(
-                    get_permissions(self.user), self.transfer_case_flags()
-                ),
-            )
             step_start = time.perf_counter()
             doc_rows = "".join(
                 application_document_row(
@@ -57756,7 +57750,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 '<p class="missing-note">家长在线表单尚未提交。</p>'
                 if not material_completion.parent_form_submitted else ""
             )
-            return f"""{transfer_contract_actions}
+            return f"""
           <div class="two-column">
             <section class="panel"><div class="panel-head"><div><h2>申请材料</h2><p>支持单个、多选及 ZIP；上传后先进入材料审核，确认文件类型后按标准文件名保存。</p></div></div>
               <div class="dashboard-actions"><a class="secondary button-link" href="/school-plan-reports/create?student_id={quote(student_id)}">生成学校方案 PDF</a></div>
@@ -65082,6 +65076,21 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if "lodgement_recorded_at" not in case.keys():
             return self.flash_redirect(return_path, "数据库迁移尚未完成，暂时不能记录正式签证递交。", "error")
         if case["lodgement_recorded_at"]:
+            form = getattr(self, "form", {}) or {}
+            if form_text_value(form, "action") == "correct-lodgement-date":
+                if not db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='visa_processing_date_revisions'"):
+                    return self.flash_redirect(return_path, "日期更正功能所需的数据库迁移尚未完成。", "error")
+                from visa_processing_dates import correct_processing_dates
+                try:
+                    with db.transaction() as connection:
+                        correct_processing_dates(
+                            connection, int(case_id),
+                            {"acknowledge_sent_on": form_text_value(form, "actual_lodgement_date")},
+                            actor_user_id=self.user["id"], occurred_at=now_iso(),
+                        )
+                except ValueError as exc:
+                    return self.flash_redirect(return_path, str(exc), "error")
+                return self.flash_redirect(return_path, "递交日期已更正，并与 Acknowledge Sent On Date 同步；原递交记录已保留。")
             return self.flash_redirect(return_path, "正式递交证据已经记录；如需更正，请联系管理员保留审计轨迹。", "error")
         actual_date = form_text_value(getattr(self, "form", {}) or {}, "actual_lodgement_date")
         try:
@@ -65091,20 +65100,29 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         stamp = now_iso()
         actor_id = self.user.get("id") if self.user else None
         actor_name = str(self.user.get("display_name") or self.user.get("username") or "System") if self.user else "System"
-        with db.transaction() as connection:
-            cursor = connection.execute(
-                """UPDATE visa_cases
-                      SET actual_lodgement_date=?,lodgement_date=?,status='Lodged',
-                          lodged_by_user_id=?,lodged_by_name=?,lodgement_recorded_at=?,updated_at=?
-                    WHERE id=? AND student_id=? AND archived_at IS NULL
-                      AND lodgement_recorded_at IS NULL""",
-                (actual_date, actual_date, actor_id, actor_name, stamp, stamp, int(case_id), str(student_id)),
-            )
-            if cursor.rowcount != 1:
-                return self.flash_redirect(return_path, "正式递交证据未保存，请刷新后重试。", "error")
-            process_revenue_visa_change(
-                connection, int(case_id), int(actor_id), stamp
-            )
+        try:
+            with db.transaction() as connection:
+                cursor = connection.execute(
+                    """UPDATE visa_cases
+                          SET actual_lodgement_date=?,lodgement_date=?,status='Lodged',
+                              lodged_by_user_id=?,lodged_by_name=?,lodgement_recorded_at=?,updated_at=?
+                        WHERE id=? AND student_id=? AND archived_at IS NULL
+                          AND lodgement_recorded_at IS NULL""",
+                    (actual_date, actual_date, actor_id, actor_name, stamp, stamp, int(case_id), str(student_id)),
+                )
+                if cursor.rowcount != 1:
+                    return self.flash_redirect(return_path, "正式递交证据未保存，请刷新后重试。", "error")
+                if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='visa_processing_date_revisions'").fetchone():
+                    from visa_processing_dates import correct_processing_dates
+                    correct_processing_dates(
+                        connection, int(case_id), {"acknowledge_sent_on": actual_date},
+                        actor_user_id=actor_id, occurred_at=stamp,
+                    )
+                process_revenue_visa_change(
+                    connection, int(case_id), int(actor_id), stamp
+                )
+        except ValueError as exc:
+            return self.flash_redirect(return_path, str(exc), "error")
         db.audit(
             self.user, "visa_application_submitted", "visa_cases", int(case_id),
             student_id=str(student_id),
@@ -65123,7 +65141,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <section class="panel visa-lodgement-panel" id="visa-lodgement-submission">
               <div class="panel-head"><div><h2>VISA Application Submitted</h2><p>数据库迁移完成后可在这里记录正式递交。</p></div></div>
             </section>"""
+        acknowledge_date = ""
+        dates_available = bool(db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='visa_processing_date_revisions'"))
+        if dates_available:
+            projection = self._visa_display_projection(case)
+            acknowledge_date = projection["acknowledge_letter_date"] or projection["processing"]["fields"]["acknowledge_sent_on"]["value"] or ""
         if case["lodgement_recorded_at"]:
+            correction = ""
+            if dates_available:
+                suggested_date = acknowledge_date or case["actual_lodgement_date"] or ""
+                mismatch = '<p role="status">Acknowledge Sent On Date 与已记录的实际递交日期不同，请核对后确认更正。</p>' if acknowledge_date and acknowledge_date != case["actual_lodgement_date"] else ""
+                correction = f"""{mismatch}<details><summary>更正日期</summary>
+                  <form class="visa-lodgement-form" method="post" action="/students/{quote(str(student_id))}/visa-cases/{int(case['id'])}/lodgement-submit">
+                    <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                    <input type="hidden" name="action" value="correct-lodgement-date">
+                    <label>实际递交日期 / Acknowledge Sent On Date<input type="date" name="actual_lodgement_date" value="{esc(suggested_date)}" required></label>
+                    <p>确认后同步两处日期；保留原递交人、记录时间和更正审计。</p>
+                    <button type="submit">确认更正日期</button>
+                  </form></details>"""
             return f"""
             <section class="panel visa-lodgement-panel is-complete" id="visa-lodgement-submission">
               <div class="panel-head"><div><h2>VISA Application Submitted</h2><p>正式递交证据已锁定，避免普通编辑覆盖原始记录。</p></div><span class="status-pill done">已递交</span></div>
@@ -65132,13 +65167,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 <div class="visa-management-field-card"><dt>操作人</dt><dd>{esc(case['lodged_by_name'] or '—')}</dd></div>
                 <div class="visa-management-field-card"><dt>记录时间</dt><dd>{esc(display_datetime(case['lodgement_recorded_at']))}</dd></div>
               </dl>
+              {correction}
             </section>"""
         return f"""
         <section class="panel visa-lodgement-panel" id="visa-lodgement-submission">
           <div class="panel-head"><div><h2>VISA Application Submitted</h2><p>确认已经正式递交移民局后操作；完成后学生进入“等待签证结果”。</p></div></div>
           <form class="visa-lodgement-form" method="post" action="/students/{quote(str(student_id))}/visa-cases/{int(case['id'])}/lodgement-submit">
             <input type="hidden" name="csrf" value="{esc(self.csrf)}">
-            <label>实际递交日期<input type="date" name="actual_lodgement_date" required></label>
+            <label>实际递交日期<input type="date" name="actual_lodgement_date" value="{esc(acknowledge_date)}" required></label>
             <button class="primary" type="submit">确认 VISA Application Submitted</button>
           </form>
         </section>"""
@@ -75015,7 +75051,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             decision = normalize_parent_decision(link, schools, form)
         except ParentDecisionError as exc:
             raise ValueError(str(exc)) from exc
-        signature_path = self.school_plan_save_signature_image(link["report_id"], form.get("signature_data"))
         stamp = now_iso()
         statement = (
             "我确认已阅读本学校方案报告，并确认以上所选私校为最终申请意向。本人理解该选择将作为后续学校申请递交的重要依据。"
@@ -75023,30 +75058,44 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             else "我确认已阅读本学校方案报告，以上已选学校及排序为本次最终申请意向，留空的学校本次不申请。本人理解该选择和排序将作为后续学校申请递交的重要依据。"
         )
         with db.transaction() as connection:
-            confirmation_id = save_parent_confirmation(
-                connection,
-                {
-                    "report_id": link["report_id"],
-                    "viewer_id": link["viewer_id"],
-                    "student_id": link["student_id"],
-                    "application_id": link["application_id"],
-                    "link_id": link["id"],
-                    "confirmed_at": stamp,
-                    "confirmed_ip": self.client_address[0],
-                    "user_agent": self.headers.get("User-Agent"),
-                    "wechat_openid": link["bound_wechat_openid"] or "",
-                    "wechat_unionid": link["bound_wechat_unionid"] or "",
-                    "wechat_nickname": link["bound_wechat_nickname"] or "",
-                    "signature_image_path": str(signature_path),
-                    "confirmation_statement": statement,
-                    "confirmed_by_name": str(form.get("parent_name") or link["bound_wechat_nickname"] or "家长"),
-                },
-                decision,
-            )
-            connection.execute(
-                "INSERT INTO school_plan_report_events(report_id,event_type,event_at,metadata_json) VALUES(?,?,?,?)",
-                (link["report_id"], "parent_page_archive_requested", stamp, json.dumps({"confirmation_id": confirmation_id})),
-            )
+            # Another request may have confirmed while this one parsed its form.
+            # Recheck under BEGIN IMMEDIATE before writing signatures or archives.
+            existing = connection.execute(
+                """SELECT id FROM school_plan_report_confirmations
+                     WHERE report_id=? AND link_id=? AND status='confirmed'
+                     ORDER BY id LIMIT 1""",
+                (link["report_id"], link["id"]),
+            ).fetchone()
+            if not existing:
+                signature_path = self.school_plan_save_signature_image(
+                    link["report_id"], form.get("signature_data")
+                )
+                confirmation_id = save_parent_confirmation(
+                    connection,
+                    {
+                        "report_id": link["report_id"],
+                        "viewer_id": link["viewer_id"],
+                        "student_id": link["student_id"],
+                        "application_id": link["application_id"],
+                        "link_id": link["id"],
+                        "confirmed_at": stamp,
+                        "confirmed_ip": self.client_address[0],
+                        "user_agent": self.headers.get("User-Agent"),
+                        "wechat_openid": link["bound_wechat_openid"] or "",
+                        "wechat_unionid": link["bound_wechat_unionid"] or "",
+                        "wechat_nickname": link["bound_wechat_nickname"] or "",
+                        "signature_image_path": str(signature_path),
+                        "confirmation_statement": statement,
+                        "confirmed_by_name": str(form.get("parent_name") or link["bound_wechat_nickname"] or "家长"),
+                    },
+                    decision,
+                )
+                connection.execute(
+                    "INSERT INTO school_plan_report_events(report_id,event_type,event_at,metadata_json) VALUES(?,?,?,?)",
+                    (link["report_id"], "parent_page_archive_requested", stamp, json.dumps({"confirmation_id": confirmation_id})),
+                )
+        if existing:
+            return self.redirect(f"/school-plan-share/{quote(token)}")
         confirmation_pdf = self.school_plan_generate_confirmation_pdf(confirmation_id)
         db.execute(
             "UPDATE school_plan_reports SET confirmation_note=?,updated_at=? WHERE id=?",

@@ -275,6 +275,17 @@ def save_parent_confirmation(connection, context, decision: ParentDecision) -> i
     stamp = str(_mapping_value(context, "confirmed_at", _now_iso()))
     connection.execute("SAVEPOINT school_plan_parent_confirmation")
     try:
+        # The caller's BEGIN IMMEDIATE serializes this check with the insert.
+        # The HTTP preflight alone cannot protect against simultaneous submits.
+        existing = connection.execute(
+            """SELECT id FROM school_plan_report_confirmations
+                 WHERE report_id=? AND link_id=? AND status='confirmed'
+                 ORDER BY id LIMIT 1""",
+            (report_id, int(_mapping_value(context, "link_id"))),
+        ).fetchone()
+        if existing:
+            connection.execute("RELEASE SAVEPOINT school_plan_parent_confirmation")
+            return int(existing["id"])
         confirmation_id = connection.execute(
             """INSERT INTO school_plan_report_confirmations(
                  report_id,viewer_id,student_id,application_id,link_id,confirmed_at,

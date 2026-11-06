@@ -15,11 +15,25 @@ class ProcessingDatesTests(unittest.TestCase):
   self.save(1,'Acknowledgement of application\nsent on 1 September 2026')
   p=self.save(2,'IMMI Grant Notification\nsent on 8 September 2026\nDate of Grant 7 September 2026\nLength of stay 3 years')
   self.assertEqual(7,self.summary()['total_processing_days']);self.assertNotIn('decision_date',p)
- def test_health_rejects_letter_generated_and_appointment_dates(self):
-  for text in ['sent on 2 September 2026\nGenerated 1 September 2026','Generated 1 September 2026','Appointment: 2 September 2026','sent on 31 February 2026']:
-   p=s.parse_processing_dates('Health Examination\n'+text,today='2026-09-08');self.assertEqual('',p['fields']['health_exam_date']['value']);self.assertEqual('not_detected',p['fields']['health_exam_date']['status'])
- def test_health_completion_dates_validate_and_fail_closed(self):
-  for text,value,status in [('Examination completed on: 2 September 2026','2026-09-02','detected'),('Examination completed: 31 February 2026','','invalid'),('Examination completed: 9 September 2026','','invalid'),('Examination completed: 1 September 2026 or 2 September 2026','','ambiguous')]:
+ def test_received_visa_application_letter_without_acknowledgement_title(self):
+  text='We received your Student Guardian (subclass 590) visa application on 29 September 2026.\nStudent Guardian (subclass 590) visa: Received\nSent on: 30 September 2026'
+  fields=s.parse_processing_dates(text,today='2026-11-06')['fields']
+  self.assertEqual('2026-09-30',fields['acknowledge_sent_on']['value'])
+  self.assertEqual('',fields['grant_sent_on']['value'])
+ def test_received_application_body_does_not_override_an_explicit_letter_title(self):
+  for title,key in [('Health Examinations','health_exam_date'),('IMMI Grant Notification','grant_sent_on')]:
+   with self.subTest(title=title):
+    text=title+'\nWe received your Student Guardian (subclass 590) visa application on 29 September 2026.\nSent on: 30 September 2026'
+    fields=s.parse_processing_dates(text,today='2026-11-06')['fields']
+    self.assertEqual('2026-09-30',fields[key]['value'])
+    self.assertEqual('',fields['acknowledge_sent_on']['value'])
+ def test_health_uses_sent_on_and_ignores_generated_appointment_and_completion(self):
+  p=s.parse_processing_dates('Health Examination\nSent on: 2 September 2026\nGenerated: 1 September 2026\nAppointment: 3 September 2026\nExamination completed: 4 September 2026',today='2026-09-08')
+  self.assertEqual('2026-09-02',p['fields']['health_exam_date']['value'])
+  for text in ['Generated 1 September 2026','Appointment: 2 September 2026','Examination completed: 4 September 2026']:
+   p=s.parse_processing_dates('Health Examination\n'+text,today='2026-09-08');self.assertEqual('',p['fields']['health_exam_date']['value'])
+ def test_health_sent_on_dates_validate_and_fail_closed(self):
+  for text,value,status in [('Sent on: 2 September 2026','2026-09-02','detected'),('Sent on: 31 February 2026','','invalid'),('Sent on: 9 September 2026','','invalid'),('Sent on: 1 September 2026 or 2 September 2026','','ambiguous')]:
    p=s.parse_processing_dates('Health Examination\n'+text,today='2026-09-08');self.assertEqual(value,p['fields']['health_exam_date']['value']);self.assertEqual(status,p['fields']['health_exam_date']['status'])
  def test_multiple_dates_fail_closed(self):
   p=s.parse_processing_dates('IMMI Grant Notification\nsent on 1 September 2026\nsent on 2 September 2026',today='2026-09-08');self.assertEqual('ambiguous',p['fields']['grant_sent_on']['status'])
@@ -61,7 +75,7 @@ class ProcessingDatesTests(unittest.TestCase):
  def test_manual_blank_remains_and_medical_never_inferred(self):
   self.save(1,'Health Examination\nsent on 8 September 2026')
   self.assertEqual('',self.summary()['fields']['medical_completed_date']['value'])
-  self.correct({'health_exam_date':''});self.save(1,'Health Examination\nExamination completed: 7 September 2026')
+  self.correct({'health_exam_date':''});self.save(1,'Health Examination\nSent on: 7 September 2026')
   self.assertEqual('detected',self.summary()['fields']['health_exam_date']['status']);self.assertEqual('2026-09-07',self.summary()['fields']['health_exam_date']['value'])
  def test_duplicate_same_date_is_valid_and_next_line(self):
   p=s.parse_processing_dates('Acknowledge Letter\nSent On:\n1 September 2026\nsent on 1 September 2026',today='2026-09-08')
@@ -69,11 +83,11 @@ class ProcessingDatesTests(unittest.TestCase):
  def test_blank_sent_on_does_not_consume_generated_next_line(self):
   p=s.parse_processing_dates('Health Examination\nSent on:\nGenerated: 1 September 2026',today='2026-09-08')
   self.assertEqual('',p['fields']['health_exam_date']['value'])
-  self.assertEqual('not_detected',p['fields']['health_exam_date']['status'])
+  self.assertEqual('invalid',p['fields']['health_exam_date']['status'])
   self.assertEqual('2026-09-01',p['candidates']['generated'][0]['value'])
  def test_same_line_labels_are_scoped(self):
   p=s.parse_processing_dates('Health Examination\nSent on: 2 September 2026 Generated: 1 September 2026',today='2026-09-08')
-  self.assertEqual('',p['fields']['health_exam_date']['value'])
+  self.assertEqual('2026-09-02',p['fields']['health_exam_date']['value'])
  def test_incidental_health_insurance_does_not_change_grant_kind(self):
   p=s.parse_processing_dates('IMMI Grant Notification\nSent on: 8 September 2026\nDate of Grant: 7 September 2026\nMaintain health insurance during your stay',today='2026-09-08')
   self.assertEqual('2026-09-08',p['fields']['grant_sent_on']['value'])
@@ -86,7 +100,7 @@ class ProcessingDatesTests(unittest.TestCase):
   self.assertEqual('ambiguous',p['fields']['grant_sent_on']['status'])
  def test_wrapped_date_line_stops_at_other_label(self):
   p=s.parse_processing_dates('Health Examination\nSent on:\n2 September 2026 Generated: 1 September 2026',today='2026-09-08')
-  self.assertEqual('',p['fields']['health_exam_date']['value'])
+  self.assertEqual('2026-09-02',p['fields']['health_exam_date']['value'])
  def test_existing_official_parser_contract_unchanged(self):
   from visa_documents_candidate import propose_letter
   text='IMMI Grant Notification\nSent on: 8 September 2026\nDate of Grant: 7 September 2026\nLength of stay: Until 15 March 2029'

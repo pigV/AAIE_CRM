@@ -24,7 +24,7 @@ class ProcessingUI(unittest.TestCase):
         from visa_document_processing_ui import processing_dates_html
         html=processing_dates_html(1,'csrf',{'fields':{},'total_processing_days':None,'medical_completed_to_grant_days':None,'validation':[]},[])
         self.assertIn('Pending',html);self.assertNotIn('0 days',html)
-        self.assertIn('Health Exam Date is the completed examination date. Manual corrections are retained.',html)
+        self.assertIn('Health Exam Date is the Sent on date of the Health Examinations letter. Manual corrections are retained.',html)
         controls=Controls(html)
         self.assertTrue(any(x.get('name')=='medical_completed_date' for x in controls.inputs))
     def test_same_day_zero_is_available_and_dates_are_directly_editable(self):

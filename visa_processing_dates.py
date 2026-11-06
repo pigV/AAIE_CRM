@@ -34,9 +34,9 @@ def parse_processing_dates(text,*,today=None):
      value=_text_date(token)
      try:value=_valid(value,today)
      except ValueError:value=''
-     candidates[key].append(dict(raw=raw,value=value))
- def pick(key):
-  entries=candidates[key]
+     candidates[key].append(dict(raw=raw,value=value,label=match.group(0)))
+ def pick(key,explicit_sent_on=False):
+  entries=[entry for entry in candidates[key] if not explicit_sent_on or re.fullmatch(r'sent\s+on',entry.get('label',''),re.I)]
   if not entries:return _field()
   if any(not e['value'] for e in entries):return _field(status='invalid',source=key)
   values={e['value'] for e in entries}
@@ -44,13 +44,15 @@ def parse_processing_dates(text,*,today=None):
  fields={key:_field() for key in FIELDS};low=text.lower()
  kinds=[]
  if re.search(r'grant notification|date of grant|visa (?:has been )?granted',low):kinds.append('grant_sent_on')
- if any(re.match(r'(?:health\s+(?:exam(?:ination)?|assessment)|medical\s+(?:exam(?:ination)?|letter|request)|examination\s+request)\b',line,re.I) for line in lines):kinds.append('health_exam_date')
+ if any(re.match(r'(?:health\s+(?:exam(?:ination)?s?|assessment)|medical\s+(?:exam(?:ination)?|letter|request)|examination\s+request)\b',line,re.I) for line in lines):kinds.append('health_exam_date')
  if re.search(r'acknowledg(?:e)?ment|acknowledge letter|lodgement receipt|application received',low):kinds.append('acknowledge_sent_on')
+ elif not kinds and re.search(r'we (?:have )?received your[^\n]{0,160}\bvisa application\b',low):
+  kinds.append('acknowledge_sent_on')
  if len(kinds)==1:
-  key=kinds[0];fields[key]=pick('completed' if key=='health_exam_date' else 'sent_on')
+  key=kinds[0];fields[key]=pick('sent_on',explicit_sent_on=key=='health_exam_date')
  elif kinds:
   for key in kinds:fields[key]=_field(status='ambiguous')
- return dict(version=2,fields=fields,candidates=candidates)
+ return dict(version=3,fields=fields,candidates=candidates)
 def _rows(conn,sql,args=()):
  cur=conn.execute(sql,args);return [dict(zip([c[0] for c in cur.description],row)) for row in cur.fetchall()]
 def _authorize(conn,case_id,actor,stamp,document_id=None):
@@ -81,7 +83,7 @@ def processing_summary(conn,case_id,*,today=None):
   for did,p in latest.items():
    if did not in docs or docs[did]['archived_at']:continue
    item=json.loads(p['proposed_json'])['fields'][key]
-   if key=='health_exam_date' and item.get('source')!='completed':continue
+   if key=='health_exam_date' and item.get('source')!='sent_on':continue
    if item['status']!='not_detected':choices.append(dict(item,document_id=did))
   if len(choices)==1:fields[key]=choices[0]
   elif choices:fields[key]=_field(status='ambiguous')
@@ -95,7 +97,7 @@ def processing_summary(conn,case_id,*,today=None):
    for source_id,p in latest.items():
     if source_id not in docs or docs[source_id]['archived_at']:continue
     item=json.loads(p['proposed_json'])['fields'][rev['field']]
-    if rev['field']=='health_exam_date' and item.get('source')!='completed':continue
+    if rev['field']=='health_exam_date' and item.get('source')!='sent_on':continue
     if item['status']!='not_detected':choices.append(dict(item,document_id=source_id))
    if len(choices)==1:fields[rev['field']]=choices[0]
    elif choices:fields[rev['field']]=_field(status='ambiguous')
@@ -109,16 +111,28 @@ def correct_processing_dates(conn,case_id,values,*,actor_user_id,occurred_at,sou
  if not isinstance(values,dict) or not values or set(values)-set(FIELDS):raise ValueError('Unsupported processing date fields.')
  sources=source_document_ids or {}
  if set(sources)-set(values):raise ValueError('Source supplied without a date field.')
+ case=_rows(conn,'SELECT * FROM visa_cases WHERE id=?',(case_id,))[0]
+ if case.get('archived_at'):raise ValueError('Active Visa Case required.')
+ sync_lodgement=bool(case.get('lodgement_recorded_at') and 'acknowledge_sent_on' in values)
  before=processing_summary(conn,case_id,today=today);fields={k:dict(v) for k,v in before['fields'].items()};updates=[]
  for key,value in values.items():
   value=_valid(str(value or '').strip(),today);did=sources.get(key)
   if did is not None:_authorize(conn,case_id,actor_user_id,occurred_at,did)
   if key=='medical_completed_date' and did is not None:raise ValueError('Medical completion is a Staff fact, not a letter date.')
-  fields[key]=_field(value,'manual','staff',did);updates.append((case_id,key,value,did,json.dumps(before['fields'][key]),actor_user_id,occurred_at))
+  old=dict(before['fields'][key])
+  if sync_lodgement and key=='acknowledge_sent_on':
+   if not value:raise ValueError('Recorded submission requires a non-empty acknowledgement date.')
+   old['lodgement_evidence']={k:case.get(k) for k in ('actual_lodgement_date','lodgement_date','lodgement_recorded_at','lodged_by_user_id','lodged_by_name','status')}
+  fields[key]=_field(value,'manual','staff',did);updates.append((case_id,key,value,did,json.dumps(old),actor_user_id,occurred_at))
  _,errors=_metrics(fields)
  if errors:raise ValueError('; '.join(errors))
  conn.execute('SAVEPOINT processing_correction')
  try:
+  if sync_lodgement:
+   # Only an explicit staff correction reaches here. Keep the original
+   # submission identity/time and all workflow/result state unchanged.
+   conn.execute('UPDATE visa_cases SET actual_lodgement_date=?,lodgement_date=?,updated_at=? WHERE id=?',
+                (fields['acknowledge_sent_on']['value'],fields['acknowledge_sent_on']['value'],occurred_at,case_id))
   conn.executemany('INSERT INTO visa_processing_date_revisions(visa_case_id,field,value,document_id,before_json,actor_user_id,occurred_at) VALUES(?,?,?,?,?,?,?)',updates)
   conn.execute('RELEASE processing_correction')
  except Exception:
