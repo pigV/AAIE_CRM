@@ -16,14 +16,23 @@ from tests.test_school_map_tiles import handler_methods
 class SchoolLibraryPermissionTests(unittest.TestCase):
     def test_school_only_opt_in_does_not_enable_student_access_or_nas_writes(self):
         with tempfile.TemporaryDirectory(dir=SOURCE/'STAGING_DATA/tmp') as folder:
-            root = Path(folder)
+            parent = Path(folder)
+            root = parent/'runtime'
+            root.mkdir()
+            schools = parent/'synthetic-schools'
+            schools.mkdir()
+            students = parent/'synthetic-students'
+            students.mkdir()
             (root/'school-library-readonly.json').write_text('{"enabled":true}')
-            c = Staging(root, 18880, 18881, 'aaie_staging_')
-            self.assertEqual(getattr(c, 'read_roots', c.nas_read_roots), (NAS_READ_ROOTS[1],))
-            self.assertEqual(c.nas_read_roots, ())
-            self.assertEqual(c.nas_write_roots, ())
-            with self.assertRaises(IsolationError):
-                c.check(NAS_READ_ROOTS[1]/'VIC/brochure.pdf')
+            with patch('staging_environment.NAS_READ_ROOTS', (students, schools)):
+                c = Staging(root, 18880, 18881, 'aaie_staging_')
+                self.assertEqual(c.read_roots, (schools,))
+                self.assertEqual(c.nas_read_roots, ())
+                self.assertEqual(c.nas_write_roots, ())
+                with self.assertRaises(IsolationError):
+                    c.check(schools/'VIC/brochure.pdf')
+                with self.assertRaises(IsolationError):
+                    c.nas_read_path(students/'student.pdf', students)
 
 
 class BrochureFailureTests(unittest.TestCase):

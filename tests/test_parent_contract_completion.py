@@ -23,6 +23,10 @@ class ParentCompletionFixture(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        from cryptography.fernet import Fernet
+        cipher = Fernet(Fernet.generate_key())
+        cipher_patch = patch.object(app, 'fernet', return_value=cipher)
+        cipher_patch.start(); self.addCleanup(cipher_patch.stop)
         self.db = Database(self.root / 'test.db')
         self.db.initialize()
         self.patch = patch.object(app, 'db', self.db)
@@ -48,6 +52,7 @@ class ParentCompletionFixture(unittest.TestCase):
         self.token = 'test-parent-completion'
         self.lid = self.db.execute("INSERT INTO contract_signing_links(contract_id,student_id,token_hash,token_last_4,signing_url,status,expires_at,created_at,bound_wechat_openid,bound_wechat_nickname,signed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (self.cid,'SIGNTEST',app.contract_signing_token_hash(self.token),'tion','http://localhost/contract-sign/test-parent-completion','signed',stamp,stamp,'test-openid','Test Parent',stamp))
         self.sid = self.db.execute("INSERT INTO contract_signatures(contract_id,student_id,link_id,signed_at,status,archive_status,signature_image_path,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (self.cid,'SIGNTEST',self.lid,stamp,'signed','archived',str(self.root/'parent.png'),stamp,stamp))
+        self.db.execute('UPDATE contract_signing_links SET signed_signature_id=? WHERE id=?',(self.sid,self.lid))
         self.h = object.__new__(app.CRMHandler)
         self.link = self.h.contract_signing_row_by_token(self.token)
         self.h.headers = {'Cookie': f'aaie_csl_{self.lid}='+self.h.contract_signing_cookie_value(self.link,'test-openid')}

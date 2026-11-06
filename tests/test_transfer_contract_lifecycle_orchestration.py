@@ -25,17 +25,12 @@ class TransferContractOrchestrationTests(unittest.TestCase):
         self.sandbox = tempfile.TemporaryDirectory()
         self.root = Path(self.sandbox.name)
         self.database_path = self.root / "orchestration.sqlite3"
-        fixture = transfer_fixture.TransferPhase2MigrationTests()
-        fixture.connect = transfer_fixture.TransferPhase2MigrationTests.connect
-        fixture._create_legacy_fixture(self.database_path)
-        transfer_fixture.apply_all_test_migrations_with_rebuild_backup(
-            self.database_path, self.root, label="transfer-contract-red"
-        )
+        transfer_fixture._service_fixture_template().copy_to(self.database_path)
         with closing(self.connect()) as connection:
             self._extend_fixture_columns(connection)
             connection.execute(
-                "INSERT INTO parent_form_tokens(token,student_id) "
-                "VALUES('external-transfer-parent','student-1')"
+                "INSERT INTO parent_form_tokens(token,student_id,intake_type) "
+                "VALUES('external-transfer-parent','student-1','new_student_transfer')"
             )
             record_application_lifecycle_event(
                 connection,

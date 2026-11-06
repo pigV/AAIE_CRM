@@ -176,7 +176,8 @@ class ContractWorkflowIntegrationTests(unittest.TestCase):
             @staticmethod
             def one(_sql, params=()):
                 self.assertEqual((91,), params)
-                return {"id": 91, "student_id": "S1", "contract_uid": "C-91"}
+                return {"id": 91, "student_id": "S1", "contract_uid": "C-91",
+                        "contract_type": "StudyAbroadContract", "application_cycle_id": 1}
 
         old_db = app_module.db
         try:

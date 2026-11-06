@@ -21,7 +21,12 @@ def main():
         c=control.load()
         if action in ("prepare","probe","start","restart","start-extraction"):
             control.prepare()
-            extraction.prepare(c)
+            if action == "probe":
+                # Kernel probes need policy, not OCR/model dependencies.
+                # Service starts still require the verified runtime below.
+                c.check(c.root/"extraction.sb").write_text(extraction.sandbox_profile(c))
+            else:
+                extraction.prepare(c)
         if action=="probe":
             results={}
             for name,module in (("admin_parent",control),("extraction",extraction)):
@@ -53,7 +58,7 @@ def main():
                 except Exception:
                     control.stop(c)
                     raise
-            print("Local test running: Admin 8780, Parent 8781, Content Extraction 8792")
+            print(f"Local test running: Admin {c.admin_port}, Parent {c.parent_port}, Content Extraction {extraction.PORT}")
         elif action=="stop":
             control.stop(c)
             extraction.stop(c)

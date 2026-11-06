@@ -355,6 +355,7 @@ class TransferContractRouteGateTests(TestCase):
                 namespace = {
                     "db": database,
                     "SAFE_PRODUCTION_ACTIVE": True,
+                    "synchronize_preview": __import__('document_preview_cache').synchronize_preview,
                     "effective_contract_document_for_output": effective,
                 }
                 method = direct_handler_method(method_name, namespace)

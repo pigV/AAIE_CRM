@@ -6,6 +6,18 @@ from staging_environment import Staging, SOURCE, IsolationError
 from tools import staging_control
 
 class LocalEnvironmentPorts(unittest.TestCase):
+    def setUp(self):
+        from unittest.mock import patch
+        import sys
+        from tests.isolation_test_support import prepare_isolation_source
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        source=prepare_isolation_source(Path(temporary.name)/"source")
+        for target,values in ((sys.modules[__name__],{'SOURCE':source}),
+                              (staging_control,{'ROOT':source,'DATA':source/'STAGING_DATA','CONFIG':source/'STAGING_DATA/staging.json'})):
+            patches=patch.multiple(target,**values);patches.start();self.addCleanup(patches.stop)
+        source_patch=patch('staging_environment.SOURCE',source)
+        source_patch.start();self.addCleanup(source_patch.stop)
+
     def test_production_pair_is_rejected_even_when_both_match_old_defaults(self):
         value=json.loads((SOURCE/'STAGING_DATA/staging.json').read_text())
         value.update(admin_port=8780,parent_port=8781)
@@ -36,7 +48,7 @@ for port in [8780,8781,8790,8792]:
   else:r[str(port)+action]=False
 print(json.dumps(r))
 """ % str(SOURCE)
-        result=subprocess.run(['/usr/bin/sandbox-exec','-f',str(profile),staging_control.PYTHON,'-B','-c',code],text=True,capture_output=True)
+        result=subprocess.run(['/usr/bin/sandbox-exec','-f',str(profile),staging_control.PYTHON,'-B','-c',code],cwd=SOURCE,env=staging_control.environment(c),text=True,capture_output=True)
         self.assertEqual(result.returncode,0,result.stderr)
         report=json.loads(result.stdout)
         for key,value in report.items():self.assertTrue(value,key)

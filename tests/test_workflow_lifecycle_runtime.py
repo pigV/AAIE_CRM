@@ -1035,6 +1035,9 @@ class CanonicalStudentWorkflowProjectionTests(unittest.TestCase):
         self.conn.execute(
             "CREATE TABLE system_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_by INTEGER,updated_at TEXT NOT NULL)"
         )
+        # This empty summary fixture serves the current workbench consumer,
+        # whose post-023 decision projection includes a nullable decision date.
+        self.conn.execute("ALTER TABLE visa_decision_events ADD COLUMN decision_date TEXT")
         activate_workflow_v2(self.conn, evidence=READY, actor="test")
         self.conn.row_factory = __import__("sqlite3").Row
 

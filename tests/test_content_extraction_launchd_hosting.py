@@ -211,10 +211,12 @@ class ContentExtractionLaunchdHostingTests(unittest.TestCase):
         original_path = list(os.sys.path)
         original_cwd = Path.cwd()
         observed = {}
+        fake_modules = {name: load_module(self.production / (name + '.py'), name + '_owned_fixture')
+                        for name in ('content_extraction_service_lifecycle', 'production_environment')}
         environment = dict(os.environ)
         environment.update({"CODEX_SESSION_ID": "remove", "PYTHONPATH": "/remove"})
         try:
-            with mock.patch.dict(entry.os.environ, environment, clear=True), mock.patch.object(
+            with mock.patch.dict(os.sys.modules, fake_modules), mock.patch.dict(entry.os.environ, environment, clear=True), mock.patch.object(
                 entry.os, "execve", side_effect=lambda executable, command, child: observed.update(
                     executable=executable, command=command, environment=child, cwd=str(Path.cwd())
                 )
@@ -223,8 +225,6 @@ class ContentExtractionLaunchdHostingTests(unittest.TestCase):
         finally:
             os.chdir(original_cwd)
             os.sys.path[:] = original_path
-            for name in ("content_extraction_service_lifecycle", "production_environment"):
-                os.sys.modules.pop(name, None)
         self.assertEqual(result, 78)
         self.assertEqual(observed["executable"], "/usr/bin/python3")
         self.assertEqual(observed["command"], ["/usr/bin/python3", "service.py"])

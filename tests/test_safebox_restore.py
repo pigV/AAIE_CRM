@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -235,6 +236,7 @@ class SafeboxRestoreTests(unittest.TestCase):
             copied_uploads = [path for path in backup_dir.rglob("student-upload.pdf")]
             self.assertEqual(copied_uploads, [])
 
+    @mock.patch.object(app_module.nas, "status", new=lambda: {"ready": True})
     def test_safebox_detail_shows_restore_v3_read_only_actions(self):
         old_db = app_module.db
         with tempfile.TemporaryDirectory() as folder:
@@ -308,6 +310,7 @@ class SafeboxRestoreTests(unittest.TestCase):
             finally:
                 app_module.db = old_db
 
+    @mock.patch.object(app_module.nas, "status", new=lambda: {"ready": True})
     def test_safebox_restore_routes_render_plan_and_check_pages(self):
         old_db = app_module.db
         with tempfile.TemporaryDirectory() as folder:

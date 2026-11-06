@@ -96,6 +96,9 @@ class RevenueCurrentProductionIntegrationTests(unittest.TestCase):
             @staticmethod
             def fetchone():
                 return {"id": 990090, "v2_version": None}
+            @staticmethod
+            def fetchall():
+                return []
 
         class Connection:
             @staticmethod
@@ -141,7 +144,7 @@ class RevenueCurrentProductionIntegrationTests(unittest.TestCase):
             def send_html(html, **_kwargs):
                 return html
 
-        overview = SimpleNamespace(cycle_id=990090, branches=())
+        overview = SimpleNamespace(cycle_id=990090, branches=(), is_legacy=True)
         with (
             mock.patch.object(app, "db", Database()),
             mock.patch.object(

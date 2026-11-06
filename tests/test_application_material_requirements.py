@@ -64,7 +64,10 @@ class ApplicationMaterialRequirementsIntegrationTests(unittest.TestCase):
                    student_id TEXT,
                    parent_form_token TEXT,
                    cycle_type TEXT,
-                   status TEXT
+                   status TEXT,
+                   outcome TEXT,
+                   source_student_case_id INTEGER,
+                   sequence_no INTEGER NOT NULL DEFAULT 1
                )"""
         )
         app_module.db = self.db
@@ -146,14 +149,14 @@ class ApplicationMaterialRequirementsIntegrationTests(unittest.TestCase):
     def test_application_checklist_marks_birth_optional_only_for_exempt_level(self):
         self.add_student("HIGHER001", "本科")
         exempt_html = self.application_html("HIGHER001")
-        birth_row = exempt_html.split("Birth Certificate", 1)[1].split("</div>", 1)[0]
+        birth_row = exempt_html.split("出生证明", 1)[1].split("</div>", 1)[0]
         self.assertNotIn("*", birth_row)
         self.assertIn("学生护照 *", exempt_html)
-        self.assertNotIn("缺少：Birth Certificate", exempt_html)
+        self.assertNotIn("缺少：出生证明", exempt_html)
 
         self.add_student("SCHOOL001", "Year 9")
         school_html = self.application_html("SCHOOL001")
-        birth_row = school_html.split("Birth Certificate", 1)[1].split("</div>", 1)[0]
+        birth_row = school_html.split("出生证明", 1)[1].split("</div>", 1)[0]
         self.assertIn("*", birth_row)
 
     def test_material_completion_allows_exempt_level_and_blocks_year_level(self):
@@ -179,7 +182,7 @@ class ApplicationMaterialRequirementsIntegrationTests(unittest.TestCase):
             self.db.one("SELECT materials_checked FROM workflow_status WHERE student_id='SCHOOL002'")["materials_checked"],
             0,
         )
-        self.assertIn("缺少：Birth Certificate", redirects[-1][1])
+        self.assertIn("缺少：出生证明", redirects[-1][1])
 
     def test_workflow_birth_alert_follows_application_level_policy(self):
         base = {

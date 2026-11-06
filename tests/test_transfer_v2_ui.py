@@ -135,8 +135,8 @@ class TransferV2UiTests(unittest.TestCase):
         self.assertIn('name="source_contract_id" value="101"', ready)
         self.assertNotIn('data-transfer-v2-create disabled', ready)
 
-    def test_staff_can_save_source_without_contract_and_sees_role_handoff(self):
-        """Source verification is a Staff action; contract generation is not."""
+    def test_source_panel_is_read_only_and_directs_staff_to_current_business_records(self):
+        """The retired source-write form must not reappear on the Transfer page."""
         html = render_transfer_v2_creation_form(
             student_id="S1", csrf="csrf-token",
             eligibility=TransferV2Eligibility(
@@ -158,15 +158,11 @@ class TransferV2UiTests(unittest.TestCase):
             },
             can_manage_contract=False,
         )
-        source_form = html.split('data-transfer-source-evidence', 1)[1].split(
-            '</form>', 1
-        )[0]
-        self.assertIn('name="source_contract_id" value=""', source_form)
-        self.assertIn('name="source_action" value="confirm_source"', source_form)
-        self.assertIn('type="submit">核验并保存来源依据', source_form)
-        self.assertNotIn('disabled', source_form)
-        self.assertIn('由 Admin/Manager 生成并完成转学合同', html)
-        self.assertNotIn('?tab=contracts#contracts-section', html)
+        source_panel = html.split('data-transfer-source-evidence', 1)[1].split('</section>', 1)[0]
+        self.assertNotIn('<form', source_panel)
+        self.assertNotIn('name="source_action"', source_panel)
+        self.assertNotIn('type="submit"', source_panel)
+        self.assertIn('正常业务资料', source_panel)
 
     def test_transfer_page_uses_exact_transfer_role_gate_for_contract_management_link(self):
         source = (Path(__file__).resolve().parents[1] / "app.py").read_text(
@@ -533,9 +529,9 @@ class TransferV2UiTests(unittest.TestCase):
         self.assertNotIn("Transfer V2", text)
         self.assertNotIn("Cycle", text)
         self.assertNotIn('name="source_label"', html)
-        self.assertIn("来源待核验", text)
-        self.assertIn('name="source_parent_form_token"', html)
-        self.assertIn('name="source_existing_evidence"', html)
+        self.assertIn("来源待确认", text)
+        self.assertNotIn('name="source_parent_form_token"', html)
+        self.assertNotIn('name="source_existing_evidence"', html)
 
 
 if __name__ == "__main__":

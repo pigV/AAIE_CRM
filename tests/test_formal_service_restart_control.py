@@ -12,14 +12,18 @@ import formal_service_restart_control as control
 
 
 class ClassTwoDisabledStartupScriptTests(unittest.TestCase):
-    def test_start_script_launches_admin_on_lan_and_parent_on_loopback_without_watchdog(self):
+    def test_start_script_uses_explicit_managed_stack_without_legacy_watchdog(self):
         source = Path("start.command").read_text(encoding="utf-8")
-        self.assertIn('AAIE_CRM_DISABLE_WATCHDOG', source)
-        self.assertIn('ADMIN_HOST="${AAIE_CRM_ADMIN_HOST:-0.0.0.0}"', source)
-        self.assertIn('app.py --host "$ADMIN_HOST" --port "$ADMIN_PORT" --service admin', source)
-        self.assertIn('app.py --host 127.0.0.1 --port "$PARENT_PORT" --service parent', source)
-        self.assertIn('echo $! > logs/admin.pid', source)
-        self.assertIn('echo $! > logs/parent.pid', source)
+        self.assertIn("tools/runtime_stack.py start --allow-production-control",source)
+        self.assertNotIn("watchdog.py",source)
+        from types import SimpleNamespace
+        from tools.runtime_control import process_command
+        config=SimpleNamespace(source_root=Path("/synthetic/code"),path=Path("/synthetic/runtime/config/runtime.json"))
+        for role in ("admin","parent"):
+            command=process_command(config,role)
+            self.assertIn("/synthetic/code/tools/runtime_server.py",command)
+            self.assertEqual(command[-4:],["--config",str(config.path),"--service",role])
+
 import watchdog
 
 

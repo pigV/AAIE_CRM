@@ -73,7 +73,7 @@ class ControllerTests(unittest.TestCase):
         factory=Mock()
         def hooked(handler,method,shell):
             return handle_agent_reach(handler,method,shell,factory)
-        env={'urlparse':urlparse,'parse_qs':parse_qs,'re':re,'GOOGLE_DRIVE_OAUTH_CALLBACK_PATH':'/unused','handle_agent_reach':hooked}
+        env={'urlparse':urlparse,'parse_qs':parse_qs,'re':re,'GOOGLE_DRIVE_OAUTH_CALLBACK_PATH':'/unused','WECHAT_RECOVERY_VERIFY_FILENAME':'synthetic-verification.txt','handle_agent_reach':hooked}
         exec(compile(ast.Module(body=[dispatch],type_ignores=[]),'isolated-real-dispatch','exec'),env)
         for user,status in [(None,401),(STAFF,403)]:
             for method,path in [('GET','/agent-reach')]+list(ROUTES):

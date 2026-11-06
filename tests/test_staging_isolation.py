@@ -7,13 +7,18 @@ from staging_environment import Staging, SOURCE, PRODUCTION_DB, PROTECTED_STORAG
 
 class StagingContract(unittest.TestCase):
     def setUp(self):
-        self.c=Staging.load(SOURCE/'STAGING_DATA/staging.json')
+        from tests.isolation_test_support import prepare_isolation_source
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.source=prepare_isolation_source(Path(self.temp.name)/"source")
+        source_patch=patch('staging_environment.SOURCE',self.source)
+        source_patch.start();self.addCleanup(source_patch.stop)
+        self.c=Staging.load(self.source/'STAGING_DATA/staging.json')
     @patch.object(Staging, 'nas_write_roots', new=property(lambda self: ()))
     def test_db_storage_and_descendant_collisions_without_write_authorization(self):
         for path in [PRODUCTION_DB,*PROTECTED_STORAGE,PROTECTED_STORAGE[0]/'fixture',PROTECTED_STORAGE[1]/'fixture']:
             with self.subTest(path=path),self.assertRaises(IsolationError): self.c.check(path)
     def test_outside_paths_and_traversal_rejected(self):
-        for path in [SOURCE/'app.py',self.c.root/'../app.py',Path('relative.db')]:
+        for path in [self.source/'app.py',self.c.root/'../app.py',Path('relative.db')]:
             with self.subTest(path=path),self.assertRaises(IsolationError): self.c.check(path)
     def test_local_operation_targets_accepted(self):
         for path in [self.c.db,self.c.storage/'upload.txt',self.c.root/'backups/reset']:
@@ -36,8 +41,8 @@ class StagingContract(unittest.TestCase):
             with self.assertRaises(IsolationError):health(self.c,'admin')
 
     def test_port_collision_and_cookie_namespace(self):
-        for patch in [{'admin_port':8792},{'admin_port':8781,'parent_port':8780},{'parent_port':self.c.admin_port},{'namespace':'aaie_session'},{'mode':'test'}]:
-            d=json.loads((SOURCE/'STAGING_DATA/staging.json').read_text());d.update(patch)
+        for patch in [{'admin_port':18892},{'parent_port':18892},{'admin_port':8792},{'admin_port':8781,'parent_port':8780},{'parent_port':self.c.admin_port},{'namespace':'aaie_session'},{'mode':'test'}]:
+            d=json.loads((self.source/'STAGING_DATA/staging.json').read_text());d.update(patch)
             with tempfile.NamedTemporaryFile(mode='w',dir=self.c.root,suffix='.json') as f:
                 json.dump(d,f);f.flush()
                 with self.assertRaises(IsolationError):Staging.load(f.name)

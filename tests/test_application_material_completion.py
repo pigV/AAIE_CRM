@@ -415,9 +415,9 @@ class ApplicationMaterialCompletionIntegrationTests(unittest.TestCase):
         )[1].split("</button>", 1)[0]
         self.assertEqual("等待 Parent Form 提交", workflow_module["status"])
         self.assertIn("disabled", review_button)
-        self.assertIn("家长在线 Parent Form 尚未提交。", checklist)
+        self.assertIn("家长在线表单尚未提交。", checklist)
         self.assertEqual(0, stored["materials_checked"])
-        self.assertEqual("家长在线 Parent Form 尚未提交。", redirects[-1][1])
+        self.assertEqual("家长在线表单尚未提交。", redirects[-1][1])
         self.assertEqual("error", redirects[-1][2])
 
     def test_legacy_review_flag_without_current_parent_submission_is_not_completed(self):

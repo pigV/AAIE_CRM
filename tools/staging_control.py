@@ -16,7 +16,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from staging_environment import Staging, IsolationError, canonical, PRODUCTION_DEPLOYMENT, SCHOOL_REPORT_PDFUNITE
+from staging_environment import Staging, IsolationError, canonical, PRODUCTION_DEPLOYMENT, SCHOOL_REPORT_PDFUNITE, TEST_CONTENT_EXTRACTION_PORT
 from tools import school_map_tile_control
 DATA = ROOT / 'STAGING_DATA'
 CONFIG = DATA / 'staging.json'
@@ -39,6 +39,7 @@ def sandbox_profile(c):
         f'(allow network-bind network-inbound (local ip "localhost:{c.admin_port}") (local ip "localhost:{c.parent_port}"))',
         *([f'(allow network-bind network-inbound (local ip "*:{c.admin_port}"))'] if c.admin_lan_ip else []),
         f'(allow network-outbound (remote ip "localhost:{c.admin_port}") (remote ip "localhost:{c.parent_port}"))',
+        f'(allow network-outbound (remote ip "localhost:{TEST_CONTENT_EXTRACTION_PORT}"))',
         f'(allow network-outbound (remote ip "localhost:{school_map_tile_control.port(c)}"))',
         '(deny file-read* (subpath "/Volumes"))',
         # Candidate code may live on the external workspace volume. Read only this
@@ -68,7 +69,7 @@ def environment(c):
             # Production launchers never consume this environment.
             'AAIE_STAGING_BIND_HOST': c.bind_host('admin'),
             'AAIE_CRM_DB_PERF_LOG':'0',
-            'AAIE_CRM_CONTENT_EXTRACTION_SERVICE_URL':'http://127.0.0.1:18892',
+            'AAIE_CRM_CONTENT_EXTRACTION_SERVICE_URL':f'http://127.0.0.1:{TEST_CONTENT_EXTRACTION_PORT}',
             'AAIE_CRM_BACKUP_DIR':str(c.root/'backups'),
             'AAIE_CRM_SCHOOL_LIBRARY_DIR':str(c.school_library_read_roots[0] if c.school_library_read_roots else c.root/'school_library_files'),
             'AAIE_CRM_SECURE_ASSET_DIR':str(c.root/'secure_assets'),

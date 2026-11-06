@@ -226,12 +226,16 @@ class RequestScopedDatabaseTests(unittest.TestCase):
         import app
 
         class GetHandler:
+            path = "/students"
+            headers = {}
             def dispatch(inner_self, method):
                 self.assertEqual(method, "GET")
                 self.db.one("SELECT 1")
                 self.db.all("SELECT 1")
 
         class PostHandler:
+            path = "/students"
+            headers = {}
             def dispatch(inner_self, method):
                 self.assertEqual(method, "POST")
                 self.db.one("SELECT 1")

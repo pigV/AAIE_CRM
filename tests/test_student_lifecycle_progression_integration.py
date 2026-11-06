@@ -23,6 +23,13 @@ class StudentLifecycleProgressionIntegrationTests(
 ):
     """Progression integration contract built from the clean Phase 3 API."""
 
+    def setUp(self):
+        super().setUp()
+        # Positive component fixtures reference the same institution as Offer1000.
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute("UPDATE offers SET school_id=20,school_name='Target University' WHERE id=1000")
+            connection.commit()
+
     @staticmethod
     def flags():
         return StudentCaseFeatureFlags(

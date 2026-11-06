@@ -10818,6 +10818,7 @@ tr.row-save-error {
   font: inherit;
 }
 
+/* End CRM scoped component styles v1 */
 .crm-restore-layout {
   display: grid;
   grid-template-columns: minmax(320px, 1.35fr) minmax(280px, .85fr);
@@ -11794,7 +11795,7 @@ body.backup-running .backup-control-card.is-backup-running .backup-control-panel
     justify-self: start;
   }
 }
-/* End CRM scoped component styles v1 */
+
 
 /* Shared sidebar transition stability v1 */
 :root {

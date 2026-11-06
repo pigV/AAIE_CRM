@@ -11,7 +11,12 @@ from tools.wechat_contract_demo_control import profile
 
 class NativeDemoIsolationTests(unittest.TestCase):
     def test_only_this_run_is_writable_and_other_business_data_is_unreadable(self):
-        c = staging_control.load()
+        # This policy probe needs no deployed staging config or live data.
+        from staging_environment import Staging
+        staging_control.DATA.mkdir(parents=True, exist_ok=True)
+        fixture = tempfile.TemporaryDirectory(prefix='owned-policy-', dir=staging_control.DATA)
+        self.addCleanup(fixture.cleanup)
+        c = Staging(Path(fixture.name), 18880, 18881, 'aaie_staging_')
         base = c.root / 'wechat-contract-demo'
         base.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='sandbox-test-', dir=base) as folder:
@@ -24,7 +29,8 @@ class NativeDemoIsolationTests(unittest.TestCase):
                 'old_reproduction': c.root / 'transaction-conflict-20261030/reproduction.db',
                 'sibling_demo': base / 'another-run/demo.db',
                 'nas': Path('/Volumes/Server/Students/CRM_TEST'),
-                'production': Path('/Volumes/Zhang/AAIE CodeX/CRM/database/aaie_crm.db'),
+                'legacy_production': Path('/Volumes/Zhang/AAIE CodeX/CRM/database/aaie_crm.db'),
+                'production': Path('/Volumes/Data/AAIE_CRM/runtime/production/database/aaie_crm.db'),
             }
             code = '''import ctypes,json,os
 from pathlib import Path

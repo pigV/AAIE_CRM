@@ -2,10 +2,10 @@ import hashlib,os,stat,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 from revenue.secure_storage import read_reference,write_immutable,StorageUnavailable
+from revenue_secure_test_support import secure_directory
 class ReaderCompatibilityTests(unittest.TestCase):
  def setUp(self):
-  self.temp=tempfile.TemporaryDirectory(dir='/Users/faqiang/CRM-Revenue-Secure-Test',prefix='reader-');self.addCleanup(self.temp.cleanup)
-  self.base=Path(self.temp.name);self.legacy=self.base/'legacy';self.secure=self.base/'secure'
+  self.base=secure_directory(self);self.legacy=self.base/'legacy';self.secure=self.base/'secure'
   self.legacy.mkdir(mode=0o700);self.secure.mkdir(mode=0o700);self.data=b'synthetic reader evidence';self.sha=hashlib.sha256(self.data).hexdigest()
  def put(self,root,name='a.pdf'):
   return write_immutable(root,name,self.data)[0]

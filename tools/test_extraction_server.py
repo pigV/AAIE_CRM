@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from staging_environment import ACTIVE as c
+from staging_environment import ACTIVE as c, TEST_CONTENT_EXTRACTION_PORT
 if c is None: raise RuntimeError("Native Staging required")
 c.assert_sandbox()
 parser=argparse.ArgumentParser()
@@ -23,7 +23,7 @@ repository.initialize()
 repository.recover_interrupted_runs()
 token=build_service_token(c.root)
 workflow=build_local_workflow(repository,c.root,environ=os.environ)
-server=build_server("127.0.0.1",8792,token,repository,c.root,local_workflow=workflow,
+server=build_server("127.0.0.1",TEST_CONTENT_EXTRACTION_PORT,token,repository,c.root,local_workflow=workflow,
                     source_mode="test",runtime_version="test-5985902-"+args.instance)
 try: server.serve_forever()
 finally: server.server_close()

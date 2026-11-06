@@ -131,3 +131,17 @@ class AuthPreservationTests(unittest.TestCase):
   self.assertEqual(prepare_auth_preserving_restore(self.b,self.c,self.dest)['status'],'PASS')
   self.mutate("UPDATE sqlite_sequence SET seq=99 WHERE name='audit_logs'")
   with self.assertRaises(ValueError):validate_auth_delta(self.b,self.c)
+
+ def test_old_workspace_traversal_and_live_destinations_reject_before_input_io(self):
+  from unittest.mock import patch
+  from tools import production_auth_preservation as m
+  paths=[Path('/Volumes/Zhang/AAIE CodeX/CRM/fresh-auth-output.db'),
+         Path('/Volumes/Data/AAIE_CRM/worktrees/../../escape.db'),
+         Path('/Volumes/Data/AAIE_CRM/main/fresh-auth-output.db'),
+         Path('/Volumes/Data/AAIE_CRM/MAIN/fresh-auth-output.db'),
+         Path('/Volumes/Data/AAIE_CRM/runtime/Production/fresh-auth-output.db'),
+         Path('/Volumes/Data/AAIE_CRM/runtime/production/fresh-auth-output.db')]
+  with patch.object(m,'_path',side_effect=lambda p:Path(p).absolute()), patch.object(m,'_read',side_effect=AssertionError('input IO reached')):
+   for path in paths:
+    with self.subTest(path=str(path)),self.assertRaises(ValueError):
+     m.prepare_auth_preserving_restore(self.b,self.c,path)

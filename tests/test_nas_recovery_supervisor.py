@@ -408,7 +408,7 @@ class LiveProbeBoundaryTests(unittest.TestCase):
         )
         with mock.patch(
             "nas_recovery_supervisor.subprocess.run", return_value=completed
-        ):
+        ), mock.patch("nas_recovery_supervisor.Path.is_dir", return_value=False):
             state = LiveSystem._mount_state()
 
         self.assertFalse(state.canonical_mounted)

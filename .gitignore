@@ -122,3 +122,6 @@ TEST_LOGIN.txt
 *.zip
 *.tar
 *.gz
+
+# Private approved business-decision reference; recovered locally only.
+/config/workflow/frozen-human-decisions-v1.json

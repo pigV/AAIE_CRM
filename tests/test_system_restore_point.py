@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -148,6 +149,7 @@ class SystemRestorePointTests(unittest.TestCase):
             self.assertIn("templates/contracts/contract.html", paths)
             self.assertTrue((Path(point["restore_point_dir"]) / "code_snapshot" / "app.py").is_file())
 
+    @mock.patch.object(app_module.nas, "status", new=lambda: {"ready": True})
     def test_restore_points_list_page(self):
         old_db = app_module.db
         old_app_dir = app_module.APP_DIR
@@ -174,6 +176,7 @@ class SystemRestorePointTests(unittest.TestCase):
                 app_module.db = old_db
                 app_module.APP_DIR = old_app_dir
 
+    @mock.patch.object(app_module.nas, "status", new=lambda: {"ready": True})
     def test_restore_point_detail_page(self):
         old_db = app_module.db
         old_app_dir = app_module.APP_DIR
@@ -201,6 +204,7 @@ class SystemRestorePointTests(unittest.TestCase):
                 app_module.db = old_db
                 app_module.APP_DIR = old_app_dir
 
+    @mock.patch.object(app_module.nas, "status", new=lambda: {"ready": True})
     def test_locked_restore_page_shows_default_lock_and_disabled_actual_restore(self):
         old_db = app_module.db
         old_app_dir = app_module.APP_DIR

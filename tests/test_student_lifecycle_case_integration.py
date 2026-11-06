@@ -21,14 +21,9 @@ class StudentLifecycleCaseIntegrationTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.database_path = self.root / "case-integration.db"
-        helper = transfer_tests.TransferPhase2MigrationTests()
-        helper.connect = transfer_tests.TransferPhase2MigrationTests.connect
-        transfer_tests.TransferPhase2MigrationTests._create_legacy_fixture(
-            helper, self.database_path
-        )
-        transfer_tests.apply_all_test_migrations_with_rebuild_backup(
-            self.database_path, self.root, label="lifecycle-case-integration"
-        )
+        # Service/route cases each own a fresh copy of the real migrated seed.
+        # Migration-specific acceptance tests continue to execute every migration.
+        transfer_tests._service_fixture_template().copy_to(self.database_path)
         self.service = TransferCaseService(self.database_path)
         self.progression_service = ProgressionCaseService(self.database_path)
         self.lifecycle = lifecycle_service(self.database_path)

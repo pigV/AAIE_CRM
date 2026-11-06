@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -232,6 +233,7 @@ class SafeboxAutoLoggerTests(unittest.TestCase):
         parsed = safebox_finish.parse_status_paths("M app.py\n M database.py\n?? tools/safebox_start.py")
         self.assertEqual(parsed, ["app.py", "database.py", "tools/safebox_start.py"])
 
+    @mock.patch.object(app_module.nas, "status", new=lambda: {"ready": True})
     def test_safebox_centre_displays_auto_record_fields_and_keeps_regression_guards(self):
         old_db = app_module.db
         with tempfile.TemporaryDirectory() as folder:
@@ -307,7 +309,7 @@ class SafeboxAutoLoggerTests(unittest.TestCase):
                 handler.safebox_detail("GET", str(record_id))
                 self.assertIn('<option value="未提交" selected>未提交</option>', captured["html"])
                 self.assertIn("合同管理", Path("ui.py").read_text(encoding="utf-8"))
-                self.assertIn("Visa Management", Path("ui.py").read_text(encoding="utf-8"))
+                self.assertIn("Visa 管理", Path("ui.py").read_text(encoding="utf-8"))
                 self.assertIn("Offer", Path("database.py").read_text(encoding="utf-8"))
                 self.assertIn("学校方案报告", Path("ui.py").read_text(encoding="utf-8"))
                 self.assertIn("assistant-widget-isolated", Path("app.py").read_text(encoding="utf-8"))

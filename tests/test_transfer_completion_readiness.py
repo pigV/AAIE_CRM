@@ -21,14 +21,7 @@ class TransferCompletionReadinessTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.database_path = self.root / "fixture.db"
-        transfer_fixture.TransferPhase2MigrationTests._create_legacy_fixture(
-            self, self.database_path
-        )
-        transfer_fixture.apply_all_test_migrations_with_rebuild_backup(
-            self.database_path,
-            self.root,
-            label="transfer-completion-readiness",
-        )
+        transfer_fixture._service_fixture_template().copy_to(self.database_path)
         self.service = transfer_case_service.TransferCaseService(
             self.database_path,
             timeout=2.0,

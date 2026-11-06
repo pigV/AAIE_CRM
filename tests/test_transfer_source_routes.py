@@ -112,98 +112,46 @@ class CRMHandler(Left, Right): pass
 
 
 class SourceConfirmationRouteTests(TestCase):
+    """Source confirmation now belongs to the ordinary contract workflow."""
     def setUp(self):
-        self.conn = object()
-        @contextmanager
-        def transaction():
-            yield self.conn
-        self.authority = SimpleNamespace(save_authority=mock.Mock())
-        namespace = dict(db=SimpleNamespace(transaction=transaction),
-                         transfer_source_authority=self.authority,
-                         form_text_value=lambda form, key: form.get(key, ''),
-                         now_iso=lambda: '2026-09-07T00:00:00', quote=lambda s: s)
-        self.method = handler_method('student_transfer_source_confirm_post', namespace)
-        self.handler = SimpleNamespace(form={'source_contract_id':'101'}, user={'id':1},
-            transfer_case_optional_id=lambda value: int(value) if value else None,
-            flash_redirect=lambda url,message:(url,message))
+        from http import HTTPStatus
+        class BusinessError(ValueError): pass
+        namespace = dict(HTTPStatus=HTTPStatus, TransferV2Error=BusinessError,
+            form_text_value=lambda form,key:form.get(key,''),
+            student_capabilities=SimpleNamespace(can_create_transfer_case=lambda *a,**k:True))
+        self.method=handler_method('student_transfer_case_create',namespace)
+        self.handler=SimpleNamespace(form={}, user={'id':1}, require=lambda *a:True,
+            transfer_case_flags=lambda:object(), student_capability_subject=lambda *_:{'student_id':'S1'},
+            transfer_v2_schema_ready=lambda:True, error_page=lambda message,status:(message,int(status)),
+            student_transfer_v2_create_post=mock.Mock(return_value='created'))
 
-    def test_exact_parent_reference_saved_without_case_creation(self):
-        self.handler.form['source_parent_form_token']='submitted-intake'
-        result = self.method(self.handler,'S1')
-        self.assertEqual('/students/S1/transfer-cases?source_contract_id=101#transfer-case-create', result[0])
-        self.authority.save_authority.assert_called_once_with(self.conn, student_id='S1',
-            transfer_contract_id=101,parent_form_token='submitted-intake',actor_user_id=1,
-            occurred_at='2026-09-07T00:00:00')
+    def rejected(self,form):
+        self.handler.form=form
+        result=self.method(self.handler,'POST','S1')
+        self.assertEqual(result[1],400)
+        self.handler.student_transfer_v2_create_post.assert_not_called()
 
-    def test_existing_selection_is_typed_evidence_not_source_label(self):
-        self.handler.form['source_existing_evidence']='80:50:99:0:0'
-        self.method(self.handler,'S1')
-        args=self.authority.save_authority.call_args.kwargs
-        self.assertEqual(80,args['current_enrolment_id'])
-        self.assertEqual(50,args['ordinary_relationship_cycle_id'])
-        self.assertEqual(99,args['ordinary_relationship_contract_id'])
-        self.assertIsNone(args['private_school_application_id'])
-        self.assertNotIn('source_label',args)
+    def test_retired_source_action_is_rejected_before_case_creation(self):
+        self.rejected({'source_action':'confirm_source','source_contract_id':'101'})
 
-    def test_staff_source_save_creates_safe_draft_and_stays_on_transfer_page(self):
-        """Decision B: Staff verifies source; Admin/Manager performs generation."""
-        self.handler.form.pop('source_contract_id')
-        self.handler.form['source_existing_evidence'] = '80:50:99:0:0'
-        self.authority.reserve_unbound_transfer_application_draft = mock.Mock(
-            return_value=101
-        )
+    def test_parent_reference_cannot_bypass_the_contract_workflow(self):
+        for value in ('submitted-intake',''):
+            with self.subTest(value=value):self.rejected({'source_parent_form_token':value})
 
-        result = self.method(self.handler, 'S1')
+    def test_existing_reference_cannot_bypass_the_contract_workflow(self):
+        for value in ('80:50:99:0:0','malformed',''):
+            with self.subTest(value=value):self.rejected({'source_existing_evidence':value})
 
-        self.authority.reserve_unbound_transfer_application_draft.assert_called_once_with(
-            self.conn,
-            student_id='S1',
-            actor_user_id=1,
-            occurred_at='2026-09-07T00:00:00',
-            minimal_only=True,
-            require_non_signable=True,
-            without_fee=True,
-            without_file=True,
-            without_snapshot=True,
-            without_signing_link=True,
-        )
-        self.assertEqual(101, self.authority.save_authority.call_args.kwargs['transfer_contract_id'])
-        self.assertEqual(
-            '/students/S1/transfer-cases?source_contract_id=101#transfer-case-create',
-            result[0],
-        )
-        self.assertIn('Admin/Manager', result[1])
+    def test_normal_transfer_submission_reaches_current_case_creation(self):
+        self.handler.form={'source_contract_id':'101','target_school_id':['20']}
+        self.assertEqual(self.method(self.handler,'POST','S1'),'created')
+        self.handler.student_transfer_v2_create_post.assert_called_once_with('S1')
 
-    def test_repeated_staff_source_save_reuses_the_same_draft_identity(self):
-        self.handler.form.pop('source_contract_id')
-        self.handler.form['source_existing_evidence'] = '80:50:99:0:0'
-        self.authority.reserve_unbound_transfer_application_draft = mock.Mock(
-            return_value=101
-        )
-
-        first = self.method(self.handler, 'S1')
-        second = self.method(self.handler, 'S1')
-
-        self.assertEqual(first[0], second[0])
-        self.assertEqual(2, self.authority.reserve_unbound_transfer_application_draft.call_count)
-        for call in self.authority.reserve_unbound_transfer_application_draft.call_args_list:
-            self.assertEqual('S1', call.kwargs['student_id'])
-            self.assertTrue(call.kwargs['minimal_only'])
-            self.assertTrue(call.kwargs['require_non_signable'])
-            self.assertTrue(call.kwargs['without_signing_link'])
-        self.assertEqual(
-            [101, 101],
-            [call.kwargs['transfer_contract_id'] for call in self.authority.save_authority.call_args_list],
-        )
-
-    def test_missing_conflicting_or_malformed_selection_never_writes(self):
-        for patch in ({}, {'source_parent_form_token':'t','source_existing_evidence':'80:50:99:0:0'},
-                      {'source_existing_evidence':'aaie_existing'}, {'source_existing_evidence':'80:50:99:0'},
-                      {'source_existing_evidence':'80:50:99:-1:0'}):
-            with self.subTest(patch=patch):
-                self.handler.form={'source_contract_id':'101',**patch}
-                with self.assertRaises(ValueError): self.method(self.handler,'S1')
-        self.authority.save_authority.assert_not_called()
+    def test_read_only_source_panel_has_no_retired_write_form(self):
+        from transfer_v2_views import render_transfer_source_evidence
+        html=render_transfer_source_evidence(csrf='synthetic',contract_id=101,options={},authority=None,source_text='<untrusted>')
+        self.assertNotIn('<form',html);self.assertNotIn('name="source_action"',html)
+        self.assertIn('正常业务资料',html);self.assertIn('&lt;untrusted&gt;',html)
 
 
 class TransferPaymentEntryTests(TestCase):

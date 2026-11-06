@@ -16,6 +16,7 @@ class RelocationTests(unittest.TestCase):
         self.secure = self.root/'secure'
         self.legacy.mkdir(mode=0o700); self.secure.mkdir(mode=0o700)
         self.dbpath = ROOT/'SAFEBOX/storage-relocation-20260908'/('test-'+self.root.name+'.sqlite3')
+        self.dbpath.parent.mkdir(parents=True,exist_ok=True)
         self.c = sqlite3.connect(self.dbpath)
         self.c.row_factory = sqlite3.Row
         self.addCleanup(self.c.close)

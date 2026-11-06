@@ -39,7 +39,7 @@ class ReadonlyStartupTests(unittest.TestCase):
             def start(this):
                 try:this.target()
                 except StopLoop:pass
-        self.ns=dict(argparse=argparse,os=os,re=re,APP_DIR=ROOT,APP_WRITE_GATE=self.gate,db=DB(),startup_readonly=startup_readonly,
+        self.ns=dict(argparse=argparse,os=os,re=re,STAGING=None,SOURCE_DIR=ROOT,APP_DIR=ROOT,APP_WRITE_GATE=self.gate,db=DB(),startup_readonly=startup_readonly,
             SAFE_PRODUCTION_ACTIVE=False,ensure_dirs=forbidden,ensure_template_management_seed=forbidden,safe_production_database_preflight=forbidden,
             append_service_log=lambda *a,**kw:None,VERSION='synthetic',ReusableThreadingHTTPServer=Server,CRMHandler=object,
             wechat_oauth_startup_messages=lambda:[],crm_admin_lan_url=lambda:'synthetic',threading=SimpleNamespace(Thread=Thread),

@@ -16,10 +16,13 @@ import sqlite3
 from typing import Callable, Mapping, Sequence
 
 
-PRODUCTION_ROOT = Path("/Volumes/Zhang/AAIE CodeX/CRM").resolve()
+PRODUCTION_ROOT = Path("/Volumes/Zhang/AAIE CodeX/CRM")
 PRODUCTION_DB = PRODUCTION_ROOT / "database/aaie_crm.db"
-NAS_ROOT = Path("/Volumes/Server").resolve()
-FROZEN_PORTS = {8780, 8781, 8880, 8881}
+NAS_ROOT = Path("/Volumes/Server")
+PROTECTED_ROOTS = (PRODUCTION_ROOT, NAS_ROOT,
+                   Path("/Volumes/Data/AAIE_CRM/main"),
+                   Path("/Volumes/Data/AAIE_CRM/runtime/production"))
+FROZEN_PORTS = {8780, 8781, 8790, 8792, 8793, 8880, 8881}
 STUDENTS = ("99197001", "99197002")
 STAMP = "2026-09-17T10:00:00+10:00"
 
@@ -28,14 +31,28 @@ class IsolationViolation(RuntimeError):
     pass
 
 
+def _reject_protected_path(path: Path) -> None:
+    if path.anchor != "/" or ".." in path.parts:
+        raise IsolationViolation("absolute paths without traversal are required")
+    parts = tuple(part.casefold() for part in path.parts)
+    for protected in PROTECTED_ROOTS:
+        forbidden = tuple(part.casefold() for part in protected.parts)
+        if parts[:len(forbidden)] == forbidden or forbidden[:len(parts)] == parts:
+            raise IsolationViolation("Production, live Staging, or NAS path rejected")
+
+
 def _resolved_without_symlink(path: Path) -> Path:
     path = Path(path)
-    if not path.is_absolute():
-        raise IsolationViolation("absolute isolated paths are required")
-    for candidate in (path, *path.parents):
-        if candidate.is_symlink():
-            raise IsolationViolation(f"symlink path rejected: {path}")
-    return path.resolve()
+    _reject_protected_path(path)
+    try:
+        for candidate in (path, *path.parents):
+            if candidate.is_symlink():
+                raise IsolationViolation(f"symlink path rejected: {path}")
+        resolved = path.resolve()
+    except OSError as exc:
+        raise IsolationViolation("isolated path cannot be inspected") from exc
+    _reject_protected_path(resolved)
+    return resolved
 
 
 def _contains(parent: Path, child: Path) -> bool:
@@ -48,6 +65,9 @@ def validate_isolated_runtime(
     storage_root: Path,
     ports: Sequence[int],
 ) -> tuple[Path, Path, Path]:
+    # Reject lexical production aliases before touching any filesystem path.
+    for candidate in (runtime_root, database_path, storage_root):
+        _reject_protected_path(Path(candidate))
     runtime = _resolved_without_symlink(runtime_root)
     database = _resolved_without_symlink(database_path)
     storage = _resolved_without_symlink(storage_root)
@@ -59,13 +79,6 @@ def validate_isolated_runtime(
         raise IsolationViolation("invalid isolated port")
     if not _contains(runtime, database) or not _contains(runtime, storage):
         raise IsolationViolation("database and storage must stay inside runtime root")
-    for protected in (PRODUCTION_DB, PRODUCTION_ROOT / "STAGING_DATA", NAS_ROOT):
-        protected = protected.resolve()
-        if any(
-            _contains(protected, candidate) or _contains(candidate, protected)
-            for candidate in (runtime, database, storage)
-        ):
-            raise IsolationViolation("Production, live Staging, or NAS path rejected")
     if database.exists() and (not database.is_file() or database.stat().st_nlink != 1):
         raise IsolationViolation("database must be a single-link regular file")
     if storage.exists() and not storage.is_dir():

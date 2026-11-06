@@ -820,7 +820,12 @@ class RolePermissionInitializationTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def enable_approved_read_feature(self):
+        with self.connect() as connection:
+            connection.execute("INSERT OR REPLACE INTO system_settings(key,value,updated_at) VALUES('STUDENT_CASES_READ_ENABLED','true','2026-11-05')")
+
     def test_admin_view_is_preserved_but_never_auto_added(self):
+        self.enable_approved_read_feature()
         self.assertEqual(self.parsed_role_permissions("Admin"), ["*"])
         self.database.initialize()
         self.assertEqual(self.parsed_role_permissions("Admin"), ["*"])
@@ -842,6 +847,7 @@ class RolePermissionInitializationTests(unittest.TestCase):
         )
 
     def test_repeated_initialization_performs_no_role_update(self):
+        self.enable_approved_read_feature()
         self.set_role_permissions(
             "Admin",
             '["*", "student_cases.view"]',
@@ -863,7 +869,7 @@ class RolePermissionInitializationTests(unittest.TestCase):
             ["*", "student_cases.view"],
         )
 
-    def test_other_roles_keep_valid_extras_and_receive_only_missing_base(self):
+    def test_other_roles_keep_extras_and_do_not_regrant_revoked_base(self):
         initial = self.role_snapshot()
         self.database.initialize()
         self.assertEqual(self.role_snapshot(), initial)
@@ -873,7 +879,7 @@ class RolePermissionInitializationTests(unittest.TestCase):
             json.dumps(["custom.approved", "students.view"]),
         )
         self.database.initialize()
-        expected = ["custom.approved", *ROLE_PERMISSIONS["Manager"]]
+        expected = ["custom.approved", "students.view"]
         self.assertEqual(self.parsed_role_permissions("Manager"), expected)
         for role_name in (
             "Consultant",
@@ -943,7 +949,7 @@ class RolePermissionInitializationTests(unittest.TestCase):
                     json.dumps(ROLE_PERMISSIONS["View Only"]),
                 )
 
-    def test_duplicate_permissions_are_deduplicated_without_extra_grants(self):
+    def test_stored_permissions_preserved_and_pure_reconciliation_deduplicates(self):
         self.set_role_permissions(
             "View Only",
             '["students.view", "students.view", "custom.approved"]',
@@ -954,10 +960,14 @@ class RolePermissionInitializationTests(unittest.TestCase):
             self.parsed_role_permissions("View Only"),
             [
                 "students.view",
+                "students.view",
                 "custom.approved",
-                "documents.view",
             ],
         )
+        from database import reconciled_role_permissions
+        merged, changed = reconciled_role_permissions("View Only", self.raw_role_permissions("View Only"), [])
+        self.assertEqual(merged, ["students.view", "custom.approved"])
+        self.assertTrue(changed)
         self.assertFalse(
             any(
                 permission.startswith("student_cases.")

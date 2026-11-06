@@ -14,6 +14,7 @@ PROTECTED_STORAGE = (Path('/Volumes/Server/Students/CRM_TEST'), Path('/Volumes/S
 NAS_READ_ROOTS = (PROTECTED_STORAGE[0], Path('/Volumes/Server/Schools/CRM_Schools'))
 SCHOOL_REPORT_PDFUNITE = Path('/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/poppler/poppler/bin/pdfunite')
 SOURCE = Path(__file__).resolve().parent
+TEST_CONTENT_EXTRACTION_PORT = 18892
 
 class IsolationError(RuntimeError):
     pass
@@ -131,7 +132,7 @@ class Staging:
         if SOURCE == PRODUCTION:
             raise IsolationError('Production checkout cannot be Staging')
         ports = [d['admin_port'], d['parent_port']]
-        if any(type(p) is not int or p < 1024 or p > 65535 or p in (8780,8781,8790,8792) for p in ports) or ports[0] == ports[1]:
+        if any(type(p) is not int or p < 1024 or p > 65535 or p in (8780,8781,8790,8792,TEST_CONTENT_EXTRACTION_PORT) for p in ports) or ports[0] == ports[1]:
             raise IsolationError('Invalid or colliding ports')
         if d['namespace'] != 'aaie_staging_':
             raise IsolationError('Dedicated cookie namespace required')

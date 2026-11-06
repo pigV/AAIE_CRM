@@ -112,37 +112,35 @@ class VisaWorkspaceSecurityTests(unittest.TestCase):
         self.assertEqual(403,handler.response[0])
         self.assertEqual(0,self.conn.execute('SELECT COUNT(*) FROM visa_case_confirmed_decisions').fetchone()[0])
 
-    def test_baseline_upload_wrongly_finalizes_but_candidate_requires_confirmation(self):
-        baseline=__import__('subprocess').check_output(['git','show','4b01fda8bc463ec7cfc00b5b0ccd03f3f069d306:app.py'],cwd=ROOT,text=True)
+    def test_unconfirmed_upload_keeps_case_pending(self):
         current=(ROOT/'app.py').read_text()
-        for text,expected in [(baseline,'Granted'),(current,'Pending')]:
-            self.conn.execute("UPDATE visa_cases SET status='Draft',decision_status='Pending',result_status='Pending' WHERE id=1")
-            function=legacy_method(text,'visa_lodgement_update_case_result',{'db':self.db,'now_iso':lambda:STAMP})
-            class Handler:
-                visa_lodgement_update_case_result=function
-                def visa_lodgement_result_status(self,*args):return 'Granted'
-                def visa_management_table_columns(self,table):return {'status','decision_status','result_status','updated_at'}
-            Handler().visa_lodgement_update_case_result(1,'grant_letter','Grant.pdf')
-            self.assertEqual(expected,self.conn.execute('SELECT result_status FROM visa_cases WHERE id=1').fetchone()[0])
+        current=(ROOT/'app.py').read_text()
+        self.conn.execute("UPDATE visa_cases SET status='Draft',decision_status='Pending',result_status='Pending' WHERE id=1")
+        function=legacy_method(current,'visa_lodgement_update_case_result',{'db':self.db,'now_iso':lambda:STAMP})
+        class Handler:
+            visa_lodgement_update_case_result=function
+            def visa_lodgement_result_status(self,*args):return 'Granted'
+            def visa_management_table_columns(self,table):return {'status','decision_status','result_status','updated_at'}
+        Handler().visa_lodgement_update_case_result(1,'grant_letter','Grant.pdf')
+        self.assertEqual('Pending',self.conn.execute('SELECT result_status FROM visa_cases WHERE id=1').fetchone()[0])
 
-    def test_baseline_material_upload_sets_granted_visa_but_candidate_keeps_pending(self):
-        baseline=__import__('subprocess').check_output(['git','show','4b01fda8bc463ec7cfc00b5b0ccd03f3f069d306:app.py'],cwd=ROOT,text=True);current=(ROOT/'app.py').read_text()
+    def test_unconfirmed_material_upload_keeps_visa_pending(self):
+        current=(ROOT/'app.py').read_text()
         self.conn.execute('ALTER TABLE visa_cases ADD COLUMN visa_type TEXT')
         if 'expiry_date' not in {row[1] for row in self.conn.execute('PRAGMA table_info(visa_cases)')}:
             self.conn.execute('ALTER TABLE visa_cases ADD COLUMN expiry_date TEXT')
         self.conn.execute("UPDATE visa_cases SET visa_type='500',student_id='S1' WHERE id=1")
         self.conn.execute("INSERT INTO student_documents VALUES(1,'S1','/synthetic/grant.pdf','Grant.pdf',1,'VisaGrantLetter',?,1,'active')",(STAMP,))
-        for text,expected in [(baseline,'granted'),(current,'pending')]:
-            self.conn.execute('DELETE FROM visas')
-            function=legacy_method(text,'visa_lodgement_sync_material_upload_to_visa_tab',{'db':self.db,'now_iso':lambda:STAMP})
-            class Handler:
-                visa_lodgement_sync_material_upload_to_visa_tab=function
-                def visa_lodgement_file_type_from_material_item(self,*args):return 'grant_letter'
-                def visa_lodgement_result_status(self,*args):return 'Granted'
-                def visa_lodgement_file_type_label(self,*args):return 'Grant Letter'
-                def visa_lodgement_update_case_result(self,*args):pass
-            Handler().visa_lodgement_sync_material_upload_to_visa_tab(self.db.one('SELECT * FROM visa_cases WHERE id=1'),{},1,'Grant.pdf')
-            self.assertEqual(expected,self.conn.execute('SELECT visa_status FROM visas').fetchone()[0])
+        self.conn.execute('DELETE FROM visas')
+        function=legacy_method(current,'visa_lodgement_sync_material_upload_to_visa_tab',{'db':self.db,'now_iso':lambda:STAMP})
+        class Handler:
+            visa_lodgement_sync_material_upload_to_visa_tab=function
+            def visa_lodgement_file_type_from_material_item(self,*args):return 'grant_letter'
+            def visa_lodgement_result_status(self,*args):return 'Granted'
+            def visa_lodgement_file_type_label(self,*args):return 'Grant Letter'
+            def visa_lodgement_update_case_result(self,*args):pass
+        Handler().visa_lodgement_sync_material_upload_to_visa_tab(self.db.one('SELECT * FROM visa_cases WHERE id=1'),{},1,'Grant.pdf')
+        self.assertEqual('pending',self.conn.execute('SELECT visa_status FROM visas').fetchone()[0])
 
     def test_case_archived_auto_reference_does_not_reappear_in_merged_checklist(self):
         self.conn.execute("UPDATE visa_cases SET student_id='S1' WHERE id=1")

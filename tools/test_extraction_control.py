@@ -10,7 +10,7 @@ import urllib.request
 import uuid
 from tools import staging_control as staging
 from staging_environment import IsolationError
-PORT = 8792
+PORT = staging.TEST_CONTENT_EXTRACTION_PORT
 ROOT = staging.ROOT
 
 def environment(c):
@@ -38,7 +38,7 @@ def sandbox_profile(c):
         if line.startswith("(allow network-outbound") or line == "(deny process-fork)":
             continue
         if line.startswith("(allow network-bind"):
-            line = '(allow network-bind network-inbound (local ip "localhost:8792"))'
+            line = f'(allow network-bind network-inbound (local ip "localhost:{PORT}"))'
         lines.append(line)
     lines.append('(allow process-exec (literal '+json.dumps(str(c.root/"extraction-runtime/bin/ffmpeg"))+'))')
     return "\n".join(lines)+"\n"

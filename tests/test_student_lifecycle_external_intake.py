@@ -20,14 +20,7 @@ class ExternalIntakeTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.database_path = self.root / "external-intake.db"
-        helper = transfer_tests.TransferPhase2MigrationTests()
-        helper.connect = transfer_tests.TransferPhase2MigrationTests.connect
-        transfer_tests.TransferPhase2MigrationTests._create_legacy_fixture(
-            helper, self.database_path
-        )
-        transfer_tests.apply_all_test_migrations_with_rebuild_backup(
-            self.database_path, self.root, label="phase7-external-intake", through="20260909_038"
-        )
+        transfer_tests._service_fixture_template("20260909_038").copy_to(self.database_path)
         with closing(sqlite3.connect(self.database_path)) as connection:
             for definition in (
                 "passport_last_name TEXT", "passport_first_name TEXT",
@@ -38,14 +31,16 @@ class ExternalIntakeTests(unittest.TestCase):
                 "updated_at TEXT", "updated_by INTEGER", "form_data_json TEXT",
                 "deleted_at TEXT",
             ):
-                connection.execute(f"ALTER TABLE students ADD COLUMN {definition}")
+                existing = {row[1] for row in connection.execute("PRAGMA table_info(students)")}
+                if definition.split()[0] not in existing:
+                    connection.execute(f"ALTER TABLE students ADD COLUMN {definition}")
             connection.execute(
-                """CREATE TABLE parents(
+                """CREATE TABLE IF NOT EXISTS parents(
                        id INTEGER PRIMARY KEY,student_id TEXT NOT NULL,
                        parent_type TEXT,mobile TEXT,email TEXT)"""
             )
             connection.execute(
-                "CREATE TABLE student_sequences(year INTEGER PRIMARY KEY,last_value INTEGER NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS student_sequences(year INTEGER PRIMARY KEY,last_value INTEGER NOT NULL)"
             )
             connection.execute(
                 """UPDATE students SET passport_first_name='Alex',passport_last_name='Lee',

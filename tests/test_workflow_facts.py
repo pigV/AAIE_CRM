@@ -246,7 +246,7 @@ class WorkflowFactsTests(unittest.TestCase):
 
         self.assertEqual(select_count([first.id]), select_count([first.id, second.id]))
 
-    def test_manual_result_authority_drives_student_progress_without_canonical_event(self):
+    def test_manual_grant_without_confirmed_letter_cannot_advance_student_progress(self):
         cycle = create_student_cycle(
             self.conn, "S2", "initial", NOW, 1,
             cycle_uid="cycle-result-authority",
@@ -261,14 +261,17 @@ class WorkflowFactsTests(unittest.TestCase):
         migration = Path(__file__).resolve().parents[1] / "migrations/20260914_039_visa_result_status_authority.sql"
         self.conn.executescript(migration.read_text())
         from visa_result_status import record_manual_result
-        record_manual_result(
-            self.conn, 51, "Granted", actor_user_id=1,
-            occurred_at=NOW, reason="Staff verified result",
-        )
+        before = tuple(self.conn.iterdump())
+        with self.assertRaisesRegex(ValueError, "Confirm an active current Visa Result"):
+            record_manual_result(
+                self.conn, 51, "Granted", actor_user_id=1,
+                occurred_at=NOW, reason="Staff verified result",
+            )
+        self.assertEqual(before, tuple(self.conn.iterdump()))
 
         facts = load_workflow_facts(self.conn, [cycle.id])[cycle.id]
 
-        self.assertEqual("grant", facts.visa_decision)
+        self.assertIsNone(facts.visa_decision)
         self.assertEqual(0, self.conn.execute("SELECT count(*) FROM visa_decision_events WHERE application_cycle_id=?", (cycle.id,)).fetchone()[0])
 
     def test_manual_pending_or_withdrawn_clears_prior_canonical_current_projection(self):

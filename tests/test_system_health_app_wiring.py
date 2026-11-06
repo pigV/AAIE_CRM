@@ -255,7 +255,8 @@ class SystemHealthAppWiringTests(unittest.TestCase):
             "NAS Recovery",
             "Content Extraction 8792",
             "Data Mode",
-            "不是独立 runtime",
+            'data_mode = health["data_mode"]',
+            "esc(data_mode['description'])",
             "外部家长表单链接",
             "Legacy watchdog（历史兼容）",
         ):

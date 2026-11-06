@@ -24645,7 +24645,7 @@ def extraction_review_data(upload, module, doc_type=""):
             "message": message,
             "snippet": field_snippets.get(field) or extraction_snippet(text, value, (EXTRACTION_FIELD_LABELS.get(field, field), field.replace("_", " "))),
         }
-    return {
+    data = {
         "text_found": text_found,
         "source": ((upload_text_extraction_meta(upload).get("source_label") or ("本地 OCR 识别，请核对" if upload_text_extraction_meta(upload).get("ocr_fallback_used") else "PDF/Word 文字层")) if text_found else {
             "engine_unavailable": "本地 OCR 未就绪，请联系管理员",
@@ -24662,6 +24662,9 @@ def extraction_review_data(upload, module, doc_type=""):
         "fields": values,
         "program_segments": details.get("program_segments") or [],
     }
+
+    from application_document_extraction import enhance_review
+    return enhance_review(data, upload, APP_DIR, STAGING)
 
 
 EXTRACTION_FIELD_DOCUMENT_TYPES = {
@@ -24875,13 +24878,29 @@ def extraction_review_html(index, module, data):
             '<button type="button" class="ghost mini" data-extraction-copy>复制原文</button>'
             if data["text_found"] else '<button type="button" class="ghost mini" disabled>无原文</button>'
         )
+        candidate = info.get("local_candidate") or {}
+        candidate_button = (
+            f'<button type="button" class="secondary mini" data-local-candidate '
+            f'data-value="{esc(candidate.get("value"))}" data-snippet="{esc(candidate.get("snippet"))}" '
+            f'data-page="{esc(candidate.get("page") or 1)}">使用本机候选：{esc(candidate.get("value"))}</button>'
+            if candidate.get("value") else ""
+        )
+        field_control = (
+            f'<output data-local-informational-field="{esc(field)}">{esc(input_value)}</output>'
+            '<small>小学／中学阶段学校参考，不单独保存；请在 Main Course / Host School 确认保存学校。</small>'
+            if info.get("informational") else
+            f'<input id="{esc(field_id)}" type="text" name="extract_{esc(field)}_{index}" value="{esc(input_value)}" data-extraction-field{date_attrs}>'
+        )
+        if info.get("informational"):
+            candidate_button = ""
         rows.append(
-            f"""<div class="extraction-field extraction-{esc(status)}" data-extraction-field-row{hidden_attr} data-extraction-for="{esc(document_types)}" data-source-page="1" data-source-snippet="{esc(info["snippet"])}">
+            f"""<div class="extraction-field extraction-{esc(status)}" data-extraction-field-row{hidden_attr} data-extraction-for="{esc(document_types)}" data-source-page="{esc(info.get("page") or 1)}" data-source-snippet="{esc(info["snippet"])}">
               <label class="extraction-label" for="{esc(field_id)}">{esc(EXTRACTION_FIELD_LABELS.get(field, field))}</label>
-              <input id="{esc(field_id)}" type="text" name="extract_{esc(field)}_{index}" value="{esc(input_value)}" data-extraction-field{date_attrs}>
+              {field_control}
               <span class="extraction-status">{esc(info["message"])}</span>
               <div class="extraction-tools">
                 {copy_button}
+                {candidate_button}
               </div>
               <details class="extraction-source"><summary>查看原文片段</summary><blockquote>{esc(info["snippet"])}</blockquote></details>
             </div>"""
@@ -27404,6 +27423,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/(\d+)/upload-review/([^/]+)$", self.upload_review),
                 (r"^/students/(\d+)/upload-review/([^/]+)/confirm$", self.upload_review_confirm),
                 (r"^/students/(\d+)/upload-review/([^/]+)/cancel$", self.upload_review_cancel),
+                (r"^/students/(\d+)/upload-review/([^/]+)/(\d+)/local-extraction$", self.upload_review_local_extraction),
                 (r"^/students/(\d+)/upload-review/([^/]+)/(\d+)/preview$", self.upload_review_preview),
                 (r"^/students/(\d+)/upload-review/([^/]+)/(\d+)/preview/download$", self.upload_review_download),
                 (r"^/students/(\d+)/materials-complete$", self.materials_complete),
@@ -66953,6 +66973,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     snippet="手动新增 Offer 时填写的语言学校。空白表示待确认。",
                 )
             log_upload_review_document_detection(file_meta, module, suggested_type, options, extraction_data)
+            local_review_attrs = ""
+            if extraction_data.get("local_extraction") is not None:
+                local_review_attrs = f' data-local-review-url="/students/{student_id}/upload-review/{quote(token)}/{index}/local-extraction"'
             extraction_html = extraction_review_html(index, module, extraction_data).replace(
                 'class="extraction-review-box ',
                 'class="extraction-review-box upload-review-extraction ',
@@ -66965,7 +66988,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     f'placeholder="可选，例如 CaulfieldGrammar"></label>'
                 )
             cards.append(
-                f"""<article class="review-card upload-review-workbench upload-review-file-card" data-upload-review-workbench style="--review-preview-fr: minmax(0, 1.65fr); --review-fields-fr: minmax(340px, .85fr);">
+                f"""<article class="review-card upload-review-workbench upload-review-file-card" data-upload-review-workbench{local_review_attrs} style="--review-preview-fr: minmax(0, 1.65fr); --review-fields-fr: minmax(340px, .85fr);">
                   <section class="review-fields review-fields-workspace upload-review-file-meta upload-review-classification upload-review-human-input" data-review-fields-pane>
                     <div class="review-meta-line"><span>当前模块</span><strong>{esc(module)}</strong></div>
                     <div class="review-meta-line"><span>当前文件</span><strong>{esc(file_meta["original_name"])}</strong></div>
@@ -67031,8 +67054,30 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             </div>
           </form>
           {preview_dialog_html()}
+          <script src="/assets/local-document-review.js" defer></script>
         </section>"""
         return self.send_html(page("Upload Review", body, self.user, self.csrf, active="students", nas=nas.status()))
+
+    def upload_review_local_extraction(self, method, student_id, token, file_index):
+        if method != "GET":
+            return self.json_response({"status":"manual_review", "fields":{}}, 405)
+        folder, metadata = load_upload_review(token)
+        module = metadata["module"]
+        if str(student_id) != str(metadata["student_id"]):
+            return self.json_response({"status":"manual_review", "fields":{}}, 400)
+        if not can_review_module_action(self.user, module, "view"):
+            return self.json_response({"status":"manual_review", "fields":{}}, 403)
+        from application_document_extraction import development_queue, KINDS
+        queue = development_queue(APP_DIR, STAGING)
+        doc_type = str((self.query.get("document_type") or [""])[0])
+        kind = KINDS.get(doc_type) if doc_type in module_document_types(module) else None
+        file_meta = next((item for item in metadata["files"] if str(item["index"]) == str(file_index)), None)
+        if queue is None or kind is None or file_meta is None:
+            return self.json_response({"status":"manual_review", "fields":{}})
+        upload = upload_from_review(folder, file_meta)
+        if not upload.filename.lower().endswith(".pdf"):
+            return self.json_response({"status":"manual_review", "fields":{}})
+        return self.json_response(queue.submit(upload.data, kind))
 
     def upload_review_preview(self, method, student_id, token, file_index):
         folder, metadata = load_upload_review(token)

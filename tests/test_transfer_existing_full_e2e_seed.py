@@ -42,7 +42,7 @@ class ExistingTransferSeedBoundaryTests(unittest.TestCase):
             storage = root / "storage"
             storage.mkdir()
             database.touch()
-            for ports in ((8880, 18981), (18980, 8881)):
+            for ports in ((8880, 18981), (18980, 8881), (18980, 8792), (8790, 18981), (18980, 8793)):
                 with self.assertRaises(IsolationViolation):
                     validate_isolated_runtime(root, database, storage, ports)
         with self.assertRaises(IsolationViolation):
@@ -52,6 +52,19 @@ class ExistingTransferSeedBoundaryTests(unittest.TestCase):
                 Path("/Volumes/Server/Students"),
                 (18980, 18981),
             )
+
+    def test_migrated_production_aliases_and_traversal_reject_before_io(self):
+        from unittest.mock import patch
+        from tests import transfer_existing_full_e2e_seed as seed
+        roots = (Path("//Volumes/Data/AAIE_CRM/main"),
+                 Path("/Volumes/Data/AAIE_CRM/main"),
+                 Path("/Volumes/Data/AAIE_CRM/MAIN"),
+                 Path("/Volumes/Data/AAIE_CRM/runtime/Production"),
+                 Path("/Volumes/Data/AAIE_CRM/worktrees/../../main"))
+        with patch.object(seed, "_resolved_without_symlink", side_effect=AssertionError("Filesystem IO reached")):
+            for root in roots:
+                with self.subTest(root=str(root)), self.assertRaises(IsolationViolation):
+                    seed.validate_isolated_runtime(root, root/"database/test.db", root/"storage", (18980,18981))
 
     def test_rejects_symlink_escape_and_database_outside_root(self):
         with tempfile.TemporaryDirectory() as temporary:

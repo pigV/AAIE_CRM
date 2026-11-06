@@ -6,12 +6,13 @@ import stat
 import tempfile
 from unittest.mock import patch
 
-APPROVED_ROOT = Path('/Users/faqiang/CRM-Revenue-Secure-Test')
+APPROVED_ROOT = Path(__file__).resolve().parents[1]/'STAGING_DATA/revenue-secure-fixtures'
 
 def secure_directory(testcase):
     raw = os.environ.get('REVENUE_POSIX_TEST_ROOT')
     if raw != str(APPROVED_ROOT):
         raise RuntimeError('Explicit approved REVENUE_POSIX_TEST_ROOT is required')
+    APPROVED_ROOT.mkdir(parents=True,exist_ok=True,mode=0o700)
     if APPROVED_ROOT.is_symlink() or APPROVED_ROOT.resolve() != APPROVED_ROOT:
         raise RuntimeError('Synthetic storage root must not contain symlinks')
     directory = Path(tempfile.mkdtemp(prefix='revenue-fixture-', dir=APPROVED_ROOT))

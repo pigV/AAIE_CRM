@@ -171,8 +171,14 @@ def sha256(path):
 
 def apply_all_test_migrations_with_rebuild_backup(
     database_path, root, *, label, include_023=True,
-    before_transfer_cutover=None
+    before_transfer_cutover=None, through=None
 ):
+    # This fixture materializes both guarded 035 rebuilds. Earlier boundaries
+    # must use dedicated migration fixtures instead of silently overshooting.
+    if through is not None:
+        versions = {item.version for item in migration_runner.discover_migrations(MIGRATIONS_DIR)}
+        if not include_023 or through not in versions or (through < "20260907_035" and through != "20260824_030"):
+            raise ValueError("Fixture boundary must name the pre-V2 compatibility boundary or a post-Visa migration")
     migration_dir = Path(root) / f"{label}-migrations-through-005"
     checks = migration_dir / "checks"
     checks.mkdir(parents=True)
@@ -410,7 +416,7 @@ def apply_all_test_migrations_with_rebuild_backup(
     checks_before_035 = migrations_before_035 / "checks"
     checks_before_035.mkdir(parents=True)
     for migration in migration_runner.discover_migrations(MIGRATIONS_DIR):
-        if migration.version >= "20260904_035":
+        if migration.version >= "20260904_035" or (through == "20260824_030" and migration.version > through):
             break
         shutil.copy2(
             migration.upgrade_path,
@@ -428,6 +434,12 @@ def apply_all_test_migrations_with_rebuild_backup(
         formal_database_path=None,
         required_backup_metadata=rebuild_backup("029"),
     )
+    if through == "20260824_030":
+        complete_base_fixture_columns(database_path)
+        return migration_runner.apply_migrations(
+            database_path, MIGRATIONS_DIR, applied_by="phase2-transfer-test",
+            source_commit="phase2-transfer-test", formal_database_path=None, through=through,
+        )
     if before_transfer_cutover is not None:
         # Create explicit synthetic legacy facts before the real Transfer 035
         # cutover so compatibility tests exercise the historical path.
@@ -444,9 +456,19 @@ def apply_all_test_migrations_with_rebuild_backup(
         required_backup_metadata=rebuild_backup("035-transfer"),
         through="20260904_035",
     )
-    # This cross-module fixture intentionally starts from a small legacy
-    # schema. Materialize the application's canonical neighbouring columns
-    # before the Visa rebuild, matching the real pre-Visa database shape.
+    complete_base_fixture_columns(database_path)
+    return migration_runner.apply_migrations(
+        database_path,
+        MIGRATIONS_DIR,
+        applied_by="phase2-transfer-test",
+        source_commit="phase2-transfer-test",
+        formal_database_path=None,
+        required_backup_metadata=rebuild_backup("035-visa"),
+        through=through,
+    )
+
+
+def complete_base_fixture_columns(database_path):
     from database import SCHEMA
     with closing(sqlite3.connect(":memory:")) as canonical:
         canonical.executescript(SCHEMA)
@@ -487,14 +509,7 @@ def apply_all_test_migrations_with_rebuild_backup(
         connection.commit()
         from tests.visa_test_schema import prepare_production_visa_schema
         prepare_production_visa_schema(connection)
-    return migration_runner.apply_migrations(
-        database_path,
-        MIGRATIONS_DIR,
-        applied_by="phase2-transfer-test",
-        source_commit="phase2-transfer-test",
-        formal_database_path=None,
-        required_backup_metadata=rebuild_backup("035-visa"),
-    )
+
 
 
 class TransferPhase2MigrationTests(unittest.TestCase):
@@ -5009,7 +5024,7 @@ class TransferPhase2MigrationTests(unittest.TestCase):
         )
         with closing(sqlite3.connect(self.database_path)) as connection:
             self.assertEqual(
-                "20260910_040",
+                migration_runner.discover_migrations(MIGRATIONS_DIR)[-1].version,
                 connection.execute(
                     "SELECT version FROM schema_migrations ORDER BY rowid DESC LIMIT 1"
                 ).fetchone()[0],
@@ -5017,6 +5032,24 @@ class TransferPhase2MigrationTests(unittest.TestCase):
 
     def test_t3_transfer_views_module_exists(self):
         self.assertIsNotNone(transfer_case_views)
+
+
+_SERVICE_FIXTURE_TEMPLATES = {}
+
+
+def _service_fixture_template(through=None):
+    if through not in _SERVICE_FIXTURE_TEMPLATES:
+        import atexit
+        from tests.lifecycle_fixture_template import FixtureTemplate
+        def build(path):
+            fixture = TransferPhase2MigrationTests()
+            fixture._create_legacy_fixture(path)
+            apply_all_test_migrations_with_rebuild_backup(
+                path, path.parent, label="repository-service-template", through=through
+            )
+        _SERVICE_FIXTURE_TEMPLATES[through] = FixtureTemplate(build)
+        atexit.register(_SERVICE_FIXTURE_TEMPLATES[through].close)
+    return _SERVICE_FIXTURE_TEMPLATES[through]
 
 
 @unittest.skipIf(
@@ -5030,17 +5063,15 @@ class TransferCaseRepositoryServiceTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.database_path = self.root / "fixture.db"
-        TransferPhase2MigrationTests._create_legacy_fixture(
-            self, self.database_path
-        )
-        apply_all_test_migrations_with_rebuild_backup(
-            self.database_path,
-            self.root,
-            label="repository-service",
-            before_transfer_cutover=getattr(
-                self, "before_transfer_cutover", None
-            ),
-        )
+        before_cutover = getattr(self, "before_transfer_cutover", None)
+        if before_cutover is not None:
+            TransferPhase2MigrationTests._create_legacy_fixture(self, self.database_path)
+            apply_all_test_migrations_with_rebuild_backup(
+                self.database_path, self.root, label="repository-service",
+                before_transfer_cutover=before_cutover,
+            )
+        else:
+            _service_fixture_template(getattr(self,"service_fixture_through",None)).copy_to(self.database_path)
         self.service = transfer_case_service.TransferCaseService(
             self.database_path,
             timeout=2.0,
@@ -6067,6 +6098,8 @@ class TransferCaseRepositoryServiceTests(unittest.TestCase):
     "Transfer repository/service modules are not implemented yet",
 )
 class TransferCaseT3ServiceTests(TransferCaseRepositoryServiceTests):
+    # Exercise the retained V1 compatibility path, not the V2 creation contract.
+    service_fixture_through = "20260824_030"
     def enabled_flags(self):
         return StudentCaseFeatureFlags(
             read_enabled=True,
@@ -6217,6 +6250,8 @@ class TransferCaseT3ServiceTests(TransferCaseRepositoryServiceTests):
             ),
             ("determined", "same_city", "public_to_private"),
         )
+        with closing(self.connect(self.database_path)) as baseline_connection:
+            before_student = dict(baseline_connection.execute("SELECT * FROM students WHERE student_id='student-1'").fetchone())
         updated = self.service.update_transfer_case(
             created.case_id,
             changes={
@@ -6283,13 +6318,7 @@ class TransferCaseT3ServiceTests(TransferCaseRepositoryServiceTests):
         # enrolment. Editing the Case must not create a second enrolment.
         self.assertEqual(enrolments, 1)
         self.assertEqual(student["student_id"], "student-1")
-        self.assertTrue(
-            all(
-                value is None
-                for key, value in dict(student).items()
-                if key != "student_id"
-            )
-        )
+        self.assertEqual(dict(student), before_student)
 
     def test_initial_note_and_unknown_fields_cannot_be_edited(self):
         created = self.create_internal(initial_note="Original note")
@@ -8741,8 +8770,9 @@ class TransferCaseT7ArrangementServiceTests(
             case.case_id, expected_start_date="2027-01-20"
         )
         with closing(self.connect(self.database_path)) as connection:
-            connection.execute(
-                "ALTER TABLE students ADD COLUMN date_of_birth TEXT"
+            self.assertIn(
+                "date_of_birth",
+                {row[1] for row in connection.execute("PRAGMA table_info(students)")},
             )
             connection.execute(
                 """UPDATE students SET date_of_birth='2010-02-01'
@@ -8834,8 +8864,9 @@ class TransferCaseT7ArrangementServiceTests(
             case.case_id, expected_start_date="2027-01-20"
         )
         with closing(self.connect(self.database_path)) as connection:
-            connection.execute(
-                "ALTER TABLE students ADD COLUMN date_of_birth TEXT"
+            self.assertIn(
+                "date_of_birth",
+                {row[1] for row in connection.execute("PRAGMA table_info(students)")},
             )
             connection.execute(
                 """UPDATE students SET date_of_birth='2000-01-01'
@@ -9340,6 +9371,8 @@ class TransferCaseT6AdmissionViewTests(
     "Transfer views module is not implemented yet",
 )
 class TransferCaseT3ViewTests(TransferCaseRepositoryServiceTests):
+    # Exercise the retained V1 compatibility path, not the V2 creation contract.
+    service_fixture_through = "20260824_030"
     def flags(self, write=True):
         return StudentCaseFeatureFlags(
             read_enabled=True,
@@ -10396,6 +10429,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     "Transfer views module is not implemented yet",
 )
 class TransferCaseT3RouteTests(TransferCaseRepositoryServiceTests):
+    # Exercise the retained V1 compatibility path, not the V2 creation contract.
+    service_fixture_through = "20260824_030"
     def setUp(self):
         super().setUp()
         with closing(sqlite3.connect(self.database_path)) as connection:
@@ -10658,9 +10693,10 @@ class TransferCaseT3RouteTests(TransferCaseRepositoryServiceTests):
             f"/students/1001/transfer-cases/{case_id}"
         )
         self.assertEqual(status, HTTPStatus.OK)
-        self.assertIn("Lifecycle / Case 详情与历史摘要", body)
-        self.assertIn("返回 Student Profile", body)
-        self.assertNotIn('class="transfer-workbench', body)
+        self.assertIn(f"转学记录 #{case_id}", body)
+        self.assertIn("业务记录详情与历史摘要", body)
+        self.assertIn('href="/students/1001#student-lifecycle-history"', body)
+        self.assertIn('id="transfer-case-overview"', body)
         with closing(self.connect(self.database_path)) as connection:
             title = connection.execute(
                 "SELECT title FROM transfer_cases WHERE case_id=?",

@@ -37,6 +37,12 @@ from reportlab.pdfgen import canvas
 from pypdf import PdfReader
 
 
+def authorized_contract_admin_fixture(db_handle):
+    user = dict(db_handle.one("SELECT u.*,r.name role_name,r.permissions_json FROM users u JOIN roles r ON r.id=u.role_id WHERE u.username='admin'"))
+    user["module_permissions_json"] = app_module.modules_json_for_user(user["id"])
+    return user
+
+
 def docx_body_pages_text(path):
     document = Document(str(path))
     pages = [[]]
@@ -178,7 +184,7 @@ def assert_isolated_upload_review_environment(
     nas_root,
 ):
     temp_root = Path(temp_root).resolve()
-    workspace_tmp = Path("tmp").resolve()
+    workspace_tmp = (Path(app_module.APP_DIR) / "tmp").resolve()
     if temp_root == workspace_tmp or workspace_tmp not in temp_root.parents:
         raise AssertionError(f"Upload Review temporary root is outside workspace tmp: {temp_root}")
 
@@ -489,6 +495,7 @@ def isolated_school_detail_regression_environment(group_name):
         old_log_root = app_module.LOG_DIR
         temp_db = object.__new__(Database)
         temp_db.path = database_path
+        temp_db._request_local = threading.local()
         app_module.db = temp_db
         app_module.nas = SyntheticSchoolDetailNas(nas_root)
         app_module.SCHOOL_LIBRARY_FILE_DIR = nas_root
@@ -677,6 +684,7 @@ def isolated_school_new_regression_environment(group_name):
         old_log_root = app_module.LOG_DIR
         temp_db = object.__new__(Database)
         temp_db.path = database_path
+        temp_db._request_local = threading.local()
 
         # Bind every writable dependency before database initialization or handler use.
         app_module.db = temp_db
@@ -778,7 +786,7 @@ def isolated_school_new_regression_environment(group_name):
 
 @contextmanager
 def isolated_upload_review_regression_environment(group_name):
-    base_root = Path("tmp/generic-upload-review-behavior-regression-v1").resolve()
+    base_root = (Path(app_module.APP_DIR) / "tmp/generic-upload-review-behavior-regression-v1").resolve()
     base_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f"{group_name}-", dir=base_root) as folder:
         root = Path(folder).resolve()
@@ -956,6 +964,7 @@ def isolated_content_duplicate_script_regression_environment(group_name):
         old_log_dir = app_module.LOG_DIR
         temp_db = object.__new__(Database)
         temp_db.path = database_path
+        temp_db._request_local = threading.local()
 
         # Bind every writable dependency before initialization or handler use.
         app_module.db = temp_db
@@ -6002,28 +6011,36 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("crm_public_base_url()", callback_source)
 
     def test_wechat_oauth_env_file_template_is_available_without_real_secret(self):
+        from production_environment import load_canonical_production_environment
         source = Path("app.py").read_text(encoding="utf-8")
-        env_file = Path(".env.production").read_text(encoding="utf-8")
         env_example = Path("config/wechat_oauth.env.example").read_text(encoding="utf-8")
         gitignore = Path(".gitignore").read_text(encoding="utf-8")
-        env_map = dict(
-            line.split("=", 1)
-            for line in env_file.splitlines()
-            if line and not line.startswith("#") and "=" in line
-        )
-
-        self.assertIn("def load_local_env_files", source)
-        self.assertIn('APP_DIR / ".env.production"', source)
+        example_values = dict(line.split("=",1) for line in env_example.splitlines()
+                              if line and not line.startswith("#") and "=" in line)
+        self.assertIn("load_canonical_production_environment", source)
         self.assertIn(".env", gitignore)
         self.assertIn(".env.*", gitignore)
-        self.assertEqual(env_map.get("WECHAT_APP_ID"), "wx5089f1a1dbd9ef5b")
-        self.assertGreaterEqual(len(env_map.get("WECHAT_APP_SECRET", "")), 20)
-        self.assertNotIn(env_map.get("WECHAT_APP_SECRET", ""), source)
-        self.assertNotIn(env_map.get("WECHAT_APP_SECRET", ""), env_example)
-        self.assertIn("WECHAT_OAUTH_CALLBACK_URL=https://form.goabroad.com.au/api/wechat/oauth/callback", env_file)
-        self.assertIn("WECHAT_OAUTH_SCOPE=snsapi_userinfo", env_file)
+        self.assertIn("请填写", example_values["WECHAT_APP_SECRET"])
         self.assertIn("AOYA低龄留学服务号", env_example)
         self.assertIn("不要提交真实 AppSecret", env_example)
+        self.assertEqual(example_values["WECHAT_OAUTH_SCOPE"], "snsapi_userinfo")
+        # The public template/loader contract must not require real credentials.
+        secret = "synthetic-test-only-secret-123"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / ".env.production").write_text(
+                "WECHAT_APP_ID=synthetic-app\nWECHAT_APP_SECRET=" + secret + "\n" +
+                "WECHAT_OAUTH_CALLBACK_URL=https://example.invalid/oauth/callback\n" +
+                "WECHAT_OAUTH_SCOPE=snsapi_userinfo\n", encoding="utf-8")
+            values = {}
+            result = load_canonical_production_environment(root=root, environ=values)
+            self.assertTrue(result.ok)
+            self.assertTrue(result.production_file_present)
+            self.assertEqual(values["WECHAT_APP_SECRET"], secret)
+            self.assertEqual(values["WECHAT_APP_ID"], "synthetic-app")
+            self.assertNotIn(secret, repr(result))
+            self.assertNotIn(secret, source)
+            self.assertNotIn(secret, env_example)
 
     def test_wechat_oauth_self_check_page_and_live_test_are_wired(self):
         source = Path("app.py").read_text(encoding="utf-8")
@@ -10859,8 +10876,9 @@ class CoreTests(unittest.TestCase):
             prepare_visa_candidate_test_database(db)
             try:
                 app_module.db = db
-                app_module.now_iso = lambda: "2026-07-12T01:00:00+00:00"
-                stamp = "2026-07-12T01:00:00+00:00"
+                # Keep link creation within the real expiry clock's 90-day window.
+                stamp = old_now_iso()
+                app_module.now_iso = lambda: stamp
                 db.execute(
                     """INSERT INTO students(student_id,passport_last_name,passport_first_name,gender,date_of_birth,current_status,created_date,updated_at,form_data_json)
                        VALUES(?,?,?,?,?,?,?,?,?)""",
@@ -10896,8 +10914,12 @@ class CoreTests(unittest.TestCase):
                 public_handler.send_response = lambda *args, **kwargs: None
                 public_handler.send_header = lambda *args, **kwargs: None
                 public_handler.end_headers = lambda *args, **kwargs: None
-                public_handler.visa_information_collection_wechat_login("POST", respondent["token"])
-                respondent = db.one("SELECT * FROM visa_information_collection_respondents WHERE id=?", (respondent["id"],))
+                # Wizard storage is tested after a synthetic server-verified
+                # OAuth identity, rather than client-submitted identity fields.
+                respondent, problem = public_handler.visa_information_collection_bind_wechat_identity(
+                    respondent, "openid_wendy", "Wendy WeChat")
+                self.assertIsNone(problem)
+                self.assertEqual(respondent["bound_wechat_openid"], "openid_wendy")
                 public_handler.headers = {
                     "User-Agent": "unit-test",
                     "Cookie": f"{public_handler.visa_information_collection_cookie_name(respondent['id'])}={public_handler.visa_information_collection_cookie_value(respondent, 'openid_wendy')}",
@@ -12266,7 +12288,7 @@ class CoreTests(unittest.TestCase):
                 handler.student_detail("GET", "260901")
 
                 html = captured["html"]
-                self.assertIn("学生主流程进度", html)
+                self.assertIn('id="workflow-progress"', html)
                 self.assertNotIn("VISA Summary", html)
                 self.assertNotIn("进入 VISA Management / 签证管理", html)
 
@@ -17370,7 +17392,7 @@ class CoreTests(unittest.TestCase):
             finally:
                 app_module.APP_DIR = old_app_dir
 
-    def test_academic_results_auto_check_imports_matched_rows_for_all_requested_states(self):
+    def test_academic_results_auto_check_stages_rows_for_all_states_without_publishing(self):
         old_db = app_module.db
         with tempfile.TemporaryDirectory() as folder:
             try:
@@ -17405,14 +17427,15 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(len(created), len(states))
                 jobs = db.all("SELECT * FROM data_update_jobs WHERE job_type='academic_results' ORDER BY state")
                 self.assertEqual({job["state"] for job in jobs}, set(states))
-                self.assertEqual(db.one("SELECT COUNT(*) count FROM school_academic_rankings WHERE source_type='official_academic_results'")["count"], len(states))
+                self.assertEqual(db.one("SELECT COUNT(*) count FROM school_academic_rankings WHERE source_type='official_academic_results'")["count"], 0)
                 self.assertEqual(db.one("SELECT COUNT(*) count FROM school_ranking_import_rows WHERE review_status='Needs Review' AND match_status='Unmatched'")["count"], len(states))
+                self.assertEqual(db.one("SELECT COUNT(*) count FROM school_ranking_import_rows WHERE review_status='Needs Review' AND match_status='Matched'")["count"], len(states))
                 for state in states:
                     job = db.one("SELECT * FROM data_update_jobs WHERE job_type='academic_results' AND state=?", (state,))
                     self.assertEqual(job["trigger_type"], "auto", state)
                     self.assertEqual(job["records_found"], 2, state)
-                    self.assertEqual(job["records_created"], 1, state)
-                    self.assertEqual(job["needs_manual_confirmation_count"], 1, state)
+                    self.assertEqual(job["records_created"], 0, state)
+                    self.assertEqual(job["needs_manual_confirmation_count"], 2, state)
                     self.assertEqual(job["update_policy"], "save_as_new_version", state)
                     self.assertEqual(job["status"], "Review required", state)
                     self.assertIn(f"academic_results_{state.lower()}_2026_v1", job["version_key"])
@@ -17511,9 +17534,13 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(job["version_key"], "academic_results_vic_2026_v2")
                 self.assertEqual(job["update_policy"], "save_as_new_version")
                 ranks = db.all("SELECT rank,version_key,is_latest_verified FROM school_academic_rankings WHERE school_id=? AND data_year='2026' ORDER BY version_number", (school_id,))
-                self.assertEqual([row["rank"] for row in ranks], ["5", "1"])
-                self.assertEqual(ranks[0]["is_latest_verified"], 0)
-                self.assertEqual(ranks[1]["is_latest_verified"], 1)
+                self.assertEqual([row["rank"] for row in ranks], ["5"])
+                self.assertEqual(ranks[0]["is_latest_verified"], 1)
+                self.assertEqual(job["status"], "Review required")
+                self.assertEqual(job["records_created"], 0)
+                self.assertEqual(job["needs_manual_confirmation_count"], 1)
+                staged = db.one("SELECT rank,review_status,match_status FROM school_ranking_import_rows WHERE school_name_raw=?", ("Versioned Academic College",))
+                self.assertEqual(tuple(staged), ("1", "Needs Review", "Matched"))
             finally:
                 app_module.db = old_db
 
@@ -19157,8 +19184,9 @@ class CoreTests(unittest.TestCase):
         self.assertIn("messages.scrollTop = messages.scrollHeight", script)
         self.assertIn("localStorage.setItem(storageKey", script)
         self.assertNotIn("input.disabled = busy", script)
-        self.assertNotIn("showModal(", script.split("initAssistantWidgetIsolated", 1)[-1])
-        self.assertNotIn("confirm(", script.split("initAssistantWidgetIsolated", 1)[-1])
+        assistant_script = script.split("const initAssistantWidgetIsolated", 1)[1].split("const scheduleAssistantWidgetInit", 1)[0]
+        self.assertNotIn("showModal(", assistant_script)
+        self.assertNotIn("confirm(", assistant_script)
 
         assistant_css = css.split(".assistant-widget-isolated", 1)[-1]
         self.assertIn(".assistant-widget-isolated__error", assistant_css)
@@ -24581,7 +24609,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("（可选）", app)
         self.assertIn("不是每个学生都有，没有就不用上传", app)
         self.assertIn("data-document-type-help", app)
-        upload_review_card = app.split('f"""<article class="review-card upload-review-workbench"', 1)[1].split("</article>", 1)[0]
+        upload_review_card = app.split('f"""<article class="review-card upload-review-workbench', 1)[1].split("</article>", 1)[0]
         self.assertLess(upload_review_card.index("review-fields-workspace"), upload_review_card.index("review-preview-workspace"))
         self.assertIn("DocumentType / 文件类型", upload_review_card)
         self.assertLess(upload_review_card.index("review-fields-workspace"), upload_review_card.index("DocumentType / 文件类型"))
@@ -24631,7 +24659,10 @@ class CoreTests(unittest.TestCase):
         self.assertIn(".extraction-source", upload_review_css)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr))", upload_review_css)
         self.assertIn("extraction-review-compact", upload_review_css)
-        self.assertIn('{"SignedOffer": "signed", "OfferAcceptance": "accepted"}.get(doc_type', app)
+        # Uploading a signed acceptance is evidence receipt, not business acceptance.
+        self.assertIn('{"SignedOffer": "signed", "OfferAcceptance": "signed_received"}.get(doc_type', app)
+        self.assertIn('if offer_status == "accepted":', app)
+        self.assertIn('offer_status = "received"', app)
         self.assertIn("signed_offer_file_path", app)
         self.assertIn("accepted_date", app)
         self.assertIn("寄宿家庭申请表", app)
@@ -26768,7 +26799,7 @@ class CoreTests(unittest.TestCase):
     def test_homestay_airport_panel_uses_upload_review(self):
         app = Path("app.py").read_text(encoding="utf-8")
         self.assertIn("def homestay_airport_panel", app)
-        self.assertIn('("homestay", "Homestay / Airport Pickup", can_access_module(self.user, "payments")', app)
+        self.assertIn('("homestay", "住宿与接机", can_access_module(self.user, "payments")', app)
         self.assertIn("heading-soft-tag", app)
         self.assertIn('/students/{student_id}/homestay-airport/upload', app)
         self.assertIn('create_upload_review(student_id, "Homestay + Airport Pickup"', app)
@@ -27376,7 +27407,10 @@ class CoreTests(unittest.TestCase):
                 self.assertTrue(Path(result["final_document_path"]).is_file())
                 self.assertEqual(Path(result["final_document_path"]).name, Path(docs[-1]["file_path"]).name)
                 anchors = app_module._contract_parent_signature_section_anchors(contract_pdf, 1)
-                self.assertLess(anchors["signature_y"], 590)
+                # Source fixture draws the signature label at y=600; font metrics
+                # may shift its lower edge by up to one 12pt line plus padding.
+                self.assertAlmostEqual(anchors["signature_y"], 600, delta=16)
+                self.assertLess(anchors["signature_y"] + anchors["signature_box_height"], 650)
                 self.assertGreaterEqual(anchors["signature_box_width"], 90)
                 self.assertLessEqual(anchors["signature_box_width"], 130)
                 self.assertGreaterEqual(anchors["signature_box_height"], 30)
@@ -27827,8 +27861,8 @@ class CoreTests(unittest.TestCase):
             self.assertIn("parent@example.com", text)
             self.assertIn("乙方地址", text)
             self.assertIn("10 Parent Street, Box Hill VIC 3128", text)
-            self.assertNotIn("学生护照号 / 学生 ID", text)
-            self.assertNotIn("P1234567", text)
+            self.assertIn("学生护照号 / 学生 ID", text)
+            self.assertIn("P1234567", text)
             self.assertIn("Year 8", text)
             self.assertIn("Year 9", text)
             self.assertIn("2027 Term 1", text)
@@ -27844,7 +27878,7 @@ class CoreTests(unittest.TestCase):
             self.assertIn("甲方签署日期：", text)
             self.assertNotIn("甲方（签字 / 盖章）：____________________________", text)
 
-    def test_generated_contract_parties_table_removes_student_id_row_and_formats_intake_month(self):
+    def test_generated_contract_parties_table_retains_student_id_and_formats_intake_month(self):
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder) / "contract.docx"
             generate_study_abroad_contract({
@@ -27879,8 +27913,8 @@ class CoreTests(unittest.TestCase):
             values_by_label = {row[0]: row[1] for row in parties_table}
             parties_text = "\n".join(cell for row in parties_table for cell in row)
 
-            self.assertNotIn("学生护照号 / 学生 ID", labels)
-            self.assertNotIn("P1234567", parties_text)
+            self.assertIn("学生护照号 / 学生 ID", labels)
+            self.assertEqual(values_by_label["学生护照号 / 学生 ID"], "P1234567")
             for expected_label in ("合同编号", "学生姓名", "学生出生日期", "当前年级", "申请年级", "入学年份 / 学期"):
                 self.assertIn(expected_label, labels)
             self.assertEqual(values_by_label["合同编号"], "AAIE-PARTIES-MONTH-001")
@@ -28078,7 +28112,7 @@ class CoreTests(unittest.TestCase):
                 }
                 rendered_text = "\n".join(cell for table_rows in tables for row in table_rows for cell in row)
 
-                self.assertNotIn("学生护照号 / 学生 ID", labels)
+                self.assertIn("学生护照号 / 学生 ID", labels)
                 self.assertNotIn("P1234567", rendered_text)
                 self.assertEqual(values_by_label["入学年份 / 学期"], "2027年4月")
                 self.assertNotIn("入学年份 / 学期\n04", rendered_text)
@@ -28180,7 +28214,7 @@ class CoreTests(unittest.TestCase):
                 }
                 generated_text = "\n".join(cell for table_rows in tables for row in table_rows for cell in row)
 
-                self.assertNotIn("学生护照号 / 学生 ID", labels)
+                self.assertIn("学生护照号 / 学生 ID", labels)
                 self.assertNotIn("TROUTE001", generated_text)
                 self.assertEqual(values_by_label["入学年份 / 学期"], "2027年4月")
         finally:
@@ -29223,6 +29257,7 @@ c.save()
                     "home_address": "",
                     "applying_year_level": "",
                     "preferred_intake_term": "",
+                    "preferred_intake_year": "",
                 }
                 payload = app_module.contract_student_payload(student, {
                     "service_type": "StudyConsultingAndVisaService",
@@ -33560,9 +33595,16 @@ c.save()
         self.assertIn("tamworth", keys)
 
     def test_asgs_school_area_resolves_common_school_locality_aliases(self):
-        self.assertEqual(app_module.resolve_asgs_school_area("Toowoomba", "QLD", "4350")["lga_name"], "Toowoomba")
-        self.assertEqual(app_module.resolve_asgs_school_area("Mt Gravatt", "QLD", "4122")["lga_name"], "Brisbane")
-        self.assertEqual(app_module.resolve_asgs_school_area("Avalon", "NSW", "2107")["lga_name"], "Northern Beaches")
+        # Alias resolution is a unit boundary, independent of installed ABS data.
+        index = {"3|toowoomba city": {"lga_name": "Toowoomba"},
+                 "3|mount gravatt": {"lga_name": "Brisbane"},
+                 "1|avalon beach": {"lga_name": "Northern Beaches"}}
+        for suburb, state, postcode, lga in (("Toowoomba", "QLD", "4350", "Toowoomba"),
+                                            ("Mt Gravatt", "QLD", "4122", "Brisbane"),
+                                            ("Avalon", "NSW", "2107", "Northern Beaches")):
+            with self.subTest(suburb=suburb):
+                self.assertEqual(app_module.resolve_asgs_school_area(suburb,state,postcode,index=index)["lga_name"], lga)
+        self.assertIsNone(app_module.resolve_asgs_school_area("Unknown", "QLD", index=index))
 
     def test_school_detail_contains_school_area_safety_profile_panel(self):
         app = Path("app.py").read_text(encoding="utf-8")
@@ -34747,7 +34789,7 @@ c.save()
                 db.initialize()
                 app_module.db = db
                 app_module.STANDALONE_CONTRACT_ROOT = root / "standalone"
-                user = {"id": 1, "username": "admin", "role_name": "Admin"}
+                user = authorized_contract_admin_fixture(db)
                 payload = {
                     "contract_title": STUDY_CONTRACT_TITLE,
                     "company_legal_name": "AAIE Group Pty Ltd",
@@ -35368,6 +35410,15 @@ c.save()
                 folder.mkdir(parents=True, exist_ok=True)
                 return folder
 
+            def require_category_access(self, student, category, *, read=False, write=False):
+                return ensure_within(self.category_folder(student, category), self.student_folder(student))
+
+            def require_student_file_readable(self, student, source):
+                target = ensure_within(source, self.student_folder(student))
+                if not target.is_file():
+                    raise NasSafetyError("Synthetic source file unavailable")
+                return target
+
         try:
             with tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
@@ -35436,7 +35487,7 @@ c.save()
 
                 result = app_module.generate_contract_standard_reset_revision(
                     contract_id,
-                    {"id": 1, "username": "admin", "role_name": "Admin"},
+                    authorized_contract_admin_fixture(db),
                 )
 
                 updated = db.one("SELECT * FROM contracts WHERE id=?", (contract_id,))
@@ -35451,7 +35502,7 @@ c.save()
                 with self.assertRaises(PermissionError):
                     app_module.generate_contract_standard_reset_revision(
                         contract_id,
-                        {"id": 1, "username": "admin", "role_name": "Admin"},
+                        authorized_contract_admin_fixture(db),
                     )
         finally:
             app_module.db = old_db
@@ -36001,17 +36052,15 @@ c.save()
         self.assertIn("https://crm.goabroad.com.au", database)
         self.assertIn("http://192.168.1.190:8780", app + database)
         self.assertIn('args.host = db.setting(CRM_ADMIN_BIND_HOST_SETTING, "0.0.0.0") if args.service == "admin" else "127.0.0.1"', app)
-        self.assertIn("watchdog.py", start_command)
+        self.assertIn("tools/runtime_stack.py start --allow-production-control", start_command)
         self.assertIn('"host": "0.0.0.0"', watchdog)
         self.assertIn('"host": "127.0.0.1"', watchdog)
         self.assertIn('"health_url": "http://127.0.0.1:8780/health"', watchdog)
         self.assertIn('"health_url": "http://127.0.0.1:8781/health"', watchdog)
-        self.assertIn('if [[ "$service" == "admin" ]]; then', tunnel_command)
-        self.assertIn('host="0.0.0.0"', tunnel_command)
-        self.assertIn('PARENT_URL="http://127.0.0.1:8781"', tunnel_command)
-        self.assertIn('if [[ "$service" == "admin" ]]; then', restart_tunnel_command)
-        self.assertIn('host="0.0.0.0"', restart_tunnel_command)
-        self.assertIn('PARENT_URL="http://127.0.0.1:8781"', restart_tunnel_command)
+        for command in (tunnel_command, restart_tunnel_command):
+            self.assertIn("此测试副本禁用正式服务、安装、隧道和数据采集操作。", command)
+            self.assertIn("exit 1", command)
+            self.assertNotIn("cloudflared tunnel", command)
 
     def test_system_logs_and_watchdog_are_wired(self):
         app = Path("app.py").read_text(encoding="utf-8")
@@ -36474,7 +36523,9 @@ c.save()
                     "/content?tab=dashboard", "/content?tab=create", "/content?tab=extract",
                     "/content?tab=sync", "/content?tab=tracking", "/content?tab=analysis",
                 ])
-                self.assertEqual(page_body.count('class="metric content-metric"'), 3)
+                self.assertEqual(page_body.count('class="metric content-metric"'), 4)
+                for label in ("内容总数", "可用成稿", "本周新增", "发布追踪中"):
+                    self.assertIn(f"<span>{label}</span>", page_body)
                 self.assertEqual(page_body.count('method="get" action="/content"'), 1)
                 filter_form = page_body.split('class="content-library-filter content-centre-filters"', 1)[1].split("</form>", 1)[0]
                 field_names = re.findall(r'<(?:input|select)[^>]*\bname="([^"]+)"', filter_form)
@@ -37034,12 +37085,12 @@ c.save()
         )
         self.assertNotIn("sync_google_drive_video_folder(self.user)", sync_handlers)
         self.assertIn("def content_google_drive_confirm", sync_handlers)
+        # Pinned public code at 15b02dc; historical adjustment notes are not source.
         protected_files = {
-            "assets/app.js": "e198d3684a1b70e3fee643dd8098509c7cf1961ce219f90ad513cd4e5e207f56",
-            "assets/style.css": "bf27a6d4fba9112bb9134302afc8543432c89765d41aad2993419458a5cb39ba",
-            "database.py": "6a41edcdb6f2ee37b00e92b75a882ef0f266ef87fb65410ea228bb5f378306e8",
-            "nas.py": "650b1df2a600c877371ae3ae939c716f6dbe830e83f3f90bd38fb79bb465356f",
-            "adjustment.md": "73d0a4ef74b9ac2a05fbd1afa55e0e9972a3885e114c73be90a2c72be4df46c4",
+            "assets/app.js": "a0ac7001576bb5cf603e314751d86c342b672861b7c91c3a389125a91395bd47",
+            "assets/style.css": "fb503ac501b6c63d78bbac270da1694989ea77528a6612d29e83f06c5ae4b4c2",
+            "database.py": "8ebbf3803046b8a716684c37a8eb4069b07722319d5729aed3cbfa654cf783f8",
+            "nas.py": "ec3ac44a4987dde13bcc94d8bda6a2ebc33f0fbaa1f206f4ea6fd5de890c93ca",
         }
         for path, expected in protected_files.items():
             self.assertEqual(hashlib.sha256(Path(path).read_bytes()).hexdigest(), expected)
@@ -37911,13 +37962,15 @@ c.save()
                 "urlopen",
                 side_effect=AssertionError("real Google Drive access blocked"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "synthetic sync audit failure"):
-                    handler.content_sync_google_drive_video("POST")
-            self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM content_topics")["count"], 1)
-            self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM content_scripts")["count"], 1)
-            self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM content_script_versions")["count"], 1)
-            self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM content_materials")["count"], 1)
-            self.assertTrue(env["db"].setting("content_google_drive_video_last_sync_at", ""))
+                # The retired direct-sync route must return before any sync/audit.
+                result = handler.content_sync_google_drive_video("POST")
+                self.assertEqual(result[2], "warning")
+                self.assertIn("原直接同步入口已停用", result[1])
+            self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM content_topics")["count"], 0)
+            self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM content_scripts")["count"], 0)
+            self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM content_script_versions")["count"], 0)
+            self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM content_materials")["count"], 0)
+            self.assertFalse(env["db"].setting("content_google_drive_video_last_sync_at", ""))
             self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM audit_logs")["count"], 0)
 
     def test_content_extract_sync_phase2_group_7_static_external_and_business_isolation(self):
@@ -37940,13 +37993,13 @@ c.save()
         self.assertIn("window.setTimeout(poll, 1000)", script)
         self.assertEqual(
             hashlib.sha256(Path("assets/app.js").read_bytes()).hexdigest(),
-            "e198d3684a1b70e3fee643dd8098509c7cf1961ce219f90ad513cd4e5e207f56",
+            "a0ac7001576bb5cf603e314751d86c342b672861b7c91c3a389125a91395bd47",
         )
+        # Pinned public code at 15b02dc; historical adjustment notes are not source.
         protected_files = {
-            "assets/style.css": "bf27a6d4fba9112bb9134302afc8543432c89765d41aad2993419458a5cb39ba",
-            "database.py": "6a41edcdb6f2ee37b00e92b75a882ef0f266ef87fb65410ea228bb5f378306e8",
-            "nas.py": "650b1df2a600c877371ae3ae939c716f6dbe830e83f3f90bd38fb79bb465356f",
-            "adjustment.md": "73d0a4ef74b9ac2a05fbd1afa55e0e9972a3885e114c73be90a2c72be4df46c4",
+            "assets/style.css": "fb503ac501b6c63d78bbac270da1694989ea77528a6612d29e83f06c5ae4b4c2",
+            "database.py": "8ebbf3803046b8a716684c37a8eb4069b07722319d5729aed3cbfa654cf783f8",
+            "nas.py": "ec3ac44a4987dde13bcc94d8bda6a2ebc33f0fbaa1f206f4ea6fd5de890c93ca",
         }
         for path, expected in protected_files.items():
             self.assertEqual(hashlib.sha256(Path(path).read_bytes()).hexdigest(), expected)
@@ -40255,9 +40308,14 @@ c.save()
                 outside.write_bytes(b"outside")
                 escaped = folder / metadata["files"][1]["blob"]
                 escaped.unlink()
-                escaped.symlink_to(outside)
-                with self.assertRaises(NasSafetyError):
-                    app_module.upload_from_review(folder, metadata["files"][1])
+                if app_module.STAGING:
+                    from staging_environment import IsolationError
+                    with self.assertRaisesRegex(IsolationError, "Symlink creation rejected"):
+                        escaped.symlink_to(outside)
+                else:
+                    escaped.symlink_to(outside)
+                    with self.assertRaises(NasSafetyError):
+                        app_module.upload_from_review(folder, metadata["files"][1])
             finally:
                 app_module.extraction_review_data = old_extractor
                 app_module.suggested_review_document_type = old_suggested
@@ -40444,16 +40502,37 @@ c.save()
                 env["admin"],
                 {"confirm_item_0": "1", "document_type_0": "Offer", "target_name_0": "Failure School"},
             )
-            original_execute = env["db"].execute
+            original_open = env["db"]._open_connection
+            observed = {"offer_inserted": False}
 
-            def fail_offer(sql, params=()):
-                if "INSERT INTO offers" in sql:
-                    raise sqlite3.OperationalError("isolated business table failure")
-                return original_execute(sql, params)
+            class LateOfferFailureConnection:
+                def __init__(self, connection):
+                    self.connection = connection
 
-            with mock.patch.object(env["db"], "execute", side_effect=fail_offer):
-                with self.assertRaisesRegex(sqlite3.OperationalError, "business table failure"):
-                    handler.upload_review_confirm("POST", env["student_id"], token)
+                def __getattr__(self, name):
+                    return getattr(self.connection, name)
+
+                def execute(self, sql, params=()):
+                    normalized = " ".join(str(sql).lower().split())
+                    if observed["offer_inserted"] and normalized.startswith("pragma table_info") and "offers" in normalized:
+                        raise sqlite3.OperationalError("isolated late statement failure after Offer INSERT")
+                    cursor = self.connection.execute(sql, params)
+                    if normalized.startswith("insert into offers"):
+                        observed["offer_inserted"] = True
+                    return cursor
+
+            def failing_open():
+                return LateOfferFailureConnection(original_open())
+
+            # Keep the real Database.transaction and a live request connection.
+            # Fail after INSERT, then prove rollback before request cleanup can close it.
+            with env["db"].request_scope():
+                with mock.patch.object(env["db"], "_open_connection", side_effect=failing_open):
+                    with self.assertRaisesRegex(sqlite3.OperationalError, "late statement failure after Offer INSERT"):
+                        handler.upload_review_confirm("POST", env["student_id"], token)
+                    self.assertTrue(observed["offer_inserted"])
+                    self.assertFalse(env["db"].connect().in_transaction)
+                    self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM offers")["count"], 0)
             self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM student_documents")["count"], 1)
             self.assertEqual(env["db"].one("SELECT status FROM upload_review_items")["status"], "Confirmed")
             self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM offers")["count"], 0)
@@ -40629,7 +40708,7 @@ c.save()
             self.assertNotIn("expiry", inspect.getsource(app_module.load_upload_review).lower())
 
     def test_generic_upload_review_isolation_guard_covers_all_write_capable_roots(self):
-        with tempfile.TemporaryDirectory(dir="tmp") as folder:
+        with tempfile.TemporaryDirectory(dir=Path(app_module.APP_DIR) / "tmp") as folder:
             root = Path(folder).resolve()
             paths = {
                 "database_path": root / "database" / "preview.db",
@@ -40653,11 +40732,19 @@ c.save()
                 self.assertIn(str(root), path)
 
     def test_generic_upload_review_isolation_guard_rejects_symlink_escape(self):
-        with tempfile.TemporaryDirectory(dir="tmp") as folder:
+        with tempfile.TemporaryDirectory(dir=Path(app_module.APP_DIR) / "tmp") as folder:
             root = Path(folder).resolve()
             outside = root.parent / f"{root.name}-outside"
             outside.mkdir()
             escaped_staging = root / "escaped-staging"
+            if app_module.STAGING:
+                from staging_environment import IsolationError
+                try:
+                    with self.assertRaisesRegex(IsolationError, "Symlink creation rejected"):
+                        escaped_staging.symlink_to(outside, target_is_directory=True)
+                finally:
+                    outside.rmdir()
+                return
             escaped_staging.symlink_to(outside, target_is_directory=True)
             paths = {
                 "database_path": root / "database" / "preview.db",
@@ -42340,13 +42427,13 @@ c.save()
         routes = source[routes_start:source.index("            for pattern", routes_start)]
         self.assertIn(r'r"^/content/topics/(\d+)$"', routes)
         self.assertIn(r'r"^/content/staging/(\d+)$"', routes)
+        # Pinned public code at 15b02dc; historical adjustment notes are not source.
         protected_files = {
-            "assets/app.js": "f80fbf21e62f95d15f9a4bdf0def094f2d1f530bb8ea80a05de751dbc2ec1ca4",
-            "assets/style.css": "9fc557e471c5b7fd1cc02d64e804d3f087eb9b27f37d2c406a616f217065912e",
-            "database.py": "2c67bada74011d366cbe675d20aa081aa5d29c6329bcaffc7870efb8b0823690",
-            "nas.py": "1723d94039e447a9b50a0de52e2a024fd36e8ba351970fe7a40ba60bf5616860",
-            "ui.py": "448597593921565c04cc17765c93bb3b8cca174683b3f7efcd754c23ef9b9bee",
-            "adjustment.md": "64e7259bc3ed990f5231d389303f5dbc6f6f3cdc599ce3eefb42a702b9c29119",
+            "assets/app.js": "a0ac7001576bb5cf603e314751d86c342b672861b7c91c3a389125a91395bd47",
+            "assets/style.css": "fb503ac501b6c63d78bbac270da1694989ea77528a6612d29e83f06c5ae4b4c2",
+            "database.py": "8ebbf3803046b8a716684c37a8eb4069b07722319d5729aed3cbfa654cf783f8",
+            "nas.py": "ec3ac44a4987dde13bcc94d8bda6a2ebc33f0fbaa1f206f4ea6fd5de890c93ca",
+            "ui.py": "b0a73424e799334690d86edba761648ba6f514c7123c804534a4c6ba0cc02052",
         }
         for path, expected in protected_files.items():
             self.assertEqual(hashlib.sha256(Path(path).read_bytes()).hexdigest(), expected)
@@ -43109,13 +43196,13 @@ c.save()
         routes = source[routes_start:source.index("            for pattern", routes_start)]
         self.assertIn(r'r"^/content/duplicates/([^/]+)$"', routes)
         self.assertIn(r'r"^/content/scripts/(\d+)$"', routes)
+        # Pinned public code at 15b02dc; historical adjustment notes are not source.
         protected_files = {
-            "assets/app.js": "f80fbf21e62f95d15f9a4bdf0def094f2d1f530bb8ea80a05de751dbc2ec1ca4",
-            "assets/style.css": "9fc557e471c5b7fd1cc02d64e804d3f087eb9b27f37d2c406a616f217065912e",
-            "database.py": "2c67bada74011d366cbe675d20aa081aa5d29c6329bcaffc7870efb8b0823690",
-            "nas.py": "1723d94039e447a9b50a0de52e2a024fd36e8ba351970fe7a40ba60bf5616860",
-            "ui.py": "448597593921565c04cc17765c93bb3b8cca174683b3f7efcd754c23ef9b9bee",
-            "adjustment.md": "64e7259bc3ed990f5231d389303f5dbc6f6f3cdc599ce3eefb42a702b9c29119",
+            "assets/app.js": "a0ac7001576bb5cf603e314751d86c342b672861b7c91c3a389125a91395bd47",
+            "assets/style.css": "fb503ac501b6c63d78bbac270da1694989ea77528a6612d29e83f06c5ae4b4c2",
+            "database.py": "8ebbf3803046b8a716684c37a8eb4069b07722319d5729aed3cbfa654cf783f8",
+            "nas.py": "ec3ac44a4987dde13bcc94d8bda6a2ebc33f0fbaa1f206f4ea6fd5de890c93ca",
+            "ui.py": "b0a73424e799334690d86edba761648ba6f514c7123c804534a4c6ba0cc02052",
         }
         for path, expected in protected_files.items():
             self.assertEqual(

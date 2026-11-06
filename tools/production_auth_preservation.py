@@ -14,10 +14,12 @@ EXTRA_TABLES=VISA_037_038_EXTRA_TABLES|VISA_039_EXTRA_TABLES
 AUTH_TABLES=frozenset(('users','sessions','audit_logs'))
 EXCLUDED=frozenset(('schema_migrations','sqlite_sequence'))
 LOGIN_COLUMNS=frozenset(('last_login_at','last_login_ip'))
+CRM_WORKSPACE=Path("/Volumes/Data/AAIE_CRM")
 
 def _quote(s):return '"'+s.replace('"','""')+'"'
 def _path(value):
  p=Path(value).absolute()
+ if ".." in p.parts:raise ValueError("path_traversal")
  if any(x.is_symlink() for x in (p,*p.parents)):raise ValueError('symlink_path')
  return p
 
@@ -99,8 +101,17 @@ def validate_auth_delta(backup,current,*,expected_extra_tables=None):
  with closing(_read(backup)) as b,closing(_read(current,live=True)) as c:return _validate(b,c,expected_extra_tables or {})[0]
 
 def prepare_auth_preserving_restore(backup,current,destination,*,expected_extra_tables=None):
- destination=_path(destination);root=Path('/Volumes/Zhang/AAIE CodeX/CRM')
- if not destination.is_relative_to(root) or destination in (_path(backup),_path(current)):raise ValueError('destination_outside_fresh_workspace')
+ raw=Path(destination).absolute();root=CRM_WORKSPACE
+ # Compare components without case: the deployment volume accepts case aliases.
+ # Decide lexical authority before any input read or output path inspection.
+ parts=tuple(part.casefold() for part in raw.parts)
+ root_parts=tuple(part.casefold() for part in root.parts)
+ relative=parts[len(root_parts):]
+ if (".." in raw.parts or parts[:len(root_parts)]!=root_parts
+     or relative[:1]==('main',) or relative[:2]==('runtime','production')):
+  raise ValueError('destination_outside_fresh_workspace')
+ destination=_path(raw)
+ if destination in (_path(backup),_path(current)):raise ValueError('destination_outside_fresh_workspace')
  if destination.exists():raise FileExistsError(destination)
  with closing(_read(backup)) as b,closing(_read(current)) as c:
   receipt,sessions,users,audits=_validate(b,c,expected_extra_tables or {})

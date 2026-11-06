@@ -33,9 +33,9 @@ class TransferStagingApplicationHookTests(unittest.TestCase):
             'raise RuntimeError("Staging must be started through tools/staging_control.py")',
             "APP_DIR = STAGING.root if STAGING else Path(__file__).resolve().parent",
             "DB_PATH = STAGING.db if STAGING else APP_DIR / \"database\" / \"aaie_crm.db\"",
-            "value = STAGING.scoped_set_cookie(value)",
-            'self.headers["Cookie"] = STAGING.unscoped_cookie_header(',
-            '"environment": "staging"',
+            "value = STAGING.namespace + value",
+            'self.headers["Cookie"] = scoped.output(',
+            'getattr(STAGING, "mode", "staging")',
             '"storage_path": str(STAGING.storage)',
         )
         for expression in required:

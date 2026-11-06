@@ -7,7 +7,7 @@ import subprocess
 import time
 import urllib.request
 
-from staging_environment import SOURCE, IsolationError
+from staging_environment import SOURCE, IsolationError, TEST_CONTENT_EXTRACTION_PORT
 
 PYTHON = '/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3'
 SCRIPT = SOURCE/'school_map_tiles.py'
@@ -15,7 +15,7 @@ SCRIPT = SOURCE/'school_map_tiles.py'
 
 def port(c):
     value = c.admin_port + 13
-    if value > 65535 or value in {c.parent_port, 8780, 8781, 8790, 8792}:
+    if value > 65535 or value in {c.parent_port, 8780, 8781, 8790, 8792, TEST_CONTENT_EXTRACTION_PORT}:
         raise IsolationError('Map helper port collision')
     return value
 

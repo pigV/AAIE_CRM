@@ -595,11 +595,14 @@ class BetterEducationAutoFetchTests(unittest.TestCase):
             finally:
                 app_module.db = old_db
 
-    def test_bettereducation_terminal_runner_command_invokes_pending_runner(self):
+    def test_development_launcher_keeps_collection_disabled_and_cli_explicit(self):
         command = Path("运行BetterEducation自动抓取.command").read_text(encoding="utf-8")
-        self.assertIn("--bettereducation-run-pending", command)
-        self.assertIn("staging", command.lower())
-        self.assertIn("does not auto-sync", command)
+        self.assertIn("禁用", command)
+        self.assertIn("exit 1", command)
+        self.assertNotIn("--bettereducation-run-pending", command)
+        # The explicit application CLI remains available; development launchers
+        # must not start production data collection or synchronize implicitly.
+        self.assertIn("--bettereducation-run-pending", Path("app.py").read_text(encoding="utf-8"))
 
     def test_school_detail_source_notice_explains_bettereducation_is_third_party(self):
         source = Path("app.py").read_text(encoding="utf-8")

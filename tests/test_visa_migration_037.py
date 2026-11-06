@@ -64,10 +64,10 @@ class VisaMigration037Tests(unittest.TestCase):
         import migration_runner as runner
         migrations=runner.discover_migrations(ROOT/'migrations')
         versions=[m.version for m in migrations]
-        self.assertEqual(versions[-4:], ['20260908_036','20260909_037','20260909_038','20260914_039'])
+        self.assertEqual(versions[versions.index('20260908_036'):versions.index('20260908_036')+4], ['20260908_036','20260909_037','20260909_038','20260914_039'])
         self.assertEqual(len(versions),len(set(versions)))
         baseline=[m for m in migrations if m.version <= '20260908_036']
-        self.assertEqual([m.version for m in migrations[len(baseline):]], ['20260909_037','20260909_038','20260914_039'])
+        self.assertEqual([m.version for m in migrations[len(baseline):len(baseline)+3]], ['20260909_037','20260909_038','20260914_039'])
         runner._validate_applied_state(migrations,baseline)
         runner._validate_applied_state(migrations,migrations)
         # Omitting already-applied036 or required037 remains a real prefix error.

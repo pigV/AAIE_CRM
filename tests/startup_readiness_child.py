@@ -12,7 +12,16 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import app
+# This listener fixture has no production credentials. Its child process must
+# load an explicitly owned empty environment rather than the canonical live root.
+import functools
+import tempfile
+import production_environment
+with tempfile.TemporaryDirectory(prefix="startup-probe-environment-") as environment_root:
+    loader = functools.partial(production_environment.load_canonical_production_environment,
+                               root=Path(environment_root))
+    with mock.patch.object(production_environment, "load_canonical_production_environment", loader):
+        import app
 
 
 REMINDER_STARTED = threading.Event()

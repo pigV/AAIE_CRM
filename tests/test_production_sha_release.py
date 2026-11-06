@@ -319,7 +319,8 @@ class ProductionShaReleaseTests(unittest.TestCase):
                 ["/bin/zsh", str(shared), service], check=False,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr + "\n" +
+                             (self.admin.logs_dir(self.home) / f"{service}.launcher.log").read_text())
 
         single_manifest = self.release.prepare_release(
             source_root=ROOT,
@@ -532,8 +533,8 @@ class ProductionShaReleaseTests(unittest.TestCase):
                 ["/bin/zsh", str(extraction_launcher)], check=False,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
-            self.assertEqual(admin_result.returncode, 0, admin_result.stderr)
-            self.assertEqual(extraction_result.returncode, 0, extraction_result.stderr)
+            self.assertEqual(admin_result.returncode, 0, admin_result.stderr + "\n" + admin_log.read_text())
+            self.assertEqual(extraction_result.returncode, 0, extraction_result.stderr + "\n" + extraction_log.read_text())
             self.assertIn(f"exec_approved head={allowed}", admin_log.read_text())
             self.assertIn(f"exec_approved head={allowed}", extraction_log.read_text())
 

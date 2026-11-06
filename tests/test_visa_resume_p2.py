@@ -96,19 +96,24 @@ class VisaMetadataTests(unittest.TestCase):
         self.assertEqual(self.h.visa_update('POST','S1',3),409)
 
 class LifecycleFailureTests(unittest.TestCase):
-    def test_actual_failure_block_preserves_unavailable_panel_and_safe_type(self):
+    def test_actual_failure_block_closes_connection_and_disables_lifecycle_operations(self):
         method=next(n for n in source().body if isinstance(n,ast.FunctionDef) and n.name=='student_detail')
         def assignment(node,name):return isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id==name for t in node.targets)
-        start=next(i for i,n in enumerate(method.body) if assignment(n,'workflow_module_statuses_override'))
+        start=next(i for i,n in enumerate(method.body) if assignment(n,'lifecycle_view'))
         end=next(i for i,n in enumerate(method.body) if assignment(n,'experience_connection'))
-        overview=next(n.value for n in method.body if assignment(n,'workflow_overview'))
-        expression=next(k.value for k in overview.keywords if k.arg=='lifecycle_type')
-        body=method.body[start:end]+[ast.Return(ast.Tuple(elts=[ast.Name(id='lifecycle_sections',ctx=ast.Load()),expression],ctx=ast.Load()))]
+        body=method.body[start:end]+[ast.Return(ast.Tuple(elts=[ast.Name(id='lifecycle_view',ctx=ast.Load()),ast.Name(id='workflow_module_management',ctx=ast.Load())],ctx=ast.Load()))]
         fn=ast.FunctionDef(name='exercise',args=ast.arguments(posonlyargs=[],args=[],kwonlyargs=[],kw_defaults=[],defaults=[]),body=body,decorator_list=[])
-        released=[]
+        released=[];events=[]
         def fail(*a,**k):raise RuntimeError('synthetic lifecycle load failure')
-        ns={'db':SimpleNamespace(connect=lambda:object(),_release_connection=lambda c:released.append(c)),'load_student_lifecycle_view':fail,'append_service_log':lambda *a,**k:None,'student_id':'S1','workflow_projection_map':None}
+        ns={'db':SimpleNamespace(connect=lambda:object(),_release_connection=lambda c:released.append(c)),'load_student_lifecycle_view':fail,'append_service_log':lambda *a,**k:events.append(a),'student_id':'S1','workflow_projection_map':None}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[fn],type_ignores=[])),'app.py','exec'),ns)
-        panel,kind=ns['exercise']();self.assertIn('temporarily unavailable',panel);self.assertIsNone(kind);self.assertEqual(len(released),1)
+        view,management=ns['exercise']()
+        self.assertIsNone(view);self.assertIsNone(management);self.assertEqual(len(released),1)
+        self.assertEqual(events[0][1], 'student_lifecycle_view_failed')
+        tree=ast.parse((ROOT/'app.py').read_text())
+        render=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='student_detail_business_operations_html')
+        namespace={}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[render],type_ignores=[])),'app.py','exec'),namespace)
+        self.assertEqual(namespace[render.name](view, None, management=management, can_edit_profile=True), '')
 
 if __name__=='__main__':unittest.main()

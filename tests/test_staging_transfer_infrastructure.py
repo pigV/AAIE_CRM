@@ -1,478 +1,341 @@
+"""Managed-runtime replacement for the retired Transfer staging entry contract.
+
+Only synthetic configuration, SQLite files, and mocked child processes are used.
+The current controller owns configuration/migration admission, identity and cleanup.
+"""
 import ast
-import json
+from contextlib import ExitStack, nullcontext
+import hashlib
 import io
-import tempfile
-import unittest
+import json
 from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
-from unittest.mock import patch
-from unittest.mock import Mock
+import unittest
+from unittest.mock import MagicMock, Mock, patch
 
-from staging_environment import IsolationError, SOURCE, Staging
-from tools import staging_control
-from tools.staging_entry import runtime_migration_preflight, validate_runtime_argv
-from tools.staging_fixture import validated_source_commit, validate_migration_registry
-
-
-def load_parent_form_base_url(*, staging, setting):
-    source = (SOURCE / "app.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "parent_form_base_url"
-    )
-    namespace = {
-        "STAGING": staging,
-        "PARENT_FORM_BASE_SETTING": "PARENT_FORM_PUBLIC_BASE_URL",
-        "db": SimpleNamespace(setting=setting),
-    }
-    exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE / "app.py"), "exec"), namespace)
-    return namespace["parent_form_base_url"]
+import migration_runner
+from staging_environment import ManagedRuntime
+from tools import runtime_control as control
+from tests import test_runtime_configuration as configuration_fixture
 
 
-class TransferStagingConfigurationTests(unittest.TestCase):
-    def config(self, **updates):
-        value = staging_control.default_config()
-        value.update(updates)
+class ManagedTransferInfrastructureTests(unittest.TestCase):
+    setUp = configuration_fixture.RuntimeConfigurationTests.setUp
+    write = configuration_fixture.RuntimeConfigurationTests.write
+    load = configuration_fixture.RuntimeConfigurationTests.load
+
+    def adapter(self):
+        return ManagedRuntime.from_configuration(self.load())
+
+    def record(self, cfg, **changes):
+        value = dict(pid=123456, started="synthetic-birth", role="admin",
+                     data_root=str(cfg.root), config_sha256=cfg.config_sha256)
+        value.update(changes)
         return value
 
-    def load(self, value):
-        data = SOURCE / "STAGING_DATA"
-        data.mkdir(exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", suffix=".json", dir=data
-        ) as handle:
-            json.dump(value, handle)
-            handle.flush()
-            return Staging.load(handle.name)
+    def test_configuration_separates_transfer_runtime_from_code(self):
+        cfg = self.load()
+        self.assertEqual(cfg.root, self.source.parent / "runtime/staging/unit")
+        self.assertFalse(cfg.db.exists())
+        self.assertNotEqual(cfg.root, cfg.source_root)
 
-    def test_default_configuration_uses_transfer_preacceptance_identity(self):
-        staging = self.load(self.config())
+    def test_retired_phase_and_candidate_fields_are_not_silently_accepted(self):
+        for field in ("phase", "candidate_sha", "review_manifest"):
+            with self.subTest(field=field):
+                value = self.value.copy()
+                self.value[field] = "legacy-value"
+                self.write()
+                with self.assertRaises(self.Error):
+                    self.load()
+                self.value = value
 
-        self.assertEqual((staging.admin_port, staging.parent_port), (8890, 8891))
-        self.assertEqual(staging.namespace, "aaie_transfer_staging_")
-        self.assertEqual(staging.root, SOURCE / "STAGING_DATA")
-        self.assertEqual(staging.bind_host, "0.0.0.0")
-        self.assertEqual(staging.phase, "preacceptance")
+    def test_production_paths_and_ports_are_rejected(self):
+        original = self.value.copy()
+        for change in ({"root": str(self.source.parent / "runtime/production")},
+                       {"admin_port": 8780}, {"parent_port": 8781},
+                       {"extraction_port": 8792}):
+            with self.subTest(change=change):
+                self.value = original | change
+                self.write()
+                with self.assertRaises(self.Error):
+                    self.load()
 
-    def test_reviewed_cutover_ports_are_supported_without_changing_namespace(self):
-        staging = self.load(
-            self.config(
-                phase="uat",
-                admin_port=8880,
-                parent_port=8881,
-                candidate_sha="a" * 40,
-                review_manifest="reviewed-candidate.json",
-                review_manifest_sha256="b" * 64,
-            )
-        )
+    def test_generic_and_production_namespaces_are_rejected(self):
+        for namespace in ("aaie_session", "aaie_staging_", "aaie_production_"):
+            with self.subTest(namespace=namespace):
+                self.value["namespace"] = namespace
+                self.write()
+                with self.assertRaises(self.Error):
+                    self.load()
 
-        self.assertEqual((staging.admin_port, staging.parent_port), (8880, 8881))
-        self.assertEqual(staging.namespace, "aaie_transfer_staging_")
-        self.assertEqual(staging.phase, "uat")
+    def test_service_argv_uses_current_server_and_exact_config(self):
+        cfg = self.load()
+        for role in ("admin", "parent"):
+            command = control.process_command(cfg, role)
+            self.assertEqual(command[-5:], [str(cfg.source_root / "tools/runtime_server.py"),
+                                           "--config", str(cfg.path), "--service", role])
+            self.assertNotIn("staging_entry.py", " ".join(command))
 
-    def test_staging_parent_links_use_isolated_parent_port_without_database_fallback(self):
-        setting = Mock(side_effect=AssertionError("Staging must not read a persisted Production parent URL"))
-        base_url = load_parent_form_base_url(
-            staging=SimpleNamespace(parent_port=8881),
-            setting=setting,
-        )
-
-        self.assertEqual("http://127.0.0.1:8881", base_url())
-        setting.assert_not_called()
-
-    def test_non_staging_parent_links_keep_persisted_public_base_authority(self):
-        setting = Mock(return_value="https://form.example.test/")
-        base_url = load_parent_form_base_url(staging=None, setting=setting)
-
-        self.assertEqual("https://form.example.test", base_url())
-        setting.assert_called_once_with(
-            "PARENT_FORM_PUBLIC_BASE_URL", "http://127.0.0.1:8781"
-        )
-
-        for missing in (None, ""):
-            with self.subTest(missing=missing):
-                fallback = load_parent_form_base_url(
-                    staging=None, setting=Mock(return_value=missing)
-                )
-                self.assertEqual("http://127.0.0.1:8781", fallback())
-
-    def test_production_ports_paths_and_generic_cookie_namespace_fail_closed(self):
-        invalid = (
-            {"admin_port": 8780},
-            {"parent_port": 8781},
-            {"root": "/Volumes/Zhang/AAIE CodeX/CRM/database"},
-            {"root": "/Volumes/Server/Students/CRM_TEST"},
-            {"namespace": "aaie_staging_"},
-            {"namespace": "aaie_session"},
-        )
-        for update in invalid:
-            with self.subTest(update=update), self.assertRaises(IsolationError):
-                self.load(self.config(**update))
-
-    def test_unknown_fields_and_unsafe_bind_hosts_fail_closed(self):
-        for update in (
-            {"bind_host": "192.168.1.20"},
-            {"bind_host": "*"},
-            {"admin_port": "8890"},
-            {"unexpected": "value"},
-        ):
-            with self.subTest(update=update), self.assertRaises(IsolationError):
-                self.load(self.config(**update))
-
-    def test_configuration_file_must_also_be_inside_staging_data(self):
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", suffix=".json", dir=SOURCE / "tests"
-        ) as handle:
-            json.dump(self.config(), handle)
-            handle.flush()
-            with self.assertRaisesRegex(IsolationError, "configuration must be inside"):
-                Staging.load(handle.name)
-
-    def test_all_runtime_write_locations_are_inside_staging_data(self):
-        staging = self.load(self.config())
-        env = staging_control.environment(staging)
-        path_keys = (
-            "HOME",
-            "TMPDIR",
-            "TMP",
-            "TEMP",
-            "AAIE_CRM_BACKUP_DIR",
-            "AAIE_CRM_SCHOOL_LIBRARY_DIR",
-            "AAIE_CRM_SECURE_ASSET_DIR",
-            "AAIE_CRM_CONTENT_REPORT_DIR",
-            "REVENUE_SECURE_STORAGE_ROOT",
-            "XDG_CACHE_HOME",
-            "HF_HOME",
-        )
-
-        for key in path_keys:
+    def test_environment_writes_remain_in_owned_data_root(self):
+        cfg = self.load()
+        env = control.environment(cfg, include_wechat=False)
+        for key in ("HOME", "TMPDIR", "TMP", "TEMP", "AAIE_CRM_BACKUP_DIR",
+                    "AAIE_CRM_SCHOOL_LIBRARY_DIR", "AAIE_CRM_SECURE_ASSET_DIR",
+                    "AAIE_CRM_CONTENT_REPORT_DIR", "REVENUE_SECURE_STORAGE_ROOT",
+                    "XDG_CACHE_HOME", "HF_HOME"):
             with self.subTest(key=key):
-                self.assertTrue(Path(env[key]).is_relative_to(staging.root))
-        self.assertNotIn("DATABASE_URL", env)
+                self.assertTrue(Path(env[key]).is_relative_to(cfg.root))
+        self.assertEqual(env["AAIE_CRM_RUNTIME_CONFIG"], str(cfg.path))
+        self.assertEqual(env["AAIE_CRM_CONTENT_EXTRACTION_SERVICE_URL"],
+                         "http://127.0.0.1:" + str(cfg.extraction_port))
+
+    def test_shell_credentials_are_not_inherited(self):
+        with patch.dict(control.os.environ, {"GOOGLE_CLIENT_SECRET": "synthetic-private",
+                                           "DATABASE_URL": "synthetic-other-db"}):
+            env = control.environment(self.load(), include_wechat=False)
         self.assertNotIn("GOOGLE_CLIENT_SECRET", env)
-        self.assertNotIn("/Volumes/Server", json.dumps(env))
-        self.assertNotIn("/Volumes/Zhang/AAIE CodeX/CRM/database", json.dumps(env))
-        self.assertEqual(env["AAIE_CRM_NAS_DISABLED"], "1")
+        self.assertNotIn("DATABASE_URL", env)
 
-    def test_lan_bind_maps_to_valid_sandbox_wildcard(self):
-        staging = self.load(self.config(bind_host="0.0.0.0"))
+    def test_cookies_keep_exact_runtime_namespace(self):
+        from email.message import Message
+        from http.cookies import SimpleCookie
+        tree = ast.parse((Path(__file__).resolve().parents[1] / "app.py").read_text())
+        owner = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                     and node.name == "CRMLegacyHandler")
+        functions = [node for node in owner.body if isinstance(node, ast.FunctionDef)
+                     and node.name in {"parse_request", "send_header"}]
+        self.assertEqual(len(functions), 2)
+        class HeaderBase:
+            def parse_request(self):
+                return True
+            def send_header(self, key, value):
+                self.sent_headers.append((key, value))
+        shell = ast.ClassDef(name="ScopedHandler", bases=[ast.Name(id="HeaderBase", ctx=ast.Load())],
+                             keywords=[], body=functions, decorator_list=[])
+        namespace = {"HeaderBase": HeaderBase, "SimpleCookie": SimpleCookie,
+                     "STAGING": self.adapter()}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[shell], type_ignores=[])),
+                     "exact-cookie-handler", "exec"), namespace)
+        handler = namespace["ScopedHandler"]()
+        handler.headers = Message()
+        handler.sent_headers = []
+        name = self.value["namespace"] + "aaie_session"
+        handler.headers["Cookie"] = "aaie_session=formal; aaie_staging_other_aaie_session=other; " + name + "=owned"
+        self.assertTrue(handler.parse_request())
+        cookie = SimpleCookie(handler.headers["Cookie"])
+        self.assertEqual(set(cookie), {"aaie_session"})
+        self.assertEqual(cookie["aaie_session"].value, "owned")
+        handler.send_header("Set-Cookie", "aaie_session=owned; HttpOnly")
+        self.assertEqual(handler.sent_headers, [("Set-Cookie", name + "=owned; HttpOnly")])
 
-        profile = staging_control.sandbox_profile(staging)
+    def test_missing_resource_admission_does_not_initialize_or_migrate(self):
+        cfg = self.load()
+        before = sorted(str(path) for path in self.base.rglob("*"))
+        result = self.preflight(cfg)
+        self.assertIn("database_missing", result["errors"])
+        self.assertFalse(result["database_initialized"])
+        self.assertFalse(result["migrations_applied"])
+        self.assertEqual(before, sorted(str(path) for path in self.base.rglob("*")))
 
-        self.assertIn('(local ip "*:8890")', profile)
-        self.assertIn('(local ip "*:8891")', profile)
-        self.assertNotIn('(local ip "0.0.0.0:', profile)
-        self.assertIn('(deny file-read* (subpath "/Volumes/Server"))', profile)
-        self.assertIn(
-            '(deny file-read* (subpath "/Volumes/Zhang/AAIE CodeX/CRM/database"))',
-            profile,
-        )
+    def database_preflight(self, **verify_options):
+        cfg = self.load()
+        cfg.db.parent.mkdir()
+        with sqlite3.connect(cfg.db) as conn:
+            conn.execute("CREATE TABLE synthetic(id INTEGER PRIMARY KEY)")
+        before = hashlib.sha256(cfg.db.read_bytes()).hexdigest()
+        with patch.object(migration_runner, "verify_migrations", **verify_options):
+            result = self.preflight(cfg)
+        self.assertEqual(before, hashlib.sha256(cfg.db.read_bytes()).hexdigest())
+        return result
 
-    def test_controller_uses_entry_for_app_and_direct_guarded_fixture_target(self):
-        staging = self.load(self.config())
+    def test_pending_migrations_block_admission_without_writes(self):
+        result = self.database_preflight(return_value={"pending": [{"version": "synthetic"}],
+                              "verified": [], "foreign_key_violations": []})
+        self.assertIn("database_migrations_pending", result["errors"])
+        self.assertFalse(result["ready"])
 
-        app_command = staging_control.command(staging, "--init-only")
-        fixture_command = staging_control.sandbox_command(
-            staging, SOURCE / "tools/staging_fixture.py"
-        )
+    def test_unknown_or_drifted_registry_blocks_admission_without_writes(self):
+        result = self.database_preflight(side_effect=migration_runner.MigrationError("synthetic registry mismatch"))
+        self.assertIn("database_verification_failed:MigrationError", result["errors"])
+        self.assertFalse(result["ready"])
 
-        self.assertEqual(
-            app_command[-2:], [str(SOURCE / "tools/staging_entry.py"), "--init-only"]
-        )
-        self.assertEqual(fixture_command[-1], str(SOURCE / "tools/staging_fixture.py"))
-        self.assertNotIn(str(SOURCE / "tools/staging_entry.py"), fixture_command)
-
-    def test_cookie_helpers_accept_only_this_task_namespace(self):
-        staging = self.load(self.config())
-        header = (
-            "aaie_session=production; aaie_staging_aaie_session=other; "
-            "aaie_transfer_staging_aaie_session=transfer-token"
-        )
-
-        self.assertEqual(
-            staging.unscoped_cookie_header(header), "aaie_session=transfer-token"
-        )
-        self.assertTrue(
-            staging.scoped_set_cookie("aaie_session=abc; Path=/; HttpOnly").startswith(
-                "aaie_transfer_staging_aaie_session=abc"
-            )
-        )
-
-    def test_entrypoint_rejects_wrong_port_or_service(self):
-        staging = self.load(self.config())
-
-        self.assertEqual(
-            validate_runtime_argv(
-                staging,
-                ["--host", "0.0.0.0", "--port", "8890", "--service", "admin"],
-            ),
-            "admin",
-        )
-        for argv in (
-            ["--host", "0.0.0.0", "--port", "8880", "--service", "admin"],
-            ["--host", "0.0.0.0", "--port", "8890", "--service", "parent"],
-            ["--host", "127.0.0.1", "--port", "8890", "--service", "admin"],
-        ):
-            with self.subTest(argv=argv), self.assertRaises(IsolationError):
-                validate_runtime_argv(staging, argv)
-
-    def test_entrypoint_rejects_unknown_and_repeated_arguments(self):
-        staging = self.load(self.config())
-        base = ["--host", "0.0.0.0", "--port", "8890", "--service", "admin"]
-        additions = (
-            ["--debug"],
-            ["--config", "/tmp/config"],
-            ["app.py"],
-            ["--port", "8890"],
-            ["--service", "admin"],
-            ["--host", "0.0.0.0"],
-        )
-        for extra in additions:
-            with self.subTest(extra=extra), self.assertRaises(IsolationError):
-                validate_runtime_argv(staging, base + extra)
-
-    def test_entrypoint_accepts_only_bare_init_mode(self):
-        staging = self.load(self.config())
-
-        self.assertEqual(validate_runtime_argv(staging, ["--init-only"]), "init")
-        with self.assertRaises(IsolationError):
-            validate_runtime_argv(
-                staging,
-                ["--init-only", "--port", "8890", "--service", "admin"],
-            )
-
-    def test_runtime_preflight_requires_completed_migration_receipt(self):
-        staging = self.load(
-            self.config(
-                phase="uat",
-                admin_port=8880,
-                parent_port=8881,
-                candidate_sha="a" * 40,
-                review_manifest="reviewed-candidate.json",
-                review_manifest_sha256="b" * 64,
-            )
-        )
-        with self.assertRaisesRegex(IsolationError, "receipt is missing"):
-            runtime_migration_preflight(staging)
-
-    def test_migration_registry_rejects_versions_absent_from_source(self):
-        self.assertEqual(
-            validate_migration_registry({"001", "002"}, {"001", "002", "003"}),
-            ("001", "002"),
-        )
-        with self.assertRaisesRegex(IsolationError, "exceeds this source authority"):
-            validate_migration_registry({"001", "999"}, {"001", "002"})
-
-    def test_migration_source_commit_is_explicit_and_exact(self):
-        sha = "a" * 40
-        self.assertEqual(validated_source_commit(sha), sha)
-        for value in ("", "abc", "g" * 40, "a" * 39, "a" * 41):
-            with self.subTest(value=value), self.assertRaises(IsolationError):
-                validated_source_commit(value)
-
-    def test_reviewed_cutover_config_is_explicit_and_candidate_bound(self):
-        staging = self.load(self.config())
-        lock = SimpleNamespace(candidate_sha="a" * 40, manifest_sha256="b" * 64)
-
-        value = staging_control.reviewed_cutover_config(
-            staging, lock, SOURCE / "STAGING_DATA/reviewed-candidate.json"
-        )
-
-        self.assertEqual(value["phase"], "uat")
-        self.assertEqual((value["admin_port"], value["parent_port"]), (8880, 8881))
-        self.assertEqual(value["candidate_sha"], "a" * 40)
-        self.assertEqual(value["review_manifest_sha256"], "b" * 64)
-        self.assertEqual(value["namespace"], "aaie_transfer_staging_")
-
-    def test_start_refuses_preacceptance_configuration_before_process_launch(self):
-        staging = self.load(self.config())
-        with patch("tools.staging_control.subprocess.Popen") as popen:
-            with self.assertRaisesRegex(IsolationError, "reviewed UAT cutover"):
-                staging_control.start(staging)
+    def test_changed_configuration_blocks_start_before_process_creation(self):
+        cfg = self.load()
+        self.value["parent_port"] += 100
+        self.write()
+        with patch.object(control.subprocess, "Popen") as popen:
+            with self.assertRaises(self.Error):
+                control.start(cfg)
         popen.assert_not_called()
 
-    def test_runtime_lock_rejects_profile_not_bound_to_reviewed_cutover(self):
-        staging = self.load(
-            self.config(
-                phase="uat",
-                admin_port=8880,
-                parent_port=8881,
-                candidate_sha="a" * 40,
-                review_manifest="reviewed-candidate.json",
-                review_manifest_sha256="b" * 64,
-            )
-        )
-        lock = SimpleNamespace(candidate_sha="a" * 40, manifest_sha256="b" * 64)
-        with patch("tools.staging_control.validate_candidate", return_value=lock):
-            with self.assertRaisesRegex(IsolationError, "sandbox profile"):
-                staging_control.runtime_candidate_lock(staging)
+    def test_production_control_requires_explicit_authority(self):
+        with self.assertRaises(control.RuntimeControlError):
+            control.require_control_authority(SimpleNamespace(mode="production"), False)
+        control.require_control_authority(SimpleNamespace(mode="staging"), False)
+        control.require_control_authority(SimpleNamespace(mode="production"), True)
 
-    def test_migrate_passes_exact_candidate_package_binding_to_fixture(self):
-        staging = self.load(self.config())
-        lock = SimpleNamespace(candidate_sha="a" * 40, manifest_sha256="b" * 64)
-        package = staging.root / "migration-packages" / lock.candidate_sha
-        receipt = {
-            "package_path": str(package),
-            "package_digest": "c" * 64,
-        }
-        completed = SimpleNamespace(returncode=0, stdout="ok", stderr="")
-        with (
-            patch("tools.staging_control.runtime_candidate_lock", return_value=lock),
-            patch("tools.staging_control.require_stopped"),
-            patch("tools.staging_control.build_migration_package", return_value=receipt),
-            patch("tools.staging_control.subprocess.run", return_value=completed) as run,
-        ):
-            staging_control.migrate(staging, admin_password="S" * 24)
-        argv = run.call_args.args[0]
-        self.assertEqual(
-            argv[-5:],
-            [
-                str(SOURCE / "tools/staging_fixture.py"),
-                lock.candidate_sha,
-                str(package),
-                "c" * 64,
-                lock.manifest_sha256,
-            ],
-        )
-        self.assertNotIn("S" * 24, argv)
-        self.assertEqual(
-            "S" * 24,
-            run.call_args.kwargs["env"]["AAIE_STAGING_BOOTSTRAP_ADMIN_PASSWORD"],
-        )
+    def test_sandbox_binds_only_owned_loopback_ports_and_denies_nas_writes(self):
+        cfg = self.load()
+        adapter = ManagedRuntime.from_configuration(cfg)
+        self.assertFalse(adapter.nas_write_roots)
+        self.assertFalse(adapter.admin_lan_ip)
+        profile = control.sandbox_profile(cfg)
+        self.assertIn("(deny network-bind)", profile)
+        self.assertIn('(local ip "localhost:' + str(cfg.admin_port) + '")', profile)
+        self.assertNotIn('(local ip "*:8780")', profile)
+        self.assertNotIn('(allow file-write* (subpath "/Volumes/Server', profile)
 
-    def test_migrate_creates_log_directory_for_fresh_staging_root(self):
-        with tempfile.TemporaryDirectory(dir=SOURCE / "STAGING_DATA") as folder:
-            root = Path(folder)
-            staging = SimpleNamespace(root=root, check=lambda path: Path(path))
-            lock = SimpleNamespace(candidate_sha="a" * 40, manifest_sha256="b" * 64)
-            receipt = {
-                "package_path": str(root / "migration-packages" / lock.candidate_sha),
-                "package_digest": "c" * 64,
-            }
-            completed = SimpleNamespace(returncode=0, stdout="ok", stderr="")
-            with (
-                patch("tools.staging_control.runtime_candidate_lock", return_value=lock),
-                patch("tools.staging_control.require_stopped"),
-                patch("tools.staging_control.build_migration_package", return_value=receipt),
-                patch("tools.staging_control.environment", return_value={}),
-                patch("tools.staging_control.sandbox_command", return_value=["fixture"]),
-                patch("tools.staging_control.subprocess.run", return_value=completed),
-            ):
-                staging_control.migrate(staging, admin_password="S" * 24)
-            self.assertEqual("ok\n", (root / "logs/migration.log").read_text())
+    def health_payload(self, cfg):
+        return dict(status="ok", environment="staging", service="admin", port=cfg.admin_port,
+                    pid=123456, database_path=str(cfg.db), storage_path=str(cfg.root / "storage"),
+                    source_root=str(cfg.source_root), config_sha256=cfg.config_sha256,
+                    dependencies={"database": "ok"})
 
-    def test_startup_transaction_cleans_first_service_exit(self):
-        self.assert_transaction_cleanup(failing_role="admin", expected_cleanup=("admin",))
+    def health(self, cfg, payload):
+        opener = Mock()
+        opener.open.return_value.__enter__ = Mock(return_value=io.BytesIO(json.dumps(payload).encode()))
+        opener.open.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(control.urllib.request, "build_opener", return_value=opener):
+            return control.health(cfg, "admin", 123456)
 
-    def test_startup_transaction_cleans_both_after_second_service_exit(self):
-        self.assert_transaction_cleanup(
-            failing_role="parent", expected_cleanup=("parent", "admin")
-        )
+    def test_health_requires_full_listener_identity(self):
+        cfg = self.load()
+        self.assertTrue(self.health(cfg, self.health_payload(cfg))["healthy"])
+        for field in ("source_root", "storage_path", "database_path", "config_sha256", "pid", "port", "environment", "service"):
+            with self.subTest(field=field):
+                payload = self.health_payload(cfg)
+                payload[field] = "foreign"
+                with self.assertRaises(control.RuntimeControlError):
+                    self.health(cfg, payload)
 
-    def test_startup_transaction_cleans_identity_mismatch(self):
-        self.assert_transaction_cleanup(
-            failing_role="parent",
-            expected_cleanup=("parent", "admin"),
-            error=IsolationError("listener identity mismatch"),
-        )
+    def test_unhealthy_database_is_not_ready(self):
+        cfg = self.load()
+        payload = self.health_payload(cfg)
+        payload["dependencies"]["database"] = "error"
+        with self.assertRaises(control.RuntimeControlError):
+            self.health(cfg, payload)
 
-    def test_startup_transaction_cleans_health_timeout(self):
-        self.assert_transaction_cleanup(
-            failing_role="parent",
-            expected_cleanup=("parent", "admin"),
-            error=TimeoutError("health timeout"),
-        )
+    def test_source_identity_never_implies_release_approval(self):
+        with patch.object(control.subprocess, "run", side_effect=[
+                SimpleNamespace(returncode=0, stdout="a" * 40, stderr=""),
+                SimpleNamespace(returncode=0, stdout=" M synthetic.py", stderr="")]):
+            result = control.source_identity(self.load())
+        self.assertTrue(result["working_tree_modified"])
+        self.assertEqual(result["release_approval"], "NOT_GRANTED")
 
-    def test_startup_transaction_reports_cleanup_failure(self):
-        launched = []
+    def test_failed_source_inspection_reports_unknown_instead_of_clean(self):
+        with patch.object(control.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout="", stderr="denied")):
+            result = control.source_identity(self.load())
+        self.assertIsNone(result["git_head"])
+        self.assertIsNone(result["working_tree_modified"])
+        self.assertTrue(result["git_inspection_warning"])
 
-        def launch(role, _port):
-            launched.append(role)
-            return role
+    def test_pid_reuse_does_not_match_owned_birth(self):
+        cfg = self.load()
+        with self.assertRaises(control.RuntimeControlError):
+            control.validate_process_identity(cfg, "admin", self.record(cfg), " ".join(control.process_command(cfg, "admin")), "foreign-birth")
 
-        def ready(role, _handle):
-            if role == "parent":
-                raise RuntimeError("second service exit")
+    def test_foreign_config_record_is_rejected(self):
+        cfg = self.load()
+        with self.assertRaises(control.RuntimeControlError):
+            control.validate_record(cfg, "admin", self.record(cfg, config_sha256="foreign"))
 
-        def cleanup(role, _handle):
-            if role == "admin":
-                raise RuntimeError("cleanup failed")
+    def test_echo_or_other_service_command_is_rejected(self):
+        cfg = self.load()
+        for command in ("/bin/echo " + " ".join(control.process_command(cfg, "admin")),
+                        " ".join(control.process_command(cfg, "parent"))):
+            with self.subTest(command=command), self.assertRaises(control.RuntimeControlError):
+                control.validate_process_identity(cfg, "admin", self.record(cfg), command, "synthetic-birth")
 
-        with self.assertRaisesRegex(IsolationError, "cleanup incomplete") as caught:
-            staging_control.transactional_service_start(
-                (("admin", 8890), ("parent", 8891)), launch, ready, cleanup
-            )
-        self.assertFalse(caught.exception.cleanup_complete)
-        self.assertEqual(launched, ["admin", "parent"])
+    def test_lifecycle_lock_refuses_concurrent_operation(self):
+        cfg = self.load()
+        with control.lifecycle_lock(cfg):
+            with self.assertRaises(control.RuntimeControlError):
+                with control.lifecycle_lock(cfg):
+                    self.fail("Concurrent lock acquired")
 
-    def test_cleanup_uses_owned_process_identity_when_state_write_never_happened(self):
-        staging = self.load(self.config())
-        process = Mock(pid=32123)
-        process.poll.side_effect = [None, 0]
-        with (
-            patch(
-                "tools.staging_control.subprocess.check_output",
-                return_value=(
-                    f"python {SOURCE / 'tools/staging_entry.py'} --service admin"
-                ),
-            ),
-            patch("tools.staging_control.os.kill") as kill,
-        ):
-            staging_control._cleanup_started_service(staging, "admin", process)
-        kill.assert_called_once_with(32123, staging_control.signal.SIGTERM)
+    def assert_start_cleanup(self, failure, expected_roles, *, incomplete=False):
+        cfg = self.load()
+        children = [MagicMock(pid=123456), MagicMock(pid=123457)]
+        for child in children:
+            child.poll.return_value = None
+        if failure == "first_exit":
+            children[0].poll.return_value = 0
+        if failure == "second_exit":
+            children[1].poll.return_value = 0
+        with ExitStack() as stack:
+            for name, value in (("preflight", {"ready": True}), ("sandbox_profile", "synthetic-profile"),
+                                ("environment", {}), ("observe", "synthetic-birth"), ("status", {"ready": True})):
+                stack.enter_context(patch.object(control, name, return_value=value))
+            stack.enter_context(patch.object(control, "runtime_file", side_effect=lambda *args: nullcontext(io.StringIO())))
+            stack.enter_context(patch.object(control.school_map_tile_control, "start"))
+            stack.enter_context(patch.object(control.subprocess, "Popen", side_effect=children))
+            stack.enter_context(patch.object(control.time, "sleep"))
+            health = stack.enter_context(patch.object(control, "health", return_value={"healthy": True}))
+            if failure == "identity":
+                health.side_effect = control.RuntimeControlError("synthetic listener mismatch")
+            elif failure == "timeout":
+                health.side_effect = OSError("synthetic not ready")
+            cleanup = stack.enter_context(patch.object(control, "cleanup_started", return_value=["admin:TimeoutError"] if incomplete else []))
+            with self.assertRaisesRegex(control.RuntimeControlError, "cleanup incomplete" if incomplete else ".+"):
+                control.start(cfg)
+            cleanup.assert_called_once()
+            self.assertEqual([role for role, child in cleanup.call_args.args[1]], expected_roles)
+            self.assertTrue(cleanup.call_args.args[2])
 
-    def assert_transaction_cleanup(
-        self, *, failing_role, expected_cleanup, error=RuntimeError("service exit")
-    ):
-        launched = []
-        cleaned = []
+    def test_startup_cleans_first_service_exit(self):
+        self.assert_start_cleanup("first_exit", ["admin"])
 
-        def launch(role, _port):
-            launched.append(role)
-            return role
+    def test_startup_cleans_both_after_second_service_exit(self):
+        self.assert_start_cleanup("second_exit", ["admin", "parent"])
 
-        def ready(role, _handle):
-            if role == failing_role:
-                raise error
+    def test_startup_cleans_listener_identity_mismatch(self):
+        self.assert_start_cleanup("identity", ["admin"])
 
-        def cleanup(role, _handle):
-            cleaned.append(role)
+    def test_startup_cleans_health_timeout(self):
+        self.assert_start_cleanup("timeout", ["admin"])
 
-        with self.assertRaises(IsolationError) as caught:
-            staging_control.transactional_service_start(
-                (("admin", 8890), ("parent", 8891)), launch, ready, cleanup
-            )
-        self.assertTrue(caught.exception.cleanup_complete)
-        self.assertEqual(tuple(cleaned), expected_cleanup)
+    def test_startup_reports_incomplete_cleanup(self):
+        self.assert_start_cleanup("second_exit", ["admin", "parent"], incomplete=True)
 
-    def test_health_requires_task_local_storage_and_rejects_nas_initialization(self):
-        staging = self.load(self.config())
-        payload = {
-            "status": "ok",
-            "environment": "staging",
-            "service": "admin",
-            "port": staging.admin_port,
-            "database_path": str(staging.db),
-            "storage_path": str(staging.storage),
-            "dependencies": {"database": "ok", "storage": "ok", "nas": "disabled"},
-            "nas": {"ready": False, "root": ""},
-        }
-        response = io.BytesIO(json.dumps(payload).encode("utf-8"))
-        response.__enter__ = lambda value: value
-        response.__exit__ = lambda *_args: None
-        with patch("tools.staging_control.urllib.request.urlopen", return_value=response):
-            self.assertEqual(staging_control.health(staging, "admin"), payload)
+    def test_cleanup_owns_children_even_without_saved_pid_file(self):
+        cfg = self.load()
+        child = MagicMock(pid=123456)
+        child.poll.return_value = None
+        with patch.object(control.os, "kill") as kill:
+            errors = control.cleanup_started(cfg, [("admin", child)], False, None)
+        self.assertEqual(errors, [])
+        child.terminate.assert_called_once()
+        child.wait.assert_called_once()
+        kill.assert_not_called()
 
-        payload["dependencies"]["nas"] = "ok"
-        payload["nas"] = {"ready": True, "root": "/Volumes/Server/Students"}
-        response = io.BytesIO(json.dumps(payload).encode("utf-8"))
-        response.__enter__ = lambda value: value
-        response.__exit__ = lambda *_args: None
-        with patch("tools.staging_control.urllib.request.urlopen", return_value=response):
-            with self.assertRaisesRegex(IsolationError, "NAS dependency"):
-                staging_control.health(staging, "admin")
+    def test_cleanup_attempts_all_children_and_map_after_one_timeout(self):
+        cfg = self.load()
+        first, second = MagicMock(pid=123456), MagicMock(pid=123457)
+        for child in (first, second):
+            child.poll.return_value = None
+        second.wait.side_effect = control.subprocess.TimeoutExpired("synthetic-child", 5)
+        with patch.object(control.school_map_tile_control, "stop") as stop_map:
+            errors = control.cleanup_started(cfg, [("admin", first), ("parent", second)], True, object())
+        self.assertEqual(errors, ["parent:TimeoutExpired"])
+        first.terminate.assert_called_once()
+        stop_map.assert_called_once()
+
+    def test_managed_parent_links_use_settings_in_owned_database(self):
+        source = (Path(__file__).resolve().parents[1] / "app.py").read_text()
+        function = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "parent_form_base_url")
+        setting = Mock(return_value="http://127.0.0.1:" + str(self.load().parent_port) + "/")
+        namespace = {"db": SimpleNamespace(setting=setting), "PARENT_FORM_BASE_SETTING": "PARENT_FORM_PUBLIC_BASE_URL"}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "owned-parent-link", "exec"), namespace)
+        self.assertEqual(namespace["parent_form_base_url"](), "http://127.0.0.1:" + str(self.load().parent_port))
+        setting.assert_called_once_with("PARENT_FORM_PUBLIC_BASE_URL", "http://127.0.0.1:8781")
+
+    def test_managed_cli_rejects_retired_init_mode(self):
+        with patch("sys.stderr"), patch.object(control.subprocess, "Popen") as popen:
+            with self.assertRaises(SystemExit):
+                control.main(["--init-only"])
+        popen.assert_not_called()
 
 
 if __name__ == "__main__":

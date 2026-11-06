@@ -141,7 +141,10 @@ class StartupDatabaseWriteHygieneTests(unittest.TestCase):
         try:
             ready, _, _ = select.select([process.stdout], [], [], 30)
             self.assertTrue(ready, "startup child did not finish importing app.py")
-            self.assertEqual(process.stdout.readline().strip(), "PROBE_READY")
+            first_line = process.stdout.readline().strip()
+            if first_line != "PROBE_READY":
+                process.wait(timeout=5)
+                self.fail("Startup probe failed before readiness: " + process.stderr.read())
             started = time.monotonic()
             payload = None
             while time.monotonic() - started < 2.0:

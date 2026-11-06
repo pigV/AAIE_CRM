@@ -210,17 +210,37 @@ class ContentCentreSafeBoxARegressionTest(unittest.TestCase):
         for route in required_routes:
             self.assertIn(route, source)
 
-    def test_tracked_diff_scope_is_safebox_a_allowlist(self):
-        changed = {
-            line.strip()
-            for line in subprocess.check_output(
-                ["git", "diff", "--name-only"],
-                cwd=Path(__file__).resolve().parents[1],
-                text=True,
-            ).splitlines()
-            if line.strip() and not line.startswith("error:")
-        }
-        self.assertLessEqual(changed, {"adjustment.md", "app.py", "assets/ui-premium-v2.css"})
+    def test_all_tab_get_requests_preserve_business_data_and_append_audit(self):
+        # Execution-time worktree allowlists belong to release review. A durable
+        # UI regression verifies the actual database boundary for every GET tab.
+        with mock.patch.object(app_module, "latest_content_daily_sync_report", return_value=None), \
+             mock.patch.object(app_module.nas, "status", return_value={"mode": "test", "ready": True}), \
+             mock.patch.object(app_module.urllib.request, "urlopen", side_effect=AssertionError("External access forbidden")), \
+             mock.patch.object(app_module.subprocess, "Popen", side_effect=AssertionError("Child process forbidden")):
+            with self.db.request_scope():
+                connection = self.db.connect()
+                def snapshot():
+                    schema = tuple(connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name"))
+                    tables = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+                    data = {}
+                    for table in tables:
+                        if table == 'audit_logs':
+                            continue
+                        quoted = '"' + table.replace('"', '""') + '"'
+                        rows = connection.execute('SELECT * FROM ' + quoted).fetchall()
+                        if table == 'sqlite_sequence':
+                            rows = [row for row in rows if row[0] != 'audit_logs']
+                        data[table] = sorted((tuple(row) for row in rows), key=repr)
+                    return schema, data
+                before = snapshot()
+                audit_before = tuple(tuple(row) for row in connection.execute('SELECT * FROM audit_logs ORDER BY id'))
+                for tab in ("dashboard", "create", "extract", "sync", "tracking", "analysis"):
+                    with self.subTest(tab=tab):
+                        self.assertIn("<main", self.handler({"tab": tab}).content_center("GET"))
+                self.assertEqual(before, snapshot())
+                audit_after = tuple(tuple(row) for row in connection.execute('SELECT * FROM audit_logs ORDER BY id'))
+                self.assertEqual(audit_before, audit_after[:len(audit_before)])
+                self.assertGreater(len(audit_after), len(audit_before))
 
 
 if __name__ == "__main__":

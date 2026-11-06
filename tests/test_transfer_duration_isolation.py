@@ -1,6 +1,7 @@
 """Exercise real Profile duration routing and renderer with distinct old metrics."""
 import ast
 import html
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -40,7 +41,7 @@ class TransferDurationIsolationTests(unittest.TestCase):
             if fail_modules:raise RuntimeError('module read unavailable')
             return [{'completed':False}]
         ns={'time':SimpleNamespace(perf_counter=lambda:0),'perf_ms':lambda _:0,
-            'student_perf_log':lambda *a,**k:None,'db':SimpleNamespace(connect=lambda:object(),_release_connection=lambda c:None),
+            'student_perf_log':lambda *a,**k:None,'db':SimpleNamespace(connect=lambda:sqlite3.connect(':memory:'),_release_connection=lambda c:c.close()),
             'load_student_workflow_projection_map':workflow,
             'load_student_lifecycle_view':lifecycle,'render_student_lifecycle_sections':lambda *a,**k:'',
             'load_lifecycle_workflow_modules':modules,

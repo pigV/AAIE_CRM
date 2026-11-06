@@ -121,5 +121,5 @@ class DocumentMetadataTests(unittest.TestCase):
  def test_full_version_discovery_places_metadata_after_existing036_before_dates(self):
   import migration_runner
   versions=[m.version for m in migration_runner.discover_migrations(ROOT/'migrations')]
-  self.assertEqual(['20260908_036','20260909_037','20260909_038','20260914_039'],versions[-4:]);self.assertEqual(len(versions),len(set(versions)))
+  self.assertEqual(['20260908_036','20260909_037','20260909_038','20260914_039'],versions[versions.index('20260908_036'):versions.index('20260908_036')+4]);self.assertEqual(len(versions),len(set(versions)))
 if __name__=='__main__':unittest.main()

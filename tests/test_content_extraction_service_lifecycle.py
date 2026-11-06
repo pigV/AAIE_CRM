@@ -539,9 +539,9 @@ class ContentExtractionProductionLifecycleTests(unittest.TestCase):
         restart = Path("重启 AAIE CRM.command").read_text(encoding="utf-8")
         client = Path("app.py").read_text(encoding="utf-8")
         combined = start + stop + restart
-        self.assertIn("content_extraction_service_lifecycle.py start", start)
-        self.assertIn("content_extraction_service_lifecycle.py stop", stop)
-        self.assertIn("content_extraction_service_lifecycle.py", restart)
+        self.assertIn("tools/runtime_stack.py start --allow-production-control", start)
+        self.assertIn("tools/runtime_stack.py stop --allow-production-control", stop)
+        self.assertIn("tools/runtime_stack.py restart --allow-production-control", restart)
         self.assertIn("http://127.0.0.1:8792", client)
         self.assertNotIn("pkill python", combined)
         self.assertNotIn("killall python", combined)

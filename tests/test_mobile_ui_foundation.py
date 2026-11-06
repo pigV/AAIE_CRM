@@ -719,7 +719,7 @@ class MobileRouteTests(unittest.TestCase):
             self.assertEqual(handler.dashboard("GET"), ("mobile-result", "GET"))
         finally:
             self.app.run_reminder_engine_if_due = original
-        self.assertEqual(calls, [True])
+        self.assertEqual(calls, [], "Mobile GET must return before reminder business work")
 
     def test_active_navigation_is_derived_for_primary_and_nested_business_routes(self):
         resolver = getattr(mobile_shell_module, "active_navigation_for_path", None)
@@ -836,7 +836,10 @@ class MobileRouteTests(unittest.TestCase):
             )
             self.app.db = database
             try:
-                with mock.patch.object(self.app.nas, "status", return_value={"ready": True}):
+                with mock.patch.object(self.app.nas, "status", return_value={"ready": True}), mock.patch.object(
+                    self.app, "recommend_students",
+                    side_effect=lambda db,**kwargs: __import__('contract_student_selector').recommend_students(db,now="2026-08-10T00:00:00+10:00",**kwargs),
+                ):
                     handler.contract_management_center("GET")
             finally:
                 self.app.db = old_db

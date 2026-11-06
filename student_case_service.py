@@ -162,7 +162,7 @@ def _case_dto(row: dict[str, Any]) -> StudentCaseDTO:
         failed_at=row["failed_at"],
         archived_at=row["archived_at"],
         display_label=f"{case_type_label} #{row['sequence_no']}",
-        is_active=row["status"] in ACTIVE_CASE_STATUSES,
+        is_active=(row["status"] != "draft" and row["status"] in ACTIVE_CASE_STATUSES and row["active_slot"] == 1),
     )
 
 

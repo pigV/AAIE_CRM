@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -459,9 +460,9 @@ class ContractAppAdapterTests(unittest.TestCase):
         finally:
             app_module.db = old_db
 
-    def test_generate_route_persists_stable_type_and_versioned_snapshot_without_schema_change(self):
+    def test_transfer_generate_delegates_to_workflow_without_legacy_writes(self):
         import app as app_module
-        from contract_domain import TRANSFER_APPLICATION_CONTRACT, snapshot_payload
+        from contract_domain import TRANSFER_APPLICATION_CONTRACT
         from database import Database
 
         class FakeNas:
@@ -483,7 +484,7 @@ class ContractAppAdapterTests(unittest.TestCase):
                 db.initialize()
                 app_module.db = db
                 app_module.nas = FakeNas()
-                app_module.generate_study_contract_document = lambda payload, target: Path(target).write_bytes(b"isolated contract") or target
+                app_module.generate_study_contract_document = mock.Mock(side_effect=AssertionError("Legacy direct generation must not run"))
                 db.set_setting("company_abn_acn", "ABN 11 222 333 444", 1)
                 student_folder = root / "Student"
                 student_folder.mkdir()
@@ -534,33 +535,16 @@ class ContractAppAdapterTests(unittest.TestCase):
                 handler.send_header = lambda key, value: handler.sent_headers.append((key, value))
                 handler.end_headers = lambda: None
 
-                handler.contract_generate("POST", "TROUTE-UPGRADE")
-
-                contract = db.one("SELECT * FROM contracts WHERE student_id='TROUTE-UPGRADE'")
-                self.assertEqual(handler.response_status, 303)
-                self.assertEqual(contract["contract_type"], TRANSFER_APPLICATION_CONTRACT)
-                snapshot = snapshot_payload(contract["standalone_data_json"])
-                self.assertEqual(snapshot["snapshot_version"], 1)
-                self.assertEqual(snapshot["contract_type"], TRANSFER_APPLICATION_CONTRACT)
-                self.assertEqual(snapshot["signer"]["source"], "mother")
-                self.assertEqual(snapshot["service_scope_ids"], ["school_transfer_planning_and_application"])
-                edit_form = app_module.contract_editor_base_form(contract, {})
-                self.assertEqual(edit_form["contract_type"], TRANSFER_APPLICATION_CONTRACT)
-                self.assertEqual(edit_form["parent_signer_source"], "mother")
-                self.assertEqual(edit_form["parent_phone"], "0400-MOTHER")
-                db.execute(
-                    "UPDATE students SET form_data_json=? WHERE student_id=?",
-                    (json.dumps({"mother_mobile": "CHANGED-MASTER"}), "TROUTE-UPGRADE"),
-                )
-                db.execute(
-                    "UPDATE contracts SET service_scope_json=?,parent_phone=? WHERE id=?",
-                    (json.dumps(["student_visa_lodgement"]), "CHANGED-ROW", contract["id"]),
-                )
-                frozen_payload = app_module.contract_payload_from_existing(
-                    db.one("SELECT * FROM contracts WHERE id=?", (contract["id"],))
-                )
-                self.assertEqual(frozen_payload["signer"]["phone"], "0400-MOTHER")
-                self.assertEqual(frozen_payload["service_scope_ids"], ["school_transfer_planning_and_application"])
+                handler.transfer_contract_prepare = mock.Mock(return_value="prepared-by-current-workflow")
+                with db.connect() as connection:
+                    before = tuple(connection.iterdump())
+                result = handler.contract_generate("POST", "TROUTE-UPGRADE")
+                self.assertEqual(result, "prepared-by-current-workflow")
+                handler.transfer_contract_prepare.assert_called_once_with("TROUTE-UPGRADE")
+                app_module.generate_study_contract_document.assert_not_called()
+                with db.connect() as connection:
+                    self.assertEqual(before, tuple(connection.iterdump()))
+                self.assertIsNone(db.one("SELECT id FROM contracts WHERE student_id='TROUTE-UPGRADE'"))
         finally:
             app_module.db = old_db
             app_module.nas = old_nas

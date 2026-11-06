@@ -54,6 +54,7 @@ class TransferRawDocumentContextTests(unittest.TestCase):
         tree=ast.parse((Path(__file__).resolve().parents[1]/"app.py").read_text())
         fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=="application_document_row")
         ns={"Path":Path,"esc":str,"module_document_type_label":lambda m,t:t,
+            "application_material_label":lambda t:t,
             "student_document_preview_panel":lambda *a,**k:"preview",
             "lifecycle_context_badge_html":lambda c:"LEGACY_UNCONFIRMED"}
         exec(compile(ast.Module(body=[fn],type_ignores=[]),"app.py","exec"),ns)
@@ -72,7 +73,10 @@ class TransferStepperAssetsTests(unittest.TestCase):
         from lifecycle_workspace_ui import render_lifecycle_stepper, WorkspaceStep
         tree=ast.parse((Path(__file__).resolve().parents[1]/'app.py').read_text())
         fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='student_detail_workflow_overview_html')
-        ns=dict(normalize_workflow_stage=lambda x:x,workflow_row_value=lambda s,k:s.get(k),
+        import sqlite3
+        connection=sqlite3.connect(":memory:");self.addCleanup(connection.close)
+        ns=dict(db=SimpleNamespace(connect=lambda:connection,_release_connection=lambda c:None),
+                normalize_workflow_stage=lambda x:x,workflow_row_value=lambda s,k:s.get(k),
                 workflow_stage_index=lambda x:0,esc=str,render_lifecycle_stepper=render_lifecycle_stepper,
                 WorkspaceStep=WorkspaceStep,student_detail_workflow_file_progress_html=lambda *a,**k:'modules')
         exec(compile(ast.Module(body=[fn],type_ignores=[]),'app.py','exec'),ns)

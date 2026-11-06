@@ -222,14 +222,12 @@ class ProgressionServiceTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.database_path = self.root / "service.db"
-        helper = ProgressionMigrationTests()
-        helper.connect = ProgressionMigrationTests.connect
-        transfer_tests.TransferPhase2MigrationTests._create_legacy_fixture(
-            helper, self.database_path
-        )
-        transfer_tests.apply_all_test_migrations_with_rebuild_backup(
-            self.database_path, self.root, label="progression-service"
-        )
+        # Service tests get independent copies of an actually migrated seed;
+        # migration acceptance tests above still run all real migrations.
+        transfer_tests._service_fixture_template().copy_to(self.database_path)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute("UPDATE offers SET school_id=20,school_name='Target University' WHERE id IN (1000,1001)")
+            connection.commit()
         self.service = progression_case_service.ProgressionCaseService(
             self.database_path
         )
@@ -272,6 +270,34 @@ class ProgressionServiceTests(unittest.TestCase):
             draft,
             actor_user_id=values["actor_user_id"],
         )
+
+    def test_existing_offer_from_other_school_is_rejected_without_attachment(self):
+        case = self.create_case()
+        stage = self.service.add_path_stage(
+            case.case_id, actor_user_id=1,
+            actor_permissions={"progression_cases.update"}, flags=self.write_flags,
+            course_type="foundation", course_name="Foundation Studies",
+            institution_id=20, institution_name_snapshot="Target University",
+            expected_start_date="2027-02-01", expected_end_date="2027-11-30",
+            is_packaged_with_next=False, notes=None,
+        )
+        target = self.service.get_case_data(case.case_id)["target_applications"][0]
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute("UPDATE offers SET school_id=10,school_name='Other School' WHERE id=1000")
+            connection.commit()
+            before = "\n".join(connection.iterdump())
+        with self.assertRaisesRegex(ProgressionCaseIntegrityError, "school ownership mismatch"):
+            self.service.add_offer(
+                case.case_id, actor_user_id=1,
+                actor_permissions={"progression_cases.offers"}, flags=self.write_flags,
+                stage_id=stage.stage_id, existing_offer_id=1000,
+                offer_type="conditional", institution_id=20,
+                institution_name_snapshot="Target University", course_name="Foundation Studies",
+                offer_date="2026-08-01", expiry_date=None, conditions_text=None,
+                student_document_id=1600, target_application_id=target["id"], notes=None,
+            )
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            self.assertEqual(before, "\n".join(connection.iterdump()))
 
     def confirm_progression_upcoming(self, case_id, *, effective_date="2027-02-01"):
         from student_lifecycle.enrolment import SchoolEnrolmentService

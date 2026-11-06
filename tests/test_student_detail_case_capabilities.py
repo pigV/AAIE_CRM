@@ -110,7 +110,7 @@ class StudentDetailCaseCapabilityIntegrationTests(unittest.TestCase):
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr));", css)
         mobile_rule = (
             "@media (max-width: 760px) {\n"
-            "  .ui-premium-v2 .main:has(.student-summary-card):has(.workflow-panel):has(.tabs[data-tabs]) .student-primary-action-grid {\n"
+            "  .ui-premium-v2 .main:has(.student-summary-card):has(.student-actions):has(.tabs[data-tabs]) .student-primary-action-grid {\n"
             "    grid-template-columns: minmax(0, 1fr);"
         )
         self.assertIn(mobile_rule, css)
@@ -189,8 +189,8 @@ class StudentDetailCaseCapabilityIntegrationTests(unittest.TestCase):
         ):
             self.assertIn(selector, css)
         mobile_pair = (
-            "  .ui-premium-v2 .main:has(.student-summary-card):has(.workflow-panel):has(.tabs[data-tabs]) .student-transfer-summary p,\n"
-            "  .ui-premium-v2 .main:has(.student-summary-card):has(.workflow-panel):has(.tabs[data-tabs]) .student-progression-summary p {"
+            "  .ui-premium-v2 .main:has(.student-summary-card):has(.student-actions):has(.tabs[data-tabs]) .student-transfer-summary p,\n"
+            "  .ui-premium-v2 .main:has(.student-summary-card):has(.student-actions):has(.tabs[data-tabs]) .student-progression-summary p {"
         )
         self.assertIn(mobile_pair, css)
 

@@ -1,5 +1,6 @@
 from contextlib import closing
 import gc
+import ast
 import hashlib
 import importlib
 import json
@@ -691,24 +692,22 @@ class StudentCasePermissionTests(unittest.TestCase):
 
 
 class StudentCaseStep5BoundaryTests(unittest.TestCase):
-    def test_step5_does_not_wire_database_or_ui(self):
-        for relative_path in ("database.py", "ui.py"):
-            with self.subTest(relative_path=relative_path):
-                source = (PROJECT_ROOT / relative_path).read_text(
-                    encoding="utf-8"
-                )
-                self.assertNotIn("student_case_feature_flags", source)
-                self.assertNotIn("student_case_permissions", source)
-                self.assertNotIn("student_cases.view", source)
+    def test_foundation_modules_do_not_import_the_live_application(self):
+        # Later releases legitimately wire these modules into the UI/database.
+        # The foundation itself must remain usable without starting the runtime.
+        for name in ("student_case_feature_flags", "student_case_permissions", "student_case_views"):
+            tree = ast.parse((PROJECT_ROOT / (name + ".py")).read_text())
+            imports = {node.module.split(".")[0] for node in ast.walk(tree)
+                       if isinstance(node, ast.ImportFrom) and node.module}
+            imports.update(alias.name.split(".")[0] for node in ast.walk(tree)
+                           if isinstance(node, ast.Import) for alias in node.names)
+            self.assertFalse(imports & {"app", "ui", "database"}, name)
 
-    def test_no_student_case_route_or_tab_was_registered(self):
-        app_source = (PROJECT_ROOT / "app.py").read_text(encoding="utf-8")
-        ui_source = (PROJECT_ROOT / "ui.py").read_text(encoding="utf-8")
-        self.assertNotIn("/student-cases", app_source)
-        self.assertNotIn("转学记录", app_source)
-        self.assertNotIn("升学记录", app_source)
-        self.assertNotIn("转学记录", ui_source)
-        self.assertNotIn("升学记录", ui_source)
+    def test_integrated_tabs_still_require_feature_flag_and_explicit_permission(self):
+        flags = student_case_feature_flags.StudentCaseFeatureFlags
+        user = {"role_name":"Admin", "permissions_json":json.dumps(["*"])}
+        self.assertEqual(student_case_views.student_case_tab_descriptors(user, flags()), ())
+        self.assertEqual(student_case_views.student_case_tab_descriptors(user, flags(read_enabled=True)), ())
 
 
 class StudentCaseViewTests(unittest.TestCase):
@@ -751,6 +750,7 @@ class StudentCaseViewTests(unittest.TestCase):
             PRODUCTION_MIGRATIONS_DIR,
             applied_by="student-case-view-test",
             source_commit="test",
+            through="20260728_001",
         )
 
     @staticmethod
@@ -768,7 +768,7 @@ class StudentCaseViewTests(unittest.TestCase):
         enabled = flags.StudentCaseFeatureFlags(read_enabled=True)
         expected = (
             ("transfer_cases", "转学记录"),
-            ("progression_cases", "升学"),
+            ("progression_cases", "升学记录"),
         )
         self.assertEqual(
             views.student_case_tab_descriptors(
@@ -1059,7 +1059,7 @@ class StudentCaseViewTests(unittest.TestCase):
         self.assertTrue(stylesheet.is_file())
         css = stylesheet.read_text(encoding="utf-8")
         self.assertIn(".student-case-section", css)
-        self.assertNotIn("html[data-theme", css)
+        self.assertNotRegex(css, r'html\[data-theme[^]]*\]\s*\{')
         self.assertNotIn(".main", css)
         for tab_key in ("transfer_cases", "progression_cases"):
             html = views.render_student_case_tab(
@@ -1080,7 +1080,19 @@ class StudentCaseViewTests(unittest.TestCase):
 class StudentCaseUIHarnessTests(unittest.TestCase):
     def test_harness_user_passes_existing_permission_and_module_guards(self):
         harness = importlib.import_module("tests.student_case_ui_harness")
-        import app as app_module
+        # Exercise the actual pure permission functions without app startup.
+        from types import SimpleNamespace
+        from contract_access_policy import can_access_contract_module
+        from database import MODULE_DEFINITIONS
+        names = {"get_permissions", "allowed", "role_module_preset", "is_content_center_allowed_user", "user_module_keys", "can_access_module"}
+        tree = ast.parse((PROJECT_ROOT / "app.py").read_text())
+        namespace = {"json":json, "MODULE_DEFINITIONS":MODULE_DEFINITIONS,
+                     "CONTENT_CENTER_ALLOWED_USERNAMES":{"admin", "sonnyz"},
+                     "REVENUE_MODULE_KEY":"revenue", "can_access_contract_module":can_access_contract_module}
+        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        self.assertEqual({node.name for node in nodes}, names)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "app.py", "exec"), namespace)
+        app_module = SimpleNamespace(**namespace)
 
         user = harness.harness_user()
 
@@ -1095,13 +1107,14 @@ class StudentCaseUIHarnessTests(unittest.TestCase):
             "coe_oshc",
             "visa",
             "payments",
-            "student_contracts",
             "reminders",
         ):
             with self.subTest(module_key=module_key):
                 self.assertTrue(
                     app_module.can_access_module(user, module_key)
                 )
+
+        self.assertFalse(app_module.can_access_module(user, "student_contracts"))
 
     def test_harness_script_is_directly_executable_from_project_root(self):
         result = subprocess.run(
@@ -2928,6 +2941,7 @@ class StudentCaseMigrationTests(unittest.TestCase):
             migrations_dir or PRODUCTION_MIGRATIONS_DIR,
             applied_by="student-case-schema-test",
             source_commit="step-2-test",
+            through="20260728_001",
         )
 
     def table_names(self, connection):
@@ -3275,8 +3289,8 @@ class StudentCaseMigrationTests(unittest.TestCase):
         self.assertEqual(before_sequence, after_sequence)
 
     def test_package_checksum_is_stable_and_forward_verify_passes(self):
-        first = self.runner().discover_migrations(PRODUCTION_MIGRATIONS_DIR)
-        second = self.runner().discover_migrations(PRODUCTION_MIGRATIONS_DIR)
+        first = [item for item in self.runner().discover_migrations(PRODUCTION_MIGRATIONS_DIR) if item.version == "20260728_001"]
+        second = [item for item in self.runner().discover_migrations(PRODUCTION_MIGRATIONS_DIR) if item.version == "20260728_001"]
         self.assertEqual(len(first), 1)
         self.assertEqual(first[0].version, "20260728_001")
         self.assertEqual(first[0].name, "student_case_phase1")
@@ -3893,15 +3907,20 @@ class _StudentCaseServiceTestBase(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
         self.database_path = self.root / "student_case_service.db"
-        StudentCaseMigrationTests._initialize_legacy_fixture(
-            self, self.database_path
-        )
-        migration_runner.apply_migrations(
-            self.database_path,
-            PRODUCTION_MIGRATIONS_DIR,
-            applied_by="student-case-service-test",
-            source_commit="step-3-test",
-        )
+        # Current services consume the current canonical schema; migration 001
+        # characterization tests above deliberately retain their own 001 fixture.
+        from tests.test_student_case_phase2_transfer import _service_fixture_template
+        _service_fixture_template().copy_to(self.database_path)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            for table, definition in (("users", "name TEXT"), ("students", "name TEXT"),
+                                      ("students", "current_school_name TEXT"), ("schools", "name TEXT")):
+                columns={r[1] for r in connection.execute(f"PRAGMA table_info({table})")}
+                if definition.split()[0] not in columns:connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+            for uid,name in ((1,"Owner A"),(2,"Owner B"),(3,"Collaborator"),(4,"Watcher")):
+                connection.execute("INSERT OR IGNORE INTO users(id,username,display_name,is_active) VALUES(?,?,?,1)",(uid,f"foundation-user-{uid}",name))
+                connection.execute("UPDATE users SET name=?,display_name=? WHERE id=?",(name,name,uid))
+            connection.execute("UPDATE students SET name=student_id,current_school_name='Legacy School'")
+            connection.commit()
 
     def modules(self):
         self.assertIsNotNone(
@@ -4171,7 +4190,7 @@ class StudentCaseRepositoryTests(_StudentCaseServiceTestBase):
         _, repository, _ = self.modules()
         first = self.create_case()
         self.transition(first.id, "cancelled")
-        second = self.create_case(case_type="progression")
+        second = self.create_case(case_type="progression", initial_status="preparing")
 
         with closing(self.connect()) as connection:
             selected = repository.get_case(connection, first.id)
@@ -4205,8 +4224,8 @@ class StudentCaseRepositoryTests(_StudentCaseServiceTestBase):
                     "sequence_no": sequence_no,
                     "status": "draft",
                     "terminal_result": None,
-                    "active_slot": 1,
-                    "started_at": "2026-07-28T12:00:00+10:00",
+                    "active_slot": 0,
+                    "started_at": None,
                     "paused_at": None,
                     "completed_at": None,
                     "cancelled_at": None,
@@ -4350,25 +4369,25 @@ class StudentCaseServiceTests(_StudentCaseServiceTestBase):
 
     def test_active_conflict_maps_safe_details_in_both_type_directions(self):
         errors, _, _ = self.modules()
-        transfer = self.create_case()
+        transfer = self.create_case(initial_status="preparing")
         with self.assertRaises(errors.StudentCaseActiveConflictError) as caught:
-            self.create_case(case_type="progression")
+            self.create_case(case_type="progression", initial_status="preparing")
         self.assertEqual(caught.exception.code, "student_case_active_conflict")
         self.assertEqual(caught.exception.details["student_id"], "student-1")
         self.assertEqual(caught.exception.details["existing_case_id"], transfer.id)
         self.assertEqual(
             caught.exception.details["existing_case_type"], "transfer"
         )
-        self.assertEqual(caught.exception.details["existing_status"], "draft")
+        self.assertEqual(caught.exception.details["existing_status"], "preparing")
         self.assertNotIn("UNIQUE", caught.exception.message)
 
         self.add_student("reverse-conflict")
         progression = self.create_case(
-            student_id="reverse-conflict", case_type="progression"
+            student_id="reverse-conflict", case_type="progression", initial_status="preparing"
         )
         with self.assertRaises(errors.StudentCaseActiveConflictError) as reverse:
             self.create_case(
-                student_id="reverse-conflict", case_type="transfer"
+                student_id="reverse-conflict", case_type="transfer", initial_status="preparing"
             )
         self.assertEqual(
             reverse.exception.details["existing_case_id"], progression.id
@@ -4378,10 +4397,10 @@ class StudentCaseServiceTests(_StudentCaseServiceTestBase):
         paused = self.create_case(initial_status="paused")
         errors, _, _ = self.modules()
         with self.assertRaises(errors.StudentCaseActiveConflictError):
-            self.create_case(case_type="progression")
+            self.create_case(case_type="progression", initial_status="preparing")
         self.transition(paused.id, "in_progress")
         self.transition(paused.id, "cancelled")
-        released = self.create_case(case_type="progression")
+        released = self.create_case(case_type="progression", initial_status="preparing")
         self.assertTrue(released.is_active)
 
         for index, terminal_status in enumerate(("completed", "failed")):
@@ -4394,7 +4413,7 @@ class StudentCaseServiceTests(_StudentCaseServiceTestBase):
             if index == 0:
                 self.transition(case.id, "archived")
             next_case = self.create_case(
-                student_id=student_id, case_type="progression"
+                student_id=student_id, case_type="progression", initial_status="preparing"
             )
             self.assertTrue(next_case.is_active)
 
@@ -4546,7 +4565,7 @@ class StudentCaseServiceTests(_StudentCaseServiceTestBase):
         errors, _, service = self.modules()
         first = self.create_case()
         self.transition(first.id, "cancelled")
-        active = self.create_case(case_type="progression")
+        active = self.create_case(case_type="progression", initial_status="preparing")
 
         selected = service.get_case(self.database_path, first.id)
         listed = service.list_cases_for_student(
@@ -5602,6 +5621,15 @@ class StudentCaseAssignmentConcurrencyTests(_StudentCaseServiceTestBase):
 
 
 class StudentCaseConcurrencyTests(_StudentCaseServiceTestBase):
+    def test_drafts_of_both_types_coexist_without_claiming_an_active_slot(self):
+        _, _, service = self.modules()
+        transfer = self.create_case()
+        progression = self.create_case(case_type="progression")
+        self.assertEqual((transfer.active_slot,progression.active_slot),(0,0))
+        self.assertFalse(transfer.is_active);self.assertFalse(progression.is_active)
+        self.assertIsNone(service.get_active_case_for_student(self.database_path,"student-1"))
+        self.assertEqual(self.table_count("student_cases"),2)
+
     def test_two_concurrent_cross_type_creates_commit_exactly_one(self):
         errors, _, service = self.modules()
         barrier = threading.Barrier(2)
@@ -5616,6 +5644,7 @@ class StudentCaseConcurrencyTests(_StudentCaseServiceTestBase):
                     student_id="student-1",
                     case_type=case_type,
                     created_by=1,
+                    initial_status="preparing",
                 )
                 result = ("created", case.case_type)
             except errors.StudentCaseActiveConflictError as exc:

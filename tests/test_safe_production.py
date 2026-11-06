@@ -257,10 +257,9 @@ class SafeProductionContractTests(unittest.TestCase):
             def setting(key, default=None):
                 return default
 
-        Path("/private/tmp/aaie-combined-release").mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            prefix="safe-storage-", dir="/private/tmp/aaie-combined-release"
-        ) as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="safe-storage-") as temp_dir, mock.patch.object(
+            nas_module, "SAFE_PRODUCTION_STORAGE_BASE", Path(temp_dir)
+        ):
             root = Path(temp_dir) / "student-storage"
             root.mkdir()
             with mock.patch.dict(
@@ -291,16 +290,14 @@ class SafeProductionContractTests(unittest.TestCase):
             def setting(key, default=None):
                 return default
 
-        with mock.patch.dict(
-            os.environ,
-            {
-                "AAIE_SAFE_PRODUCTION": "1",
-                "AAIE_SAFE_PRODUCTION_STORAGE_ROOT": "/Volumes/Server/Students",
-            },
-            clear=False,
-        ):
-            with self.assertRaises(nas_module.NasSafetyError):
-                nas_module.NasManager(Settings()).active_root()
+        with tempfile.TemporaryDirectory(prefix="unsafe-storage-") as folder:
+            outside=Path(folder)/"unapproved";outside.mkdir()
+            approved=Path(folder)/"approved";approved.mkdir()
+            with mock.patch.object(nas_module,"SAFE_PRODUCTION_STORAGE_BASE",approved), mock.patch.dict(
+                os.environ,{"AAIE_SAFE_PRODUCTION":"1","AAIE_SAFE_PRODUCTION_STORAGE_ROOT":str(outside)},clear=False
+            ):
+                with self.assertRaises(nas_module.NasSafetyError):
+                    nas_module.NasManager(Settings()).active_root()
 
     def test_dual_gate_is_fail_closed(self):
         module = importlib.import_module("safe_production")
@@ -443,6 +440,8 @@ class HeadResponseContractTests(unittest.TestCase):
         handler.request_version = "HTTP/1.1"
         handler.requestline = "HEAD / HTTP/1.1"
         handler.command = "HEAD"
+        handler.path = "/"
+        handler.headers = {}
         handler.client_address = ("127.0.0.1", 12345)
         handler.responses = app.CRMHandler.responses
         handler._headers_buffer = []
@@ -472,12 +471,13 @@ class HeadResponseContractTests(unittest.TestCase):
         self.assertNotIn(b"body", payload)
         self.assertIs(handler.wfile, original)
 
-    def test_get_contract_is_not_modified_by_head_support(self):
-        app = importlib.import_module("app")
-        self.assertIs(app.CRMHandler.do_GET, app.CRMLegacyHandler.do_GET)
-        self.assertEqual(
-            app.CRMHandler.do_GET.__qualname__.split(".")[0], "CRMLegacyHandler"
-        )
+    def test_get_retains_existing_dispatch_behind_release_gate(self):
+        app, handler = self._handler()
+        handler.command = "GET"
+        handler.dispatch = mock.Mock()
+        with mock.patch.object(app.db, "request_scope", return_value=mock.MagicMock()):
+            handler.do_GET()
+        handler.dispatch.assert_called_once_with("GET")
 
 
 if __name__ == "__main__":

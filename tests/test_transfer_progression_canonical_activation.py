@@ -21,11 +21,7 @@ class TransferProgressionCanonicalActivationTests(unittest.TestCase):
         self.addCleanup(self.sandbox.cleanup)
         self.root = Path(self.sandbox.name)
         self.database_path = self.root / "canonical-activation.sqlite3"
-        owner = fixture.TransferPhase2MigrationTests()
-        owner._create_legacy_fixture(self.database_path)
-        fixture.apply_all_test_migrations_with_rebuild_backup(
-            self.database_path, self.root, label="canonical-activation"
-        )
+        fixture._service_fixture_template().copy_to(self.database_path)
         with closing(self.connect()) as connection:
             contract_columns = {
                 str(row[1]) for row in connection.execute("PRAGMA table_info(contracts)")
@@ -62,7 +58,7 @@ class TransferProgressionCanonicalActivationTests(unittest.TestCase):
     def initial(self, student_id, token):
         with closing(self.connect()) as connection:
             connection.execute(
-                "INSERT INTO parent_form_tokens(token,student_id) VALUES(?,?)",
+                "INSERT INTO parent_form_tokens(token,student_id,intake_type) VALUES(?,?,'ordinary_new_application')",
                 (token, student_id),
             )
             result = ensure_active_application_cycle(
