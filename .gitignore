@@ -122,3 +122,9 @@ TEST_LOGIN.txt
 *.zip
 *.tar
 *.gz
+
+# Ship only this pinned map dependency; keep other vendor directories ignored.
+!assets/vendor/
+assets/vendor/*
+!assets/vendor/leaflet-1.9.4/
+!assets/vendor/leaflet-1.9.4/**

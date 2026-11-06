@@ -12189,3 +12189,21 @@ body.backup-running .backup-control-card.is-backup-running .backup-control-panel
   .university-management-forms,
   .university-edit-form fieldset { grid-template-columns: 1fr; }
 }
+
+/* Radius search keeps its interactive map and fallback in one grid column. */
+.school-radius-map-column { min-width: 0; }
+.school-radius-map-status { color: var(--muted); font-size: 12px; }
+.school-radius-result-number {
+  display: inline-flex; justify-content: center; align-items: center;
+  min-width: 24px; height: 24px; margin-right: 7px; padding: 0 4px;
+  border-radius: 12px; background: var(--primary); color: #fff; font-size: 12px;
+}
+.school-map-school-node .school-map-school-number {
+  fill: #fff; font-size: 9px; font-weight: 800;
+  text-anchor: middle; dominant-baseline: central; stroke: none;
+}
+.school-map-number-leader { stroke: #94a3b8; stroke-width: .6; }
+.school-radius-search-page .school-radius-static-fallback .school-radius-map-svg {
+  display: block; width: 100%; max-width: 520px; height: auto; margin-inline: auto;
+}
+.school-radius-search-page .school-radius-leaflet-map[hidden] { display: none; }

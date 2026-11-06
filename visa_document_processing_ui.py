@@ -31,16 +31,9 @@ def processing_dates_html(case_id, csrf, summary, documents):
     fields=[]
     for key,label in FIELDS.items():
         state=summary.get('fields',{}).get(key,{})
-        control=f'<label>{label}<input type="date" name="{key}" value="{escape(str(state.get("value") or ""),quote=True)}"></label><p>{escape(str(state.get("status") or "Not Detected"))} · {escape(str(state.get("source") or ""))}</p>'
-        if key!='medical_completed_date':
-            control+=f'<label>Source for {label}<select name="source_{key}"><option value="">Manual entry / current source</option>'
-            for d in documents:
-                if d.get('archived_at'):continue
-                selected=' selected' if d['id']==state.get('document_id') else ''
-                control+=f'<option value="{int(d["id"])}"{selected}>{escape(str(d.get("display_name") or d.get("original_name") or d["id"]))}</option>'
-            control+='</select></label>'
+        control=f'<label>{label}<input type="date" name="{key}" value="{escape(str(state.get("value") or ""),quote=True)}"></label>'
         fields.append(control)
-    return '<section class="panel" id="visa-processing-dates"><h2>Processing speed</h2><p>Calendar days. Grant Sent On is separate from Date of Grant. Medical Completed is entered by Staff.</p><p>Health Exam Date uses only an explicitly completed examination date. Manual corrections are retained.</p>'+cards+validation+_form(case_id,csrf,'correct-processing-dates',''.join(fields)+'<button>Save processing dates</button>')+'</section>'
+    return '<section class="panel" id="visa-processing-dates"><h2>Processing speed</h2><p>Calendar days. Grant Sent On is separate from Date of Grant. Medical Completed is entered by Staff.</p><p>Enter or correct the dates below. Health Exam Date is the completed examination date. Manual corrections are retained.</p>'+cards+validation+_form(case_id,csrf,'correct-processing-dates',''.join(fields)+'<button>Save processing dates</button>')+'</section>'
 
 def keyword_rules_html(case_id, csrf, rules):
     from visa_document_metadata import CATEGORIES

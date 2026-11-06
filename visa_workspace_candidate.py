@@ -10,7 +10,7 @@ from urllib.parse import quote
 AI_UNAVAILABLE_MESSAGE = 'AI-READY · AI is not enabled. Visa documents continue to use the approved deterministic workflow.'
 
 
-def document_workspace_html(case_id, csrf, documents, submissions, extractions, result=None):
+def document_workspace_html(case_id, csrf, documents, submissions, extractions, result=None, *, show_official_review=True, official_decision_confirmed=False):
     from visa_ai_candidate import provider_from_environment, VisaAIError
     try: ai_available = provider_from_environment() is not None
     except VisaAIError: ai_available = False
@@ -40,14 +40,20 @@ def document_workspace_html(case_id, csrf, documents, submissions, extractions, 
             kinds=(('lodgement_receipt','Acknowledge Letter'),('medical','Health Examination'),('grant','IMMI Grant Letter'),('refusal','IMMI Refusal Letter'))
             kind_options=''.join(f'<option value="{escape(key,quote=True)}">{escape(text)}</option>' for key,text in kinds)
             category_options=''.join(f'<option value="{escape(key,quote=True)}">{escape(text)}</option>' for key,text in CATEGORIES.items())
-            body=hidden+f'<label>Document Type / 文件类型<select name="document_kind">{kind_options}</select></label><label>Category / 材料分类<select name="category">{category_options}</select></label><label>Grant / Refusal Date<input type="date" name="decision_date"></label><label>Length of Stay<input name="length_of_stay"></label><button>Save and continue</button>'
+            body=hidden+f'<label>Document Type / 文件类型<select name="document_kind">{kind_options}</select></label><label>Category / 材料分类<select name="category">{category_options}</select></label><button>Save and continue</button>'
             reviews.append(f'<article class="visa-result-document visa-result-document--unknown"><h3>{label}</h3><p role="status">Unable to classify automatically. Select the document type and category to continue.</p>{form("resolve-unknown",body)}</article>')
+            continue
+        # Ordinary date entry belongs to the single processing-date form. Keep
+        # first official decisions reachable for independent applicants without
+        # treating medical/acknowledgement letters as decision confirmations.
+        if not show_official_review or values.get('document_kind') not in {'grant','refusal'} or official_decision_confirmed:
             continue
         inputs=hidden
         for key in ('document_kind','decision_type','official_date','expiry_date'):
-            inputs+=f'<input type="hidden" name="{key}" value="{escape(str(values.get(key) or ""),quote=True)}">'
-        inputs+=f'<label>Grant / Refusal Date<input type="date" name="decision_date" value="{escape(str(values.get("decision_date") or ""),quote=True)}"></label><label>Length of Stay<input name="length_of_stay" value="{escape(str(values.get("length_of_stay") or ""),quote=True)}"></label><label>Medical Completed Date<input type="date" name="medical_completed_date" value="{escape(str(values.get("medical_completed_date") or ""),quote=True)}"></label><button>Save business details</button>'
-        reviews.append(f'<article class="visa-result-document"><h3>{label}</h3>{form("confirm",inputs)}</article>')
+            field_value=values.get(key) or (values.get('document_kind') if key=='decision_type' else '')
+            inputs+=f'<input type="hidden" name="{key}" value="{escape(str(field_value or ""),quote=True)}">'
+        inputs+=f'<label>Grant / Refusal Date<input type="date" name="decision_date" value="{escape(str(values.get("decision_date") or ""),quote=True)}"></label><label>Length of Stay<input name="length_of_stay" value="{escape(str(values.get("length_of_stay") or ""),quote=True)}"></label><button>Confirm official Visa decision</button>'
+        reviews.append(f'<details class="visa-result-document"><summary>Confirm official Visa decision · {label}</summary>{form("confirm",inputs)}</details>')
     result=result or {'effective_result':'Pending','authority':'legacy','auto_detected_result':None,'manual_override':False,'conflict':False,'history':[]}
     authority='Manual / 人工' if result.get('manual_override') else 'Auto / 自动' if result.get('authority')=='auto' else 'Current record / 当前记录'
     conflict='<p class="visa-result-conflict" role="alert">Conflicting Grant and Refusal evidence requires Staff review.</p>' if result.get('conflict') else ''
@@ -95,6 +101,9 @@ class VisaWorkspaceCandidateMixin:
         from visa_documents_candidate import propose_letter
         from visa_document_lifecycle import KIND_CATEGORY
         from pypdf.errors import PdfReadError
+        # A staff-selected Draft is prepared evidence, even if it mentions a prior grant.
+        if self.visa_material_item_title(item).strip().lower() == 'draft':
+            return 'other'
         selected=self.visa_lodgement_file_type_from_material_item(item,filename)
         text=''
         try:
@@ -272,6 +281,7 @@ class VisaWorkspaceCandidateMixin:
         official['grant_date']=projection['grant_date']
         source=f'<a href="{escape(official["source_href"],quote=True)}">Review original official letter / retained record</a>' if official['source_href'] else ''
         html='<section class="panel"><h2>Official Visa decision</h2><p>Date of Grant: '+escape(official['grant_date'] or 'No exact confirmed grant source')+'</p><p>Length of Stay: '+escape(official['length_of_stay'] or 'Not retained as a separate field; review original linked letter')+'</p><p>Visa expiry date: '+escape(official['expiry_date'] or 'Not retained')+'</p>'+source+'<p>Retained official values; separate from processing sent-on dates. Original notes remain in the Student VISA record.</p></section>'
+        html+=f'<p><a href="/visa-management/cases/{cid}/workspace#visa-result">Confirm official Visa decision</a></p>'
         html+=processing_dates_html(cid,self.csrf,summary,documents)
         html+=f'<form method="post" action="/visa-management/cases/{cid}/workspace"><input type="hidden" name="csrf" value="{escape(self.csrf,quote=True)}"><input type="hidden" name="action" value="correct-grant-date"><label>Date of Grant<input type="date" name="grant_date" value="{escape(projection["grant_date"],quote=True)}"></label><button>Save Date of Grant</button></form>'
         active_ids={d.get('id') for d in projection['documents']}
@@ -281,12 +291,13 @@ class VisaWorkspaceCandidateMixin:
             x['document_label']=source['original_name'] if source else 'Retained source letter'
             review=db.one('SELECT * FROM visa_letter_reviews WHERE extraction_id=? ORDER BY id DESC LIMIT 1',(x['id'],))
             if review:x['effective_json']=review['confirmed_json']
-        # Reuse the same audited letter review controls in the normal Case page.
+        # Keep result correction/history and classification recovery on the normal Case page.
+        # Official letter confirmation is available separately in the workspace.
         result=None
         if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'"):
             from visa_result_status import result_summary
             with db.transaction() as conn:result=result_summary(conn,cid)
-        review_html=document_workspace_html(cid,self.csrf,[],[],extractions,result)
+        review_html=document_workspace_html(cid,self.csrf,[],[],extractions,result,show_official_review=False)
         marker='<section class="panel" id="visa-result">'
         html+=marker+review_html.partition(marker)[2]
         return html.replace('<input type="hidden" name="action"', '<input type="hidden" name="return_legacy" value="1"><input type="hidden" name="action"')
@@ -495,7 +506,8 @@ class VisaWorkspaceCandidateMixin:
         if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'"):
             from visa_result_status import result_summary
             with db.transaction() as conn:result=result_summary(conn,int(case_id))
-        body=header+document_workspace_html(case_id,self.csrf,documents,submitted,extractions,result)
+        official_decision_confirmed=bool(db.one('SELECT 1 FROM visa_case_confirmed_decisions WHERE visa_case_id=?',(case_id,)))
+        body=header+document_workspace_html(case_id,self.csrf,documents,submitted,extractions,result,official_decision_confirmed=official_decision_confirmed)
         if processing is not None:
             from visa_document_processing_ui import processing_dates_html, keyword_rules_html
             body+=processing_dates_html(case_id,self.csrf,processing,documents)+keyword_rules_html(case_id,self.csrf,rules)
@@ -600,6 +612,16 @@ class VisaWorkspaceCandidateMixin:
         path=self._visa_document_path(dict(case),dict(raw));data=path.read_bytes()
         with db.transaction() as conn:
             doc=register_document(conn,int(case['id']),student_document_id=int(document_id),file_path=str(path),original_name=raw['original_name'],version=int(dict(raw).get('version') or 1),sha256=hashlib.sha256(data).hexdigest(),category=LEGACY.get(dict(raw).get('document_type'),'other'),actor_user_id=self.user['id'],occurred_at=g['now_iso']())
+            # Keep the prepared file registered without extracting an official result from Draft answers.
+            if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_case_document_links'"):
+                link_document = self.visa_material_link_document_expr('l')
+                draft = db.one(f"""SELECT 1 FROM visa_case_document_links l
+                    WHERE l.visa_case_id=? AND {link_document}=?
+                      AND l.document_category='Visa Result / S56' AND l.document_type='Draft'
+                      AND l.used_in_this_case=1 AND COALESCE(l.status,'Linked')='Linked'""",
+                    (case['id'],document_id))
+                if draft:
+                    return
             text=self._visa_read_text(dict(case),doc)
             if text:save_extraction(conn,int(case['id']),doc['id'],text=text,actor_user_id=self.user['id'],occurred_at=g['now_iso']())
 

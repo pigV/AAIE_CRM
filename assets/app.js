@@ -3153,11 +3153,15 @@
   qa("[data-school-radius-leaflet], [data-school-living-cost-leaflet]").forEach((shell) => {
     const container = q("[data-school-radius-leaflet-map]", shell);
     const dataEl = q("#school-radius-leaflet-data", shell);
+    const status = q("[data-school-radius-map-status]", shell);
+    const isRadiusSearch = Boolean(shell.closest(".school-radius-search-page"));
     let tileLoadFailed = false;
     const showMapFailure = () => {
       if (tileLoadFailed) return;
       tileLoadFailed = true;
       shell.classList.remove("is-ready");
+      if (status) status.hidden = true;
+      if (isRadiusSearch && container) container.hidden = true;
       const notice = document.createElement("p");
       notice.className = "notice warn";
       notice.setAttribute("role", "status");
@@ -3190,11 +3194,15 @@
       });
     }
     const map = L.map(container, mapOptions).setView(center, 12);
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    const tiles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       referrerPolicy: 'origin',
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    }).on("tileerror", showMapFailure).addTo(map);
+    }).on("tileerror", showMapFailure).on("load", () => {
+      if (tileLoadFailed) return;
+      shell.classList.add("is-ready");
+      if (status) status.hidden = true;
+    }).addTo(map);
     const centerMarker = L.circleMarker(center, {
       radius: 8,
       color: "#ffffff",
@@ -3260,7 +3268,7 @@
         fillOpacity: 0.9,
       }).addTo(map);
       marker.bindPopup(
-        `<strong>${escapeHtml(school.name)}</strong><br>${escapeHtml(school.distance_text)} ${escapeHtml(school.direction)}<br>${escapeHtml(school.coordinate_source)}`
+        `<strong>${school.number ? `${escapeHtml(school.number)}. ` : ""}${escapeHtml(school.name)}</strong><br>${escapeHtml(school.distance_text)} ${escapeHtml(school.direction)}<br>${escapeHtml(school.coordinate_source)}`
       );
       bounds.extend(point);
       if (school.selected || (!lineTarget && index === 0)) lineTarget = point;
@@ -3268,7 +3276,10 @@
     if (lineTarget) L.polyline([center, lineTarget], { color: "#d97706", weight: 2, dashArray: "7 5" }).addTo(map);
     if (bounds.isValid()) map.fitBounds(bounds.pad(0.18));
     setTimeout(() => map.invalidateSize(), 80);
-    if (!tileLoadFailed) shell.classList.add("is-ready");
+    // A completed tile load, rather than map construction, controls readiness.
+    setTimeout(() => {
+      if (!shell.classList.contains("is-ready")) showMapFailure();
+    }, 15000);
   });
 
   qa("[data-living-cost-toggle]").forEach((toggle) => {
