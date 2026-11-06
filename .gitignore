@@ -125,3 +125,9 @@ TEST_LOGIN.txt
 
 # Private approved business-decision reference; recovered locally only.
 /config/workflow/frozen-human-decisions-v1.json
+
+# Ship only this pinned map dependency; keep other vendor directories ignored.
+!assets/vendor/
+assets/vendor/*
+!assets/vendor/leaflet-1.9.4/
+!assets/vendor/leaflet-1.9.4/**

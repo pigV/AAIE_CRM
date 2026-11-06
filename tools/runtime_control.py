@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from runtime_configuration import RuntimeConfiguration, RuntimeConfigurationError, canonical, preflight
 from staging_environment import ManagedRuntime, IsolationError, SCHOOL_REPORT_PDFUNITE
-from tools import school_map_tile_control
+from tools import school_map_tile_control, build_document_ocr
 from wechat_runtime import runtime_wechat_environment, runtime_wechat_network_rules
 from school_report_browser import sandbox_rules as school_report_browser_sandbox_rules
 
@@ -271,6 +271,7 @@ def sandbox_profile(config):
         *runtime_wechat_network_rules(config),
         "(allow process-fork)", "(deny signal)", "(deny process-exec)",
         f"(allow process-exec (literal {q(PYTHON)}) (literal {q(Path(PYTHON).resolve())}))",
+        f'(allow process-exec (literal {q(config.root / "tools/document-vision-ocr")}))',
         *school_report_browser_sandbox_rules(config.root / "tmp"),
         *([f"(allow process-exec (literal {q(SCHOOL_REPORT_PDFUNITE)}))"] if adapter.school_library_read_roots else []),
         *(['(allow process-exec (literal "/sbin/mount"))'] if config.mode == "production" else []),
@@ -367,6 +368,12 @@ def start(config):
         raise RuntimeControlError("Saved PID state exists; inspect status before start")
     if canonical(config.root / "map_tile_service/pid.json").exists():
         raise RuntimeControlError("Saved map helper state exists; inspect before start")
+    # Managed uploads never compile Swift inside the service sandbox.
+    # Prepare the exact helper before starting any managed child.
+    try:
+        build_document_ocr.build(data_root=config.root, source_root=config.source_root)
+    except RuntimeError as exc:
+        raise RuntimeControlError(str(exc)) from exc
     profile = canonical(config.root / "config/runtime.sb")
     with runtime_file(config, profile, "w") as stream:
         stream.write(sandbox_profile(config))

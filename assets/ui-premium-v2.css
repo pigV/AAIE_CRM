@@ -26717,3 +26717,16 @@
   }
 }
 /* End Student Offer tab */
+
+/* Radius search map viewport should not grow into a full-page square. */
+.ui-premium-v2 .school-radius-search-page .school-radius-search-map-panel .school-radius-leaflet-map {
+  height: 500px; min-height: 360px; aspect-ratio: auto;
+}
+.ui-premium-v2 .school-radius-search-page .school-radius-search-static-fallback .school-radius-map-svg {
+  max-width: 520px;
+}
+@media (max-width: 760px) {
+  .ui-premium-v2 .school-radius-search-page .school-radius-search-map-panel .school-radius-leaflet-map {
+    height: 360px; min-height: 300px;
+  }
+}

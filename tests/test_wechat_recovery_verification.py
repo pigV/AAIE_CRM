@@ -31,7 +31,7 @@ class WechatRecoveryVerificationTests(unittest.TestCase):
                        MaintenanceError=type("MaintenanceError", (Exception,), {}))
         for node in TREE.body:
             if (isinstance(node, ast.Assign) and any(
-                    isinstance(t, ast.Name) and t.id == "WECHAT_RECOVERY_VERIFY_FILENAME"
+                    isinstance(t, ast.Name) and t.id in {"WECHAT_RECOVERY_VERIFY_FILENAME", "WECHAT_RECOVERY_VERIFY_FILENAMES"}
                     for t in node.targets)):
                 exec(compile(ast.Module(body=[node], type_ignores=[]), "app.py", "exec"), self.ns)
         methods = [n for n in HANDLER.body if isinstance(n, ast.FunctionDef)
@@ -62,6 +62,37 @@ class WechatRecoveryVerificationTests(unittest.TestCase):
         self.assertEqual(body, PAYLOAD)
         self.assertEqual(headers["Content-Type"], "text/plain; charset=utf-8")
         self.assertEqual(int(headers["Content-Length"]), len(PAYLOAD))
+
+    def test_current_application_file_returns_exact_bytes_without_login(self):
+        name = "a15ebf69af69739a2d96635e629b73e9.txt"
+        (self.verify / name).write_bytes(PAYLOAD)
+        status, headers, body = self.request("/" + name)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, PAYLOAD)
+        self.assertEqual(headers["Content-Type"], "text/plain; charset=utf-8")
+        self.assertEqual(int(headers["Content-Length"]), len(PAYLOAD))
+
+    def test_current_application_post_is_rejected(self):
+        name = "a15ebf69af69739a2d96635e629b73e9.txt"
+        (self.verify / name).write_bytes(PAYLOAD)
+        self.assertEqual(self.request("/" + name, "POST")[0], 405)
+
+    def test_current_application_missing_file_is_not_found(self):
+        self.assertEqual(self.request("/a15ebf69af69739a2d96635e629b73e9.txt")[0], 404)
+
+    def test_current_application_symlink_cannot_escape_directory(self):
+        name = "a15ebf69af69739a2d96635e629b73e9.txt"
+        outside = self.root / "private.txt"
+        outside.write_bytes(b"private")
+        (self.verify / name).symlink_to(outside)
+        self.assertEqual(self.request("/" + name)[0], 404)
+
+    def test_current_application_path_traversal_is_not_served(self):
+        name = "a15ebf69af69739a2d96635e629b73e9.txt"
+        (self.verify / name).write_bytes(PAYLOAD)
+        for path in ["/../" + name, "/%2e%2e/" + name, "/other/" + name]:
+            with self.subTest(path=path):
+                self.assertEqual(self.request(path)[0], 404)
 
     def test_legacy_mp_verification_still_works(self):
         (self.verify / "MP_verify_example.txt").write_bytes(b"legacy-proof")

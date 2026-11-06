@@ -9382,7 +9382,7 @@ class CoreTests(unittest.TestCase):
             finally:
                 app_module.db = old_db
 
-    def test_school_radius_map_context_keeps_leaflet_payload_empty_and_svg_school_markers(self):
+    def test_school_radius_map_context_keeps_filtered_school_markers_and_no_extra_rings(self):
         old_db = app_module.db
         with tempfile.TemporaryDirectory() as folder:
             db = Database(Path(folder) / "aaie_crm.db")
@@ -9402,7 +9402,8 @@ class CoreTests(unittest.TestCase):
                     self.assertEqual(payload["cbd"]["label"], "Melbourne CBD")
                     self.assertGreater(payload["cbd"]["distance_km"], 0)
                     self.assertIn("Melbourne CBD", payload["cbd"]["distance_text"])
-                    self.assertEqual(payload["schools"], [])
+                    self.assertEqual(len(payload["schools"]), len(context["schools_with_distance"]))
+                    self.assertEqual([school["id"] for school in payload["schools"]], [school["id"] for school in context["schools_with_distance"]])
                     self.assertEqual(payload["circle_radii_km"], [])
                     self.assertIn("school_radius_map_svg", context)
                     self.assertNotIn("data-radius-km=", context["school_radius_map_svg"])
@@ -9623,8 +9624,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("OpenStreetMap", app)
         self.assertIn("Leaflet", app)
         self.assertIn("school_radius_leaflet_map_html", app)
-        self.assertIn("https://unpkg.com", app)
-        self.assertIn("https://*.tile.openstreetmap.org", app)
+        self.assertIn("/assets/vendor/leaflet-1.9.4/leaflet.js", app)
+        self.assertIn("https://tile.openstreetmap.org", app)
         self.assertIn("data-school-radius-leaflet", app)
         self.assertNotIn("if (!container || !dataEl || !window.L) return;", app)
         self.assertIn(".school-radius-leaflet-shell.is-ready + .school-radius-static-fallback", css)

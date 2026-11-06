@@ -270,6 +270,7 @@ class ManagedTransferInfrastructureTests(unittest.TestCase):
                 stack.enter_context(patch.object(control, name, return_value=value))
             stack.enter_context(patch.object(control, "runtime_file", side_effect=lambda *args: nullcontext(io.StringIO())))
             stack.enter_context(patch.object(control.school_map_tile_control, "start"))
+            builder = stack.enter_context(patch.object(control.build_document_ocr, "build"))
             stack.enter_context(patch.object(control.subprocess, "Popen", side_effect=children))
             stack.enter_context(patch.object(control.time, "sleep"))
             health = stack.enter_context(patch.object(control, "health", return_value={"healthy": True}))
@@ -280,6 +281,7 @@ class ManagedTransferInfrastructureTests(unittest.TestCase):
             cleanup = stack.enter_context(patch.object(control, "cleanup_started", return_value=["admin:TimeoutError"] if incomplete else []))
             with self.assertRaisesRegex(control.RuntimeControlError, "cleanup incomplete" if incomplete else ".+"):
                 control.start(cfg)
+            builder.assert_called_once_with(data_root=cfg.root, source_root=cfg.source_root)
             cleanup.assert_called_once()
             self.assertEqual([role for role, child in cleanup.call_args.args[1]], expected_roles)
             self.assertTrue(cleanup.call_args.args[2])

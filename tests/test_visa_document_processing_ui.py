@@ -24,15 +24,19 @@ class ProcessingUI(unittest.TestCase):
         from visa_document_processing_ui import processing_dates_html
         html=processing_dates_html(1,'csrf',{'fields':{},'total_processing_days':None,'medical_completed_to_grant_days':None,'validation':[]},[])
         self.assertIn('Pending',html);self.assertNotIn('0 days',html)
-        self.assertIn('Health Exam Date uses only an explicitly completed examination date. Manual corrections are retained.',html)
+        self.assertIn('Health Exam Date is the completed examination date. Manual corrections are retained.',html)
         controls=Controls(html)
         self.assertTrue(any(x.get('name')=='medical_completed_date' for x in controls.inputs))
-    def test_same_day_zero_is_available_and_source_selection_is_explicit(self):
+    def test_same_day_zero_is_available_and_dates_are_directly_editable(self):
         from visa_document_processing_ui import processing_dates_html
         html=processing_dates_html(1,'csrf',{'fields':{},'total_processing_days':0,'medical_completed_to_grant_days':5,'validation':['Grant before acknowledgement']},[{'id':7,'display_name':'letter.txt','archived_at':None}])
         self.assertIn('0 days',html);self.assertIn('5 days',html)
         self.assertIn('Grant before acknowledgement',html)
-        self.assertTrue(any(x.get('name')=='source_grant_sent_on' for x in Controls(html).inputs))
+        controls=Controls(html)
+        for name in ('acknowledge_sent_on','health_exam_date','grant_sent_on','medical_completed_date'):
+            self.assertTrue(any(x.get('name')==name and x.get('type')=='date' for x in controls.inputs))
+        self.assertFalse(any(x.get('name','').startswith('source_') for x in controls.inputs))
+        self.assertTrue(any(x.get('name')=='action' and x.get('value')=='correct-processing-dates' for x in controls.inputs))
 
     def test_rule_buttons_show_staff_actions_not_template_expressions(self):
         from visa_document_processing_ui import keyword_rules_html

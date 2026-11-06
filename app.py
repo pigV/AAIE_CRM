@@ -570,9 +570,13 @@ report_i18n_zh_CN = {
 UPLOAD_REVIEW_DIR = APP_DIR / "upload_staging"
 ASSET_DIR = SOURCE_DIR / "assets" if STAGING else APP_DIR / "assets"
 WECHAT_VERIFY_DIR = APP_DIR / "secure_assets" / "wechat_verification"
-# Exact file requested for the current WeChat access-restoration application.
-# Its contents stay in the private runtime directory, outside source control.
+# Explicitly approved WeChat access-restoration verification files.
+# Their contents stay in the private runtime directory, outside source control.
 WECHAT_RECOVERY_VERIFY_FILENAME = "9edd4124efadbcd28f3214297b13630c.txt"
+WECHAT_RECOVERY_VERIFY_FILENAMES = (
+    WECHAT_RECOVERY_VERIFY_FILENAME,
+    "a15ebf69af69739a2d96635e629b73e9.txt",
+)
 SCHOOL_PLAN_BRAND_LOGO_CANDIDATES = (
     ASSET_DIR / "branding" / "aoya_logo_transparent.png",
     ASSET_DIR / "branding" / "aoya_logo_original.png",
@@ -23942,7 +23946,7 @@ def infer_nsw_public_offer_details(upload, text, lines):
 def offer_course_details_schools(text):
     """Prefer explicit Course Details cells over incidental earlier school names."""
     section = text_between_patterns(
-        text, r"\bCourse\s+Details\b",
+        text, r"(?:^|\n)[ \t]*Course\s+Details[ \t]*(?:\r?\n|$)",
         r"\b(?:Accommodation\s+and\s+Welfare|Conditions\s*/\s*Pre-requisites)\b|\Z",
     )
     if not section:
@@ -27008,7 +27012,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 return self.serve_asset()
             if re.fullmatch(r"/MP_verify[A-Za-z0-9_-]+\.txt", self.parsed.path):
                 return self.serve_wechat_verify_file()
-            if self.parsed.path == f"/{WECHAT_RECOVERY_VERIFY_FILENAME}":
+            if self.parsed.path in {f"/{name}" for name in WECHAT_RECOVERY_VERIFY_FILENAMES}:
                 if method != "GET":
                     return self.text("Method not allowed", HTTPStatus.METHOD_NOT_ALLOWED)
                 return self.serve_wechat_verify_file()
@@ -27837,7 +27841,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "same-origin")
         if "content-security-policy" not in header_keys:
-            self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; form-action 'self'; frame-src 'self'")
+            policy = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; form-action 'self'; frame-src 'self'"
+            if 'school-radius-search-page' in content and 'data-school-radius-leaflet' in content:
+                policy = policy.replace("img-src 'self' data: blob:;", "img-src 'self' data: blob: https://tile.openstreetmap.org;")
+            self.send_header("Content-Security-Policy", policy)
         for key, value in header_items:
             self.send_header(key, value)
         self.end_headers()
@@ -27960,7 +27967,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
     def serve_wechat_verify_file(self):
         filename = Path(self.parsed.path).name
         if (not re.fullmatch(r"MP_verify[A-Za-z0-9_-]+\.txt", filename)
-                and filename != WECHAT_RECOVERY_VERIFY_FILENAME):
+                and filename not in WECHAT_RECOVERY_VERIFY_FILENAMES):
             return self.text("Not found", 404)
         target = (WECHAT_VERIFY_DIR / filename).resolve()
         if WECHAT_VERIFY_DIR.resolve() not in target.parents or not target.is_file():
@@ -30678,7 +30685,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             cbd_x, cbd_y = self.school_radius_project_point(center, cbd["latitude"], cbd["longitude"], scale)
             selected_line = f'<line class="school-map-direction-line" x1="240" y1="240" x2="{cbd_x:.1f}" y2="{cbd_y:.1f}"></line>'
             cbd_node = f'<g class="school-map-cbd"><circle cx="{cbd_x:.1f}" cy="{cbd_y:.1f}" r="6"></circle><text x="{cbd_x + 8:.1f}" y="{cbd_y - 8:.1f}">{esc(cbd["label"])}</text></g>'
-        for school in schools:
+        occupied = [(225, 210, 345, 255), (395, 15, 470, 105)]
+        if cbd:
+            occupied.append((cbd_x + 6, cbd_y - 22,
+                             cbd_x + 6 + max(88, len(cbd["label"]) * 7.5), cbd_y + 4))
+        for number, school in enumerate(schools, 1):
             if school.get("latitude") is None or school.get("longitude") is None:
                 continue
             x, y = self.school_radius_project_point(center, school["latitude"], school["longitude"], scale)
@@ -30687,10 +30698,36 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             sector_class = "private" if self.school_is_private_school(school) else "public"
             selected_class = " school-map-school-selected" if str(school.get("id") or "") == str(selected_school_id or "") else ""
             label = esc(school.get("school_name") or "School")
+            label_x = label_y = None
+            # Search the whole diagram so coincident suburb fallback coordinates
+            # still get distinct numbered labels; leader lines keep true locations.
+            candidates = [(x, y)] + sorted(
+                ((gx, gy) for gy in range(16, 465, 24) for gx in range(16, 465, 24)),
+                key=lambda point: ((point[0] - x) ** 2 + (point[1] - y) ** 2, point[1], point[0]),
+            )
+            for trial_x, trial_y in candidates:
+                box = (trial_x - 12, trial_y - 12, trial_x + 12, trial_y + 12)
+                if (12 <= trial_x <= 468 and 12 <= trial_y <= 468
+                        and not any(box[0] < b[2] and box[2] > b[0]
+                                    and box[1] < b[3] and box[3] > b[1] for b in occupied)):
+                    label_x, label_y = trial_x, trial_y
+                    occupied.append(box)
+                    break
+            if label_x is None:
+                # An exceptionally dense diagram keeps the accessible point and
+                # complete list instead of printing unreadable overlapping numbers.
+                school_nodes.append(
+                    f'<g class="school-map-school-node school-map-school-{sector_class}{selected_class}">'
+                    f'<title>{number}. {label}</title><circle cx="{x:.1f}" cy="{y:.1f}" r="2"></circle></g>'
+                )
+                continue
             school_nodes.append(
                 f'<g class="school-map-school-node school-map-school-{sector_class}{selected_class}">'
-                f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5"></circle>'
-                f'<text x="{x + 7:.1f}" y="{y - 7:.1f}">{label}</text></g>'
+                f'<title>{number}. {label}</title>'
+                f'<line class="school-map-number-leader" x1="{x:.1f}" y1="{y:.1f}" x2="{label_x:.1f}" y2="{label_y:.1f}"></line>'
+                f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2"></circle>'
+                f'<circle cx="{label_x:.1f}" cy="{label_y:.1f}" r="10"></circle>'
+                f'<text class="school-map-school-number" x="{label_x:.1f}" y="{label_y:.1f}">{number}</text></g>'
             )
         return f"""<svg class="school-radius-map-svg school-radius-search-map-panel" viewBox="0 0 480 480" role="img" aria-label="学校所在区与 CBD 地图">
           <rect x="0" y="0" width="480" height="480" rx="8"></rect>
@@ -30721,7 +30758,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "cbd": cbd_payload,
             "radius_km": radius_km or max(SCHOOL_RADIUS_VALUES_KM),
             "circle_radii_km": [],
-            "schools": [],
+            "schools": [
+                {"id": school.get("id"), "number": number,
+                 "name": school.get("school_name") or "School",
+                 "latitude": school.get("latitude"), "longitude": school.get("longitude"),
+                 "distance_text": school.get("distance_text") or "",
+                 "direction": school.get("direction_label") or "",
+                 "coordinate_source": school.get("coordinate_source_label") or "",
+                 "sector": self.school_radius_row_effective_sector(school),
+                 "selected": bool(selected_school_id) and str(school.get("id")) == str(selected_school_id)}
+                for number, school in enumerate(schools, 1)
+                if school.get("latitude") is not None and school.get("longitude") is not None
+            ],
         }
 
     def school_radius_leaflet_map_html(self, center, schools, selected_school_id="", radius_km=None):
@@ -30730,10 +30778,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         payload = self.school_radius_leaflet_map_payload(center, schools, selected_school_id, radius_km)
         payload_json = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c").replace("&", "\\u0026")
         return f"""<div class="school-radius-leaflet-shell school-radius-search-map-panel" data-school-radius-leaflet>
-          <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+          <link rel="stylesheet" href="/assets/vendor/leaflet-1.9.4/leaflet.css">
           <div id="school-radius-leaflet-map" class="school-radius-leaflet-map" data-school-radius-leaflet-map role="img" aria-label="OpenStreetMap radius school search map"></div>
           <script type="application/json" id="school-radius-leaflet-data">{payload_json}</script>
-          <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+          <script src="/assets/vendor/leaflet-1.9.4/leaflet.js"></script>
+          <p class="school-radius-map-status" data-school-radius-map-status role="status">地图加载中…</p>
           <small class="school-radius-map-credit">Leaflet + OpenStreetMap 贡献者</small>
         </div>"""
 
@@ -30742,8 +30791,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         svg = context.get("school_radius_map_svg") or ""
         if not leaflet:
             return svg
-        return f"""{leaflet}
-          <details class="school-radius-static-fallback school-radius-search-static-fallback" open><summary>Static radius diagram</summary>{svg}</details>"""
+        return f"""<div class="school-radius-map-column">{leaflet}
+          <details class="school-radius-static-fallback school-radius-search-static-fallback" open><summary>静态位置示意图（编号对应学校列表）</summary>{svg}</details></div>"""
 
     def school_radius_map_context(self, raw_input, state, rows, radius_km=None, sector="", year_level="", selected_school_id=""):
         center = self.school_radius_resolve_center(raw_input, state)
@@ -30925,12 +30974,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
     def school_radius_result_rows_html(self, context):
         selected_school_id = str(context.get("selected_school_id") or "")
         rows = []
-        for school in context["schools_with_distance"]:
+        for number, school in enumerate(context["schools_with_distance"], 1):
             selected_class = " selected" if selected_school_id and selected_school_id == str(school.get("id") or "") else ""
             min_year = school.get("international_year_level_min") or "待补充"
             max_year = school.get("international_year_level_max") or "待补充"
             rows.append(f"""<article class="school-radius-result-card school-radius-search-card{selected_class}">
-              <a class="school-radius-result-name school-radius-search-card-name" href="/schools/{school['id']}">{esc(school['school_name'])}</a>
+              <a class="school-radius-result-name school-radius-search-card-name" href="/schools/{school['id']}"><span class="school-radius-result-number">{number}</span>{esc(school['school_name'])}</a>
               <div class="school-radius-result-facts school-radius-search-card-facts">
                 <span><small>距离</small><b>{school['distance_km']:.2f} km</b></span>
                 <span><small>最低年级</small><b>{esc(min_year)}</b></span>

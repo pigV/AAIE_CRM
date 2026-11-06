@@ -234,7 +234,8 @@ class VisaWorkspaceSecurityTests(unittest.TestCase):
         captured=[];handler._visa_send=lambda title,body:captured.append(body)
         handler.visa_case_workspace('GET','1')
         parser=FormParser();parser.feed(captured[0])
-        review=next(form for form in parser.forms if form.get('extraction_id')==str(extraction['id']))
+        # MAIN exposes reviewed dates through the dedicated editable dates form.
+        review=next(form for form in parser.forms if form.get('action')=='correct-processing-dates')
         self.assertEqual('2026-09-06',review['medical_completed_date'])
         self.assertEqual('',json.loads(self.db.one('SELECT proposed_json FROM visa_letter_extractions WHERE id=?',(extraction['id'],))[0])['medical_completed_date'])
 

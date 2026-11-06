@@ -7,6 +7,7 @@ from datetime import date
 import sqlite3
 
 from dashboard_business_time import business_windows, register_dashboard_business_date
+from dashboard_visa_metrics import load_student_visa_grant_counts
 
 from workflow_projection import (
     StageDistribution,
@@ -56,9 +57,6 @@ def load_dashboard_workflow_metrics(
     week = windows.week_parameters
     month = windows.month_parameters
 
-    visa_columns = {
-        str(row[1]) for row in conn.execute("PRAGMA table_info(visa_decision_events)")
-    }
     acceptance_columns = {
         str(row[1]) for row in conn.execute("PRAGMA table_info(cycle_final_acceptances)")
     }
@@ -109,15 +107,7 @@ def load_dashboard_workflow_metrics(
           AND dashboard_business_date(received_at)<?
           {offer_state_clause}
     """
-    grant_date_column = (
-        "decision_date" if "decision_date" in visa_columns else "confirmed_at"
-    )
-    grant_sql = f"""
-        SELECT count(*) FROM visa_decision_events
-        WHERE decision_type='grant'
-          AND dashboard_business_date({grant_date_column})>=?
-          AND dashboard_business_date({grant_date_column})<?
-    """
+    week_grants, month_grants = load_student_visa_grant_counts(conn, today=today)
     active_acceptance_clause = (
         "WHERE acceptance_status='active'"
         if "acceptance_status" in acceptance_columns
@@ -144,8 +134,8 @@ def load_dashboard_workflow_metrics(
         signed_this_week=_count(conn, signed_sql, week),
         signed_this_month=_count(conn, signed_sql, month),
         week_offer_count=_count(conn, offer_sql, week),
-        week_grant_count=_count(conn, grant_sql, week),
-        month_grant_count=_count(conn, grant_sql, month),
+        week_grant_count=week_grants,
+        month_grant_count=month_grants,
         signed_institution_structure=structure,
         stage_distribution=stage_distribution,
         active_records=active_records,

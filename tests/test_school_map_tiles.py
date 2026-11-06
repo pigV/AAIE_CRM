@@ -62,20 +62,20 @@ class SchoolMapTileTests(unittest.TestCase):
 
     def run_map(self, no_leaflet=False):
         harness = r'''
-const classes=new Set();const notices=[];let listener=null;let tileOptions=null;let tileURL=null;let markers=0;
+const classes=new Set();const notices=[];let listener=null;let loadListener=null;let tileOptions=null;let tileURL=null;let markers=0;
 const data={center:{latitude:-34.927,longitude:138.587,label:'Adelaide High School'},radius_km:10,schools:[{latitude:-34.91,longitude:138.57,name:'Synthetic School',distance_text:'2.30 km',direction:'NW',coordinate_source:'fixture'}]};
-const container={};const shell={classList:{add:x=>classes.add(x),remove:x=>classes.delete(x)},closest:()=>null,appendChild:x=>notices.push(x)};
+const container={};const shell={classList:{add:x=>classes.add(x),remove:x=>classes.delete(x),contains:x=>classes.has(x)},closest:()=>null,appendChild:x=>notices.push(x)};
 const document={body:{classList:{contains:()=>false}},createElement:()=>({setAttribute(k,v){this[k]=v;}})};
 const q=(s)=>s==='[data-school-radius-leaflet-map]'?container:s==='#school-radius-leaflet-data'?{textContent:JSON.stringify(data)}:null;
 const qa=()=>[shell];const escapeHtml=String;const setTimeout=()=>{};
 const map={setView(){return this},fitBounds(){},invalidateSize(){}};
-const layer={on(event,fn){if(event==='tileerror')listener=fn;return this},addTo(){return this}};
+const layer={on(event,fn){if(event==='tileerror')listener=fn;if(event==='load')loadListener=fn;return this},addTo(){return this}};
 const shape={addTo(){return this},bindPopup(){return this},getBounds(){return []}};
 const L={map:()=>map,tileLayer:(url,opts)=>{tileURL=url;tileOptions=opts;return layer},circleMarker:()=>{markers++;return shape},circle:()=>shape,polyline:()=>shape,latLngBounds:()=>({extend(){},isValid:()=>true,pad(){return this}})};
 const window={L: NO_LEAFLET ? null : L};
 '''.replace('NO_LEAFLET', json.dumps(no_leaflet))
         harness += map_script()
-        harness += "\nconst initialReady=classes.has('is-ready');if(listener){listener({error:new Error('HTTP 403 fixture')});listener({error:new Error('network failure fixture')});}console.log(JSON.stringify({tileURL,tileOptions,initialReady,finalReady:classes.has('is-ready'),notices,markers,schools:data.schools}));"
+        harness += "\nconst loadingReady=classes.has('is-ready');if(loadListener)loadListener();const initialReady=classes.has('is-ready');if(listener){listener({error:new Error('HTTP 403 fixture')});listener({error:new Error('network failure fixture')});}console.log(JSON.stringify({tileURL,tileOptions,loadingReady,initialReady,finalReady:classes.has('is-ready'),notices,markers,schools:data.schools}));"
         result = subprocess.run([NODE, '-e', harness], capture_output=True, text=True, timeout=10, check=True)
         return json.loads(result.stdout)
 
@@ -85,6 +85,7 @@ const window={L: NO_LEAFLET ? null : L};
         self.assertEqual(result['tileOptions']['referrerPolicy'], 'origin')
         self.assertIn('openstreetmap.org/copyright', result['tileOptions']['attribution'])
         self.assertNotIn('errorTileUrl', result['tileOptions'])
+        self.assertFalse(result['loadingReady'])
         self.assertTrue(result['initialReady'])
 
     def test_failed_tile_notice_preserves_markers_and_schools(self):
