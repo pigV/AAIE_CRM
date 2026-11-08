@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import base64
 from html import escape
 from pathlib import Path
 from io import BytesIO
 from revenue.secure_storage import write_immutable
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
@@ -17,7 +18,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 from reportlab.platypus import (
-    Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
 
@@ -82,6 +83,8 @@ def _render(snapshot: dict, output_path: str | Path, title: str, party_label: st
         ])),
         Spacer(1, 6 * mm),
     ]
+    if snapshot.get("test_notice"):
+        story.extend([Paragraph(f"<b>{escape(snapshot['test_notice'])}</b>", body), Spacer(1, 5 * mm)])
     if lines:
         data = [[Paragraph("Description", body), Paragraph("Net", right),
                  Paragraph("GST", right), Paragraph("Total", right)]]
@@ -142,6 +145,104 @@ def render_invoice_pdf(snapshot: dict, output_path: str | Path) -> str:
             ("Total", snapshot["gross_cents"]),
         ],
     )
+
+
+def render_toorak_invoice_pdf(snapshot: dict) -> bytes:
+    data = {**snapshot, "test_notice": "TEST ONLY - Not for submission or payment. Receipt date and due date pending."}
+    return _render(data, None, "Commission Invoice", "Bill to", data["bill_to"], data["lines"], [
+        ("Net", data["net_cents"]), ("GST", data["gst_cents"]), ("Total", data["gross_cents"]),
+    ])
+
+
+def render_configured_commission_invoice(snapshot: dict, layout: dict) -> bytes:
+    if layout.get("preset")=="invoice_1762":
+        from revenue.invoice_1762_pdf import render_invoice_1762
+        reference=render_invoice_1762(snapshot,layout,_InvariantCanvas)
+        if reference is not None:
+            return reference
+    style=layout["style"]
+    output=BytesIO()
+    accent=colors.HexColor(style["accent"])
+    font="RevenueUnicode" if style["font"]=="unicode" else "Times-Roman"
+    if font=="Times-Roman":
+        try:
+            str((snapshot,layout)).encode("cp1252")
+        except UnicodeEncodeError:
+            font="RevenueUnicode"
+    size=style["size"]
+    margin=style["margin"]
+    width=A4[0]-2*margin-12
+    spacing=style["spacing"]
+    align={"left":TA_LEFT,"center":TA_CENTER,"right":TA_RIGHT}[style["alignment"]]
+    normal=ParagraphStyle("CommissionBody",fontName=font,fontSize=size,leading=size+4,
+                          textColor=colors.HexColor("#263247"),alignment=align)
+    heading=ParagraphStyle("CommissionTitle",parent=normal,fontSize=size+8,leading=size+12,textColor=accent)
+    small=ParagraphStyle("CommissionNotice",parent=normal,fontSize=9,leading=13,textColor=colors.HexColor("#922438"))
+    right=ParagraphStyle("CommissionAmount",parent=normal,alignment=TA_RIGHT)
+    test_only = snapshot.get("test_only",True)
+    draft = snapshot.get("draft_notice") or snapshot["document_number"]=="DRAFT"
+    mark = "TEST ONLY" if test_only else "DRAFT" if draft else ""
+    document=SimpleDocTemplate(output,pagesize=A4,leftMargin=margin,rightMargin=margin,topMargin=margin,
+                               bottomMargin=margin,title=f"{mark} Commission invoice {snapshot['document_number']}".strip())
+    values=dict(snapshot)
+    values.update(invoice_title="Tax Invoice",please_pay=_currency_money(snapshot["gross_cents"],"AUD"),
+                  total_due=_currency_money(snapshot["gross_cents"],"AUD"),
+                  due_date=snapshot.get("due_date") or "Pending school receipt confirmation",
+                  payment_terms=snapshot.get("payment_terms") or "Payment within 30 days of school receipt of a valid invoice.")
+    for key in ("net_cents","gst_cents","gross_cents"):
+        values[key]=_currency_money(snapshot[key],"AUD")
+    story=[]
+    if mark:
+        story.extend([Paragraph(f"<b>{mark}</b> · Sample for layout review. Do not submit or pay.",small),
+                      Spacer(1,spacing)])
+    for block in layout["blocks"]:
+        kind=block["kind"]
+        if block["heading"]:
+            story.append(Paragraph(escape(block["heading"]),heading))
+        if kind=="issuer" and layout.get("logo"):
+            logo=Image(BytesIO(base64.b64decode(layout["logo"])))
+            scale=min(1,125/logo.drawWidth,54/logo.drawHeight)
+            logo.drawWidth*=scale
+            logo.drawHeight*=scale
+            logo.hAlign=style["alignment"].upper()
+            story.append(logo)
+        if kind=="footer" and layout["footer"]:
+            story.append(Paragraph(escape(layout["footer"]),normal))
+        elif kind=="items":
+            fields=block["fields"]
+            grid=[[Paragraph(escape(f["label"] or f["key"].title()),normal) for f in fields]]
+            weights={"product":1.5,"description":2.65,"quantity":0.6,"rate":1.0,"gst":0.8,"amount":1.0}
+            for line in snapshot["lines"]:
+                quantity=int(line.get("quantity",1))
+                row={"product":"School recruitment commission","description":line["description"],
+                     "quantity":quantity,"rate":_money(line["net_cents"]//quantity),
+                     "gst":"GST" if line["gst_cents"] else "—","amount":_money(line["net_cents"])}
+                grid.append([Paragraph(escape(str(row[f["key"]])),right if f["key"] in {"rate","amount"} else normal)
+                             for f in fields])
+            columns=[width*weights[f["key"]]/sum(weights.values()) for f in fields]
+            story.append(Table(grid,colWidths=columns,repeatRows=1,style=TableStyle([
+                ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#E9EFF5")),
+                ("LINEBELOW",(0,0),(-1,0),1,accent),("VALIGN",(0,0),(-1,-1),"TOP"),
+                ("BOTTOMPADDING",(0,0),(-1,-1),6),("TOPPADDING",(0,0),(-1,-1),6),
+            ])))
+        else:
+            for field in block["fields"]:
+                key,label=field["key"],field["label"]
+                value=escape(str(values.get(key) or "—")).replace("\n","<br/>")
+                prefix=f"<b>{escape(label)}:</b> " if label else ""
+                story.append(Paragraph(prefix+value,heading if key in {"issuer_name","invoice_title"} else normal))
+        story.append(Spacer(1,spacing))
+    def page_notice(pdf_canvas, doc):
+        pdf_canvas.saveState()
+        pdf_canvas.setFillColor(colors.HexColor("#922438"))
+        pdf_canvas.setFont("Helvetica-Bold",8)
+        if mark:
+            pdf_canvas.drawString(margin,margin/2,mark)
+        pdf_canvas.drawRightString(A4[0]-margin,margin/2,f"{snapshot['document_number']}  |  Page {doc.page}")
+        pdf_canvas.restoreState()
+
+    document.build(story,canvasmaker=_InvariantCanvas,onFirstPage=page_notice,onLaterPages=page_notice)
+    return output.getvalue()
 
 
 def _render_client_receipt(snapshot: dict, output_path: str | Path) -> str:

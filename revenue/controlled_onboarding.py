@@ -490,7 +490,9 @@ class ControlledOnboardingService:
         contract = self.connection.execute(
             """SELECT v.* FROM revenue_contract_versions v
                 JOIN revenue_contract_groups g ON g.id=v.contract_group_id
+               JOIN revenue_documents d ON d.id=v.document_id
                WHERE g.revenue_entity_id=? AND v.status='active'
+                 AND d.document_kind NOT IN ('school_commission_contract','school_commission_signed_contract')
                ORDER BY v.effective_from DESC,v.id DESC LIMIT 1""",
             (entity["id"],),
         ).fetchone()

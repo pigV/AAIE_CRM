@@ -115,6 +115,11 @@ class ClaimEligibilityResolver:
             raise ValueError("claim rule snapshot not found")
         import json
         configuration = json.loads(snapshot["canonical_json"])
+        if configuration.get("toorak_forecast") is True:
+            return ClaimEligibilityDecision(False, facts, ({
+                "code": "staging_forecast_only",
+                "message": "Toorak staging forecasts are not eligible for claims.",
+            },), ())
         reasons: list[dict] = []
         if commencement is None:
             reasons.append({

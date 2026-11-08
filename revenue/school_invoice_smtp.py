@@ -1,0 +1,82 @@
+"""TLS transport for the opt-in school invoice SMTP rehearsal."""
+
+from contextlib import suppress
+from email import policy
+from email.parser import BytesParser
+from functools import lru_cache
+import os
+import smtplib
+import ssl
+import subprocess
+
+
+@lru_cache(maxsize=1)
+def _keychain_password(sender, service="AAIE CRM Staging SMTP"):
+    keychain = os.environ.get("AAIE_MANAGED_SMTP_KEYCHAIN")
+    command = ["/usr/bin/security","find-generic-password","-s",service,"-a",sender,"-w"]
+    if keychain:
+        command.append(keychain)
+    return subprocess.run(
+        command,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=90,
+    ).stdout.decode().rstrip("\r\n")
+
+
+class RehearsalSMTP:
+    def __init__(self, sender, recipient, limit=3, claim_sets=(), *, mode="smtp", simulation=True):
+        self.sender = sender
+        self.recipient = recipient
+        self.limit = limit
+        self.claim_sets = claim_sets
+        self.mode = mode
+        self.simulation = simulation
+
+    def connect(self):
+        password = (_keychain_password(self.sender) if self.simulation else
+                    _keychain_password(self.sender,"AAIE CRM Production SMTP"))
+        if not password:
+            raise ValueError("Missing rehearsal credential")
+        smtp = smtplib.SMTP_SSL("smtphz.qiye.163.com", 465, timeout=15, context=ssl.create_default_context())
+        try:
+            smtp.login(self.sender, password)
+        except BaseException:
+            with suppress(OSError,smtplib.SMTPException):
+                smtp.close()
+            _keychain_password.cache_clear()
+            raise
+        return smtp
+
+    def submit(self, recipient, content, allowed):
+        message = BytesParser(policy=policy.default).parsebytes(content, headersonly=True)
+        if (recipient != self.recipient or message.get_all("To") != [self.recipient]
+                or message.get_all("From") != [self.sender] or message.get_all("Cc") or message.get_all("Bcc")):
+            return "cancelled", "smtp_recipient_not_allowed", None
+
+        smtp = None
+        try:
+            if not allowed():
+                return "cancelled", "smtp_disabled", None
+            smtp = self.connect()
+            for command, address in ((smtp.mail, self.sender), (smtp.rcpt, recipient)):
+                code, _ = command(address)
+                if code not in (250, 251):
+                    return "failed", "smtp_rejected", code
+            if not allowed():
+                return "cancelled", "smtp_disabled", None
+            try:
+                code, _ = smtp.data(content)
+            except smtplib.SMTPDataError as error:
+                return "failed", "smtp_rejected", error.smtp_code
+            except (OSError, smtplib.SMTPException):
+                return "needs_review", "smtp_uncertain", None
+            if code == 250:
+                return "sent", None, code
+            if 400 <= code <= 599:
+                return "failed", "smtp_rejected", code
+            return "needs_review", "smtp_uncertain", code
+        except (OSError, ValueError, smtplib.SMTPException, subprocess.SubprocessError) as error:
+            return "failed", "smtp_setup_failed", getattr(error, "smtp_code", None)
+        finally:
+            if smtp is not None:
+                with suppress(OSError,smtplib.SMTPException):
+                    smtp.close()

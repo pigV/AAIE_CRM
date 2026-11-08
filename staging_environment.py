@@ -278,6 +278,25 @@ class ManagedRuntime(Staging):
     @property
     def mode(self): return self.runtime_configuration.mode
 
+    def check(self, target):
+        invoice_root = os.environ.get("AAIE_INVOICE_PDF_ROOT")
+        if invoice_root:
+            path=canonical(target)
+            if path.is_relative_to(invoice_root):
+                from tools.runtime_invoice_mail_config import invoice_pdf_environment
+                if invoice_pdf_environment(self.runtime_configuration).get("AAIE_INVOICE_PDF_ROOT")!=invoice_root:
+                    raise IsolationError("Invoice PDF storage authority changed")
+                return path
+        approved = os.environ.get("REVENUE_SECURE_STORAGE_ROOT")
+        if self.mode=="production" and approved:
+            from tools.runtime_invoice_mail_config import load_mail_config
+            mail=load_mail_config(self.runtime_configuration)
+            if mail and str(mail.pdf_root)==approved:
+                path=canonical(target)
+                if path.is_relative_to(mail.pdf_root):
+                    return path
+        return super().check(target)
+
     def assert_sandbox(self):
         super().assert_sandbox()
         lib = ctypes.CDLL('/usr/lib/libSystem.B.dylib')

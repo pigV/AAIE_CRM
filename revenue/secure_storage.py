@@ -72,11 +72,11 @@ def _acl(fd):
         raise StorageUnavailable()
 
 
-def _directory(fd, *, managed=False):
+def _directory(fd, *, managed=False, writable_mount=False):
     s = os.fstat(fd)
     if not stat.S_ISDIR(s.st_mode) or s.st_uid not in (0, os.geteuid()):
         raise StorageUnavailable()
-    if stat.S_IMODE(s.st_mode) & 0o022:
+    if stat.S_IMODE(s.st_mode) & 0o022 and not writable_mount:
         raise StorageUnavailable()
     if managed and (stat.S_IMODE(s.st_mode) != 0o700 or
                     (s.st_uid, s.st_gid) != (os.geteuid(), os.getegid())):
@@ -85,14 +85,18 @@ def _directory(fd, *, managed=False):
 
 
 @contextmanager
-def _open_directory(value, *, create=False):
+def _open_directory(value, *, create=False, writable_mount=None):
     path = _path(value)
+    if writable_mount is not None and writable_mount != Path("/Volumes/Data"):
+        raise StorageUnavailable()
     fd = -1
     try:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         fd = os.open('/', flags)
         _directory(fd)
+        current = Path("/")
         for part in path.parts[1:]:
+            current /= part
             try:
                 child = os.open(part, flags, dir_fd=fd)
             except FileNotFoundError:
@@ -101,7 +105,7 @@ def _open_directory(value, *, create=False):
                 child = os.open(part, flags, dir_fd=fd)
             os.close(fd)
             fd = child
-            _directory(fd)
+            _directory(fd, writable_mount=current==writable_mount)
         _directory(fd, managed=True)
         yield path, fd
     except (OSError, UnicodeError, TypeError) as exc:

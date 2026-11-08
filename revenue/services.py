@@ -14,6 +14,7 @@ from revenue.facts import RevenueFactAdapter
 from revenue.money import allocate_cents, apply_basis_points, gst_from_inclusive
 from revenue.repository import RevenueRepository, canonical_json, new_uid
 from revenue.rules import CommissionRuleEvaluator
+from revenue.school_commission_pilot import FORMAL_CONTRACT
 
 
 AUTHORITY_PRIORITY = {"estimated": 1, "manual": 2, "official": 3}
@@ -762,6 +763,11 @@ class RevenueService:
 
         def operation():
             claim = self.repository.require_by_uid("revenue_claims", claim_uid)
+            if self.connection.execute(
+                """SELECT 1 FROM revenue_audit_events WHERE aggregate_uid=?
+                    AND action IN ('toorak_internal_claim_issued','school_commission_claim_issued')""", (claim_uid,),
+            ).fetchone():
+                raise ValueError("Toorak test claims require the isolated commission invoice workflow")
             if claim["status"] != "issued" or claim["claim_kind"] != "direct":
                 raise ValueError("issued direct claim is required")
             context = self.connection.execute(
@@ -975,6 +981,12 @@ class RevenueService:
             line = self.repository.require_by_uid(
                 "revenue_commission_lines", commission_line_uid
             )
+            if self.connection.execute(
+                """SELECT 1 FROM revenue_rule_snapshots WHERE id=?
+                     AND json_extract(canonical_json,'$.toorak_forecast')=1""",
+                (line["rule_snapshot_id"],),
+            ).fetchone():
+                raise ValueError("Toorak test payments require the isolated commission invoice workflow")
             entity = self.repository.require_by_uid(
                 "revenue_entities", institution_entity_uid
             )
@@ -1192,16 +1204,25 @@ class RevenueService:
         self, revenue_entity_uid: str, document_uid: str, contract_kind: str,
         effective_from: str, actor_user_id: int, actor_role: str,
         idempotency_key: str, reference_code: str | None = None,
-        actor_has_revenue_access: bool = False,
+        actor_has_revenue_access: bool = False, *, effective_to: str | None = None,
+        school_commission_formal: bool = False,
     ):
         self._require_operator(actor_role, actor_has_revenue_access)
         payload = {"revenue_entity_uid": revenue_entity_uid, "document_uid": document_uid,
                    "contract_kind": contract_kind, "effective_from": effective_from,
                    "reference_code": reference_code}
 
+        if effective_to is not None:
+            payload["effective_to"] = effective_to
+
+        if school_commission_formal:
+            payload["school_commission_formal"] = True
+
         def operation():
             entity = self.repository.require_by_uid("revenue_entities", revenue_entity_uid)
             document = self.repository.require_by_uid("revenue_documents", document_uid)
+            if (document["document_kind"] == FORMAL_CONTRACT) != school_commission_formal:
+                raise ValueError("signed school commission contract requires pilot workflow")
             group_uid = new_uid("contract-group")
             self.connection.execute(
                 """INSERT INTO revenue_contract_groups(
@@ -1214,9 +1235,9 @@ class RevenueService:
             uid = new_uid("contract")
             self.connection.execute(
                 """INSERT INTO revenue_contract_versions(
-                     uid,contract_group_id,version_no,document_id,effective_from,status,created_at
-                   ) VALUES(?,?,1,?,?,'draft',?)""",
-                (uid, group["id"], document["id"], effective_from, self.repository.now()),
+                     uid,contract_group_id,version_no,document_id,effective_from,effective_to,status,created_at
+                   ) VALUES(?,?,1,?,?,?,'draft',?)""",
+                (uid, group["id"], document["id"], effective_from, effective_to, self.repository.now()),
             )
             return self.repository.require_by_uid("revenue_contract_versions", uid)
 
@@ -1359,15 +1380,23 @@ class RevenueService:
 
     def activate_contract_version(
         self, contract_version_uid: str, actor_user_id: int, actor_role: str,
-        idempotency_key: str,
+        idempotency_key: str, *, school_commission_formal: bool = False,
     ):
         self._require_admin(actor_role)
         payload = {"contract_version_uid": contract_version_uid}
+
+        if school_commission_formal:
+            payload["school_commission_formal"] = True
 
         def operation():
             contract = self.repository.require_by_uid(
                 "revenue_contract_versions", contract_version_uid
             )
+            document = self.connection.execute(
+                "SELECT document_kind FROM revenue_documents WHERE id=?", (contract["document_id"],)
+            ).fetchone()
+            if bool(document and document["document_kind"]==FORMAL_CONTRACT) != school_commission_formal:
+                raise ValueError("signed school commission contract requires pilot workflow")
             if contract["status"] != "under_review":
                 raise ValueError("contract activation requires under review status")
             extractions = self.connection.execute(
@@ -1400,11 +1429,14 @@ class RevenueService:
 
     def activate_commission_rule(
         self, contract_version_uid: str, configuration: dict,
-        actor_user_id: int, actor_role: str, idempotency_key: str,
+        actor_user_id: int, actor_role: str, idempotency_key: str, *, school_commission_formal: bool = False,
     ):
         self._require_admin(actor_role)
         payload = {"contract_version_uid": contract_version_uid,
                    "configuration": configuration}
+
+        if school_commission_formal:
+            payload["school_commission_formal"] = True
 
         def operation():
             contract = self.repository.require_by_uid(
@@ -1412,7 +1444,19 @@ class RevenueService:
             )
             if contract["status"] != "active":
                 raise ValueError("commission rule requires active Admin-reviewed contract")
-            if not configuration.get("instalments"):
+            tier_package = configuration.get("toorak_tier_package") is True
+            document = self.connection.execute(
+                "SELECT document_kind FROM revenue_documents WHERE id=?", (contract["document_id"],)
+            ).fetchone()
+            if bool(document and document["document_kind"]==FORMAL_CONTRACT) != school_commission_formal:
+                raise ValueError("signed school commission rule requires pilot workflow")
+            if tier_package:
+                expected_kind = FORMAL_CONTRACT if school_commission_formal else "school_commission_contract"
+                tier_counts = (1,2) if school_commission_formal and configuration.get("school_commission_configurable") is True else (2,)
+                if (document is None or document["document_kind"] != expected_kind
+                        or len(configuration.get("tiers", [])) not in tier_counts or configuration.get("instalments")):
+                    raise ValueError("invalid school commission tier package")
+            elif not configuration.get("instalments"):
                 raise ValueError("commission rule requires instalments")
             snapshot = self._rule_snapshot(
                 "commission", contract_version_uid, configuration, actor_user_id
@@ -1421,10 +1465,12 @@ class RevenueService:
             now = self.repository.now()
             self.connection.execute(
                 """INSERT INTO revenue_commission_rule_versions(
-                     uid,contract_version_id,version_no,effective_from,priority,status,
+                     uid,contract_version_id,version_no,effective_from,effective_to,priority,status,
                      rule_snapshot_id,activated_by,activated_at,created_at
-                   ) VALUES(?,?,1,?,100,'active',?,?,?,?)""",
-                (uid, contract["id"], contract["effective_from"], snapshot["id"],
+                   ) VALUES(?,?,1,?,?,100,'active',?,?,?,?)""",
+                (uid, contract["id"], contract["effective_from"],
+                 contract["effective_to"] if configuration.get("school_contract_v1") else None,
+                 snapshot["id"],
                  actor_user_id, now, now),
             )
             rule = self.repository.require_by_uid("revenue_commission_rule_versions", uid)
@@ -1446,7 +1492,7 @@ class RevenueService:
                        ) VALUES(?,?,?,'included',?)""",
                     (new_uid("fee-component"), rule["id"], fee_component, now),
                 )
-            for instalment in configuration["instalments"]:
+            for instalment in configuration.get("instalments", []):
                 self.connection.execute(
                     """INSERT INTO revenue_commission_rate_instalments(
                          uid,commission_rule_version_id,instalment_no,academic_period,
@@ -1499,6 +1545,8 @@ class RevenueService:
                 "SELECT * FROM revenue_rule_snapshots WHERE id=?", (rule["rule_snapshot_id"],)
             ).fetchone()
             configuration = json.loads(snapshot["canonical_json"])
+            if configuration.get("toorak_tier_package"):
+                raise ValueError("Toorak tier package requires the school commission workflow")
             included = set(configuration.get("fee_components", ["tuition"]))
             tuition_rows = self.connection.execute(
                 """SELECT * FROM revenue_tuition_facts
@@ -1632,7 +1680,9 @@ class RevenueService:
         ).fetchone()
         configuration = json.loads(snapshot[0])
         trigger = configuration.get("claim_trigger")
-        eligible = True if not trigger else CommissionRuleEvaluator().evaluate_trigger(trigger, facts)
+        eligible = configuration.get("toorak_forecast") is not True and (
+            not trigger or CommissionRuleEvaluator().evaluate_trigger(trigger, facts)
+        )
         return {"commission_line_uid": commission_line_uid, "eligible": eligible,
                 "evaluated_facts": facts}
 

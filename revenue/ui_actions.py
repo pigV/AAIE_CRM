@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from revenue.access_policy import can_operate_revenue
 
+from datetime import date
 from pathlib import Path
 import sqlite3
 
@@ -21,6 +22,10 @@ from revenue.client_payments import ClientPaymentService
 from revenue.repository import RevenueRepository
 from revenue.operational_orchestrator import RevenueOperationalOrchestrator
 from revenue.services import RevenueService
+from revenue.school_contracts import SchoolCommissionContracts
+from revenue.toorak_forecast import ToorakForecast
+from revenue.toorak_claims import EVIDENCE_FIELDS, ToorakClaims
+from revenue.toorak_settlement import ToorakSettlement
 from revenue.uploads import (
     discard_unregistered_upload,
     parse_statement_csv,
@@ -47,10 +52,14 @@ class RevenueUIActions:
         *,
         actor_has_revenue_access: bool = False,
         legacy_document_root: Path | None = None,
+        school_pilot=None,
+        school_mail_release=None,
     ):
         if not can_operate_revenue(actor_role, actor_has_revenue_access):
             raise PermissionError("Revenue module access is required")
         self.connection = connection
+        self.school_pilot = school_pilot
+        self.school_mail_release = school_mail_release
         self._legacy_document_root = legacy_document_root
         self._document_root = Path(document_root) if document_root is not None else None
         self.actor_user_id = int(actor_user_id)
@@ -99,6 +108,234 @@ class RevenueUIActions:
             raise
         return {"document": document, "contract": contract, "parse_run": parse_run}
 
+    def bind_school_commission_entity(self, form: dict) -> dict:
+        self._require_admin()
+        return self._school_contracts().bind(
+            self._positive_integer(form, "school_id"), self._required(form, "legal_name"),
+            self._required(form, "effective_from"), self._required(form, "idempotency_key"),
+        )
+
+    def upload_school_commission_contract(self, form: dict, upload) -> dict:
+        self._require_admin()
+        school_id = self._positive_integer(form, "school_id")
+        start = date.fromisoformat(self._required(form, "effective_from"))
+        end = date.fromisoformat(self._required(form, "effective_to"))
+        if end < start:
+            raise ValueError("到期日不得早于生效日。")
+        reference = self._optional(form, "reference_code")
+        key = self._required(form, "idempotency_key")
+        staged = stage_revenue_upload(self.document_root / "school-contracts", upload, {".pdf"})
+        return self._school_contracts().upload(
+            school_id, start.isoformat(), end.isoformat(), reference, staged, key,
+        )
+
+    def _school_rule_inputs(self, form: dict) -> dict:
+        return dict(
+            sample_tuition=self._required(form, "sample_tuition"),
+            rate_percent=self._required(form, "rate_percent"),
+            gst_mode=self._required(form, "gst_mode"),
+            commencement_days=self._non_negative_integer(form, "commencement_days"),
+            required_coe=self._optional(form, "required_coe") == "1",
+            clause_reference=self._required(form, "clause_reference"),
+            evidence_text=self._required(form, "evidence_text"),
+        )
+
+    def preview_school_commission_rule(self, form: dict) -> dict:
+        self._require_admin()
+        preview = self._school_contracts().preview(
+            self._positive_integer(form, "school_id"), self._required(form, "contract_version_uid"),
+            **self._school_rule_inputs(form),
+        )
+        fields = (
+            "school_id", "contract_version_uid", "sample_tuition", "rate_percent", "gst_mode",
+            "commencement_days", "required_coe", "clause_reference", "evidence_text",
+        )
+        return {**preview, "confirmation_fields": {field: self._value(form, field) for field in fields}}
+
+    def activate_school_commission_rule(self, form: dict) -> dict:
+        self._require_admin()
+        return self._school_contracts().activate(
+            self._positive_integer(form, "school_id"), self._required(form, "contract_version_uid"),
+            self._school_rule_inputs(form), self._required(form, "preview_digest"),
+            self._required(form, "idempotency_key"),
+        )
+
+    def upload_toorak_draft(self, form: dict, upload) -> dict:
+        self._require_admin()
+        school_id = self._positive_integer(form, "school_id")
+        key = self._required(form, "idempotency_key")
+        staged = stage_revenue_upload(self.document_root / "school-contracts", upload, {".pdf"})
+        return self._school_contracts().upload_toorak_draft(
+            school_id,staged,key,signed_confirmed=self._optional(form,"signed_confirmed")=="1",
+        )
+
+    def upload_configurable_school_draft(self, form, upload):
+        school_id = self._positive_integer(form,"school_id")
+        key = self._required(form,"idempotency_key")
+        staged = stage_revenue_upload(self.document_root/"school-contracts",upload,{".pdf"})
+        try:
+            return self._school_contracts().upload_configurable_draft(
+                school_id,staged,key,signed_confirmed=self._optional(form,"signed_confirmed")=="1",
+            )
+        except Exception:
+            discard_unregistered_upload(staged)
+            raise
+
+    def _configurable_school_inputs(self, form):
+        names = ("school_id","draft_uid","effective_from","effective_to","sample_tuition","gst_mode",
+                 "commencement_days","payment_days","registration_required","clause_reference",
+                 "rate_percent","tuition_kind","visa_subclasses","rate_percent_2","tuition_kind_2","visa_subclasses_2")
+        fields = {name:self._optional(form,name) or "" for name in names}
+        fields["registration_required"] = fields["registration_required"] or "0"
+        tiers = []
+        for suffix in ("","_2"):
+            if suffix and not fields["rate_percent"+suffix]:
+                continue
+            tiers.append({
+                "rate_percent":fields["rate_percent"+suffix],
+                "tuition_kind":fields["tuition_kind"+suffix] or "any",
+                "visa_subclasses":[part.strip() for part in fields["visa_subclasses"+suffix].split(",") if part.strip()],
+            })
+        inputs = {key:fields[key] for key in (
+            "effective_from","effective_to","sample_tuition","gst_mode","commencement_days",
+            "payment_days","registration_required","clause_reference",
+        )}
+        return fields,{**inputs,"tiers":tiers}
+
+    def preview_configurable_school_rule(self, form):
+        fields,inputs = self._configurable_school_inputs(form)
+        preview = self._school_contracts().preview_configurable(fields["draft_uid"],inputs)
+        return {**preview,"confirmation_fields":fields}
+
+    def activate_configurable_school_rule(self, form):
+        fields,inputs = self._configurable_school_inputs(form)
+        return self._school_contracts().activate_configurable(
+            fields["draft_uid"],inputs,self._required(form,"preview_digest"),self._required(form,"idempotency_key"),
+        )
+
+    def _toorak_inputs(self, form: dict) -> dict:
+        required = ("local_tuition", "international_tuition", "local_visa", "international_visa")
+        optional = ("gst_mode", "effective_from", "effective_to")
+        return {**{key: self._required(form, key) for key in required},
+                **{key: self._optional(form, key) or "" for key in optional}}
+
+    def preview_toorak_rule(self, form: dict) -> dict:
+        draft_uid = self._required(form, "draft_uid")
+        inputs = self._toorak_inputs(form)
+        preview = self._school_contracts().preview_toorak(draft_uid, inputs)
+        return {**preview, "confirmation_fields": {**inputs, "draft_uid": draft_uid}}
+
+    def activate_toorak_rule(self, form: dict) -> dict:
+        return self._school_contracts().activate_toorak(
+            self._required(form, "draft_uid"), self._toorak_inputs(form),
+            self._required(form, "preview_digest"), self._required(form, "idempotency_key"),
+        )
+
+    def preview_toorak_forecast(self, case_uid, form):
+        return ToorakForecast(self.service,self.actor_user_id,self.actor_role,**self._school_scope()).preview(
+            case_uid, self._required(form, "component_uid"), self._optional(form, "confirm_other") == "1",
+        )
+
+    def save_toorak_forecast(self, case_uid, form):
+        return ToorakForecast(self.service,self.actor_user_id,self.actor_role,**self._school_scope()).save(
+            case_uid, self._required(form, "component_uid"), self._optional(form, "confirm_other") == "1",
+            self._required(form, "preview_digest"),
+        )
+
+    def _toorak_claim_inputs(self, form):
+        if self.school_pilot:
+            evidence = {key:value for key,_,_ in EVIDENCE_FIELDS if (value := self._optional(form,key))}
+        else:
+            evidence = {key:self._positive_integer(form,key) for key,_,_ in EVIDENCE_FIELDS}
+        return (
+            self._required(form,"line_uid"),
+            evidence,
+            self._required(form,"recruited"), self._optional(form,"reviewed") == "1",
+        )
+
+    def _toorak_claims(self):
+        self._require_admin()
+        return ToorakClaims(self.service,self.actor_user_id,self.actor_role,lambda: self.document_root,
+                            mail_release=self.school_mail_release,**self._school_scope())
+
+    def upload_toorak_claim_evidence(self, case_uid, form, upload):
+        if not self.school_pilot:
+            raise ValueError("仅正式试点支持上传申领凭证。")
+        category = self._required(form,"evidence_kind")
+        field = next((key for key,kind,_ in EVIDENCE_FIELDS if kind==category),None)
+        if field is None:
+            raise ValueError("请选择支持的申领凭证类型。")
+        key = self._required(form,"idempotency_key")
+        staged = stage_revenue_upload(self.document_root/"school-commission-claim-intake",upload,{".pdf"})
+        try:
+            return self._toorak_claims().register_evidence(case_uid,field,staged,key)
+        except Exception:
+            discard_unregistered_upload(staged)
+            raise
+
+    def preview_toorak_claim(self, case_uid, form):
+        return self._toorak_claims().preview(case_uid,*self._toorak_claim_inputs(form))
+
+    def issue_toorak_claim(self, case_uid, form):
+        return self._toorak_claims().issue_claim(
+            case_uid,*self._toorak_claim_inputs(form),self._required(form,"preview_digest"),
+        )
+
+    def issue_toorak_invoice(self, case_uid, form):
+        revisions = None
+        if {"template_revision","finance_revision"}.issubset(form):
+            revisions = tuple(self._optional(form,key) or "" for key in ("template_revision","finance_revision"))
+        return self._toorak_claims().issue_invoice(
+            case_uid,self._required(form,"claim_uid"),self._optional(form,"template_confirmed") == "1",revisions,
+        )
+
+    def _toorak_settlement(self):
+        pilot = self.school_pilot
+        kwargs = {"formal":True,"entity_id":pilot.entity_id,"simulation":pilot.simulation} if pilot else {}
+        return ToorakSettlement(self.service,self.actor_user_id,self.actor_role,**kwargs)
+
+    def confirm_toorak_delivery(self, case_uid, form, upload):
+        self._require_admin()
+        invoice_uid = self._required(form,"invoice_uid")
+        received_on = self._required(form,"received_on")
+        term_days = self._optional(form,"term_days") or "30"
+        if term_days not in {"0","7","15","30"}:
+            raise ValueError("请选择立即到期、7 天、15 天或 30 天。")
+        staged = stage_revenue_upload(self.document_root/"toorak-delivery-evidence",upload,{".pdf"})
+        return self._toorak_settlement().delivery(case_uid,invoice_uid,received_on,staged,int(term_days))
+
+    def record_toorak_payment(self, case_uid, form, upload):
+        self._require_admin()
+        invoice_uid = self._required(form,"invoice_uid")
+        received_on = self._required(form,"received_on")
+        reference = self._required(form,"bank_reference")
+        amount = SchoolCommissionContracts._hundredths(self._required(form,"amount_aud"))
+        allocations = {}
+        for key in form:
+            if key.startswith("allocation_"):
+                value = self._optional(form,key)
+                if value is not None:
+                    cents = SchoolCommissionContracts._hundredths(value)
+                    if cents:
+                        allocations[key.removeprefix("allocation_")] = cents
+        staged = stage_revenue_upload(self.document_root/"toorak-remittance-evidence",upload,{".pdf"})
+        return self._toorak_settlement().payment(
+            case_uid,invoice_uid,amount,received_on,reference,staged,allocations or None,
+        )
+
+    def confirm_toorak_reconciliation(self, case_uid, form):
+        return self._toorak_settlement().reconcile(
+            case_uid,self._required(form,"invoice_uid"),self._optional(form,"reviewed")=="1",
+        )
+
+    def _school_scope(self):
+        pilot = self.school_pilot
+        return {"formal":True,"school_id":pilot.school_id,"entity_id":pilot.entity_id,
+                "simulation":pilot.simulation} if pilot else {}
+
+    def _school_contracts(self):
+        return SchoolCommissionContracts(self.service,self.actor_user_id,self.actor_role,**self._school_scope())
+
     def import_master_agent_statement(self, form: dict, upload) -> dict:
         key = self._required(form, "idempotency_key")
         master_uid = self._optional(form, "master_agent_entity_uid")
@@ -130,6 +367,8 @@ class RevenueUIActions:
         return {"document": document, "statement": statement}
 
     def add_manual_contract_extraction(self, form: dict) -> dict:
+        contract_uid = self._required(form, "contract_version_uid")
+        self._reject_school_managed_contract(contract_uid)
         field_name = self._required(form, "field_name")
         if field_name not in self.MANUAL_CONTRACT_FIELDS:
             raise ValueError("不支持此合同字段。")
@@ -147,7 +386,7 @@ class RevenueUIActions:
             )
         ])
         return self.service.create_parse_run(
-            self._required(form, "contract_version_uid"), provider,
+            contract_uid, provider,
             self.actor_user_id, self.actor_role,
             self._required(form, "idempotency_key"),
             actor_has_revenue_access=self.actor_has_revenue_access,
@@ -159,8 +398,17 @@ class RevenueUIActions:
         if decision not in {"accept", "reject"}:
             raise ValueError("审核决定无效。")
         confirmed = self._optional(form, "confirmed_value")
+        extraction_uid = self._required(form,"extraction_uid")
+        contract = self.connection.execute(
+            """SELECT v.uid FROM revenue_contract_extractions e
+               JOIN revenue_contract_parse_runs r ON r.id=e.parse_run_id
+               JOIN revenue_contract_versions v ON v.id=r.contract_version_id WHERE e.uid=?""",
+            (extraction_uid,),
+        ).fetchone()
+        if contract:
+            self._reject_school_managed_contract(contract["uid"])
         return self.service.review_extraction(
-            self._required(form, "extraction_uid"),
+            extraction_uid,
             confirmed if decision == "accept" else None,
             decision == "accept", self.actor_user_id, self.actor_role,
             self._required(form, "idempotency_key"),
@@ -168,11 +416,22 @@ class RevenueUIActions:
 
     def activate_contract(self, form: dict) -> dict:
         self._require_admin()
+        contract_uid = self._required(form, "contract_version_uid")
+        self._reject_school_managed_contract(contract_uid)
         return self.service.activate_contract_version(
-            self._required(form, "contract_version_uid"),
+            contract_uid,
             self.actor_user_id, self.actor_role,
             self._required(form, "idempotency_key"),
         )
+
+    def _reject_school_managed_contract(self, contract_uid):
+        if self.connection.execute(
+            """SELECT 1 FROM revenue_contract_versions v
+                 JOIN revenue_documents d ON d.id=v.document_id
+                WHERE v.uid=? AND d.document_kind IN ('school_commission_contract','school_commission_signed_contract')""",
+            (contract_uid,),
+        ).fetchone():
+            raise ValueError("请使用学校佣金合同 V1 的审核及激活流程。")
 
     def issue_direct_claim(self, form: dict) -> dict:
         line_uid = self._optional(form, "commission_line_uid")

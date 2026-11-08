@@ -810,7 +810,9 @@ class RevenueOperationalOrchestrator:
             """SELECT r.* FROM revenue_commission_rule_versions r
                 JOIN revenue_contract_versions v ON v.id=r.contract_version_id
                 JOIN revenue_contract_groups g ON g.id=v.contract_group_id
+                JOIN revenue_documents d ON d.id=v.document_id
                WHERE g.revenue_entity_id=? AND v.status='active' AND r.status='active'
+                 AND d.document_kind NOT IN ('school_commission_contract','school_commission_signed_contract')
                ORDER BY r.priority DESC,r.id DESC LIMIT 1""",
             (entity_row["id"],),
         ).fetchone()

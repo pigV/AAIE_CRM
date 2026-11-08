@@ -149,6 +149,11 @@ def melbourne_datetime_display(value: Any) -> str:
     return local.strftime("%d/%m/%Y %H:%M")
 
 
+_GENERIC_COMMISSION_LINE = """NOT EXISTS (
+    SELECT 1 FROM revenue_rule_snapshots s WHERE s.id=l.rule_snapshot_id
+      AND json_extract(s.canonical_json,'$.school_commission_formal')=1)"""
+
+
 class RevenueReadModels:
     """Build Chinese, API-ready view data from authoritative tables."""
 
@@ -464,6 +469,7 @@ class RevenueReadModels:
 
     def _workspace_coverage(self, name: str) -> list[dict[str, Any]]:
         visible_case = self.visibility.case_predicate("c")
+        generic_commission_case = visible_case + " AND " + _GENERIC_COMMISSION_LINE
         definitions: dict[str, tuple[tuple[str, str, str | None], ...]] = {
             "cases": (
                 ("在办收费与佣金档案", "SELECT COUNT(*) FROM revenue_commercial_cases c WHERE c.status='open' AND " + visible_case, "/revenue/cases?filter=open"),
@@ -480,11 +486,11 @@ class RevenueReadModels:
             ),
             "direct-commission": (
                 ("预计佣金", "SELECT COUNT(*) FROM revenue_forecast_lines f JOIN revenue_commercial_cases c ON c.id=f.commercial_case_id WHERE f.forecast_run_id=(SELECT id FROM revenue_forecast_runs WHERE status='completed' ORDER BY id DESC LIMIT 1) AND " + visible_case, "/revenue/direct-commission?filter=forecast"),
-                ("待申领", "SELECT COUNT(DISTINCT i.commission_line_id) FROM revenue_commission_instalments i JOIN revenue_commission_lines l ON l.id=i.commission_line_id JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE i.status IN ('eligible','partial') AND i.eligible_cents>i.claimed_cents AND " + visible_case, "/revenue/direct-commission?filter=claimable"),
-                ("已申领", "SELECT COUNT(DISTINCT i.commission_line_id) FROM revenue_commission_instalments i JOIN revenue_commission_lines l ON l.id=i.commission_line_id JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE i.claimed_cents>0 AND " + visible_case, "/revenue/direct-commission?filter=claimed"),
-                ("已收款", "SELECT COUNT(DISTINCT i.commission_line_id) FROM revenue_commission_instalments i JOIN revenue_commission_lines l ON l.id=i.commission_line_id JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE i.status='paid' AND " + visible_case, "/revenue/direct-commission?filter=paid"),
-                ("未结", "SELECT COUNT(*) FROM revenue_commission_lines l JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE l.status NOT IN ('paid','closed') AND " + visible_case, "/revenue/direct-commission?filter=outstanding"),
-                ("调整与追回", "SELECT (SELECT COUNT(*) FROM revenue_commission_adjustments a JOIN revenue_commission_lines l ON l.id=a.commission_line_id JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE " + visible_case + ")+(SELECT COUNT(*) FROM revenue_clawbacks cb JOIN revenue_commission_lines l ON l.id=cb.commission_line_id JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE " + visible_case + ")", "/revenue/direct-commission?filter=adjustments"),
+                ("待申领", "SELECT COUNT(DISTINCT i.commission_line_id) FROM revenue_commission_instalments i JOIN revenue_commission_lines l ON l.id=i.commission_line_id JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE i.status IN ('eligible','partial') AND i.eligible_cents>i.claimed_cents AND " + generic_commission_case, "/revenue/direct-commission?filter=claimable"),
+                ("已申领", "SELECT COUNT(DISTINCT i.commission_line_id) FROM revenue_commission_instalments i JOIN revenue_commission_lines l ON l.id=i.commission_line_id JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE i.claimed_cents>0 AND " + generic_commission_case, "/revenue/direct-commission?filter=claimed"),
+                ("已收款", "SELECT COUNT(DISTINCT i.commission_line_id) FROM revenue_commission_instalments i JOIN revenue_commission_lines l ON l.id=i.commission_line_id JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE i.status='paid' AND " + generic_commission_case, "/revenue/direct-commission?filter=paid"),
+                ("未结", "SELECT COUNT(*) FROM revenue_commission_lines l JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE l.status NOT IN ('paid','closed') AND " + generic_commission_case, "/revenue/direct-commission?filter=outstanding"),
+                ("调整与追回", "SELECT (SELECT COUNT(*) FROM revenue_commission_adjustments a JOIN revenue_commission_lines l ON l.id=a.commission_line_id JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE " + generic_commission_case + ")+(SELECT COUNT(*) FROM revenue_clawbacks cb JOIN revenue_commission_lines l ON l.id=cb.commission_line_id JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id WHERE " + generic_commission_case + ")", "/revenue/direct-commission?filter=adjustments"),
             ),
             "master-agent": (
                 ("对账单", "SELECT COUNT(*) FROM revenue_master_agent_statements", "/revenue/master-agent?filter=all"),
@@ -497,9 +503,9 @@ class RevenueReadModels:
                 ("对账", "SELECT COUNT(*) FROM revenue_reconciliation_runs WHERE reconciliation_kind='master_agent_statement'", None),
             ),
             "contracts": (
-                ("学校 / 机构合同", "SELECT COUNT(*) FROM revenue_contract_groups g JOIN revenue_entities e ON e.id=g.revenue_entity_id WHERE e.entity_type IN ('school','higher_education_provider')", None),
+                ("学校 / 机构合同", "SELECT COUNT(*) FROM revenue_contract_groups g JOIN revenue_entities e ON e.id=g.revenue_entity_id WHERE e.entity_type IN ('school','higher_education_provider') AND NOT EXISTS (SELECT 1 FROM revenue_contract_versions v JOIN revenue_documents d ON d.id=v.document_id WHERE v.contract_group_id=g.id AND d.document_kind='school_commission_signed_contract')", None),
                 ("一级代理合同", "SELECT COUNT(*) FROM revenue_contract_groups g JOIN revenue_entities e ON e.id=g.revenue_entity_id WHERE e.entity_type='master_agent'", None),
-                ("当前有效", "SELECT COUNT(*) FROM revenue_contract_versions WHERE status='active'", "/revenue/contracts?filter=active"),
+                ("当前有效", "SELECT COUNT(*) FROM revenue_contract_versions v JOIN revenue_documents d ON d.id=v.document_id WHERE v.status='active' AND d.document_kind!='school_commission_signed_contract'", "/revenue/contracts?filter=active"),
                 ("智能提取待审核", "SELECT COUNT(*) FROM revenue_contract_parse_runs WHERE status IN ('pending','suggested')", "/revenue/contracts?filter=under_review"),
             ),
             "reconciliation": (
@@ -507,7 +513,7 @@ class RevenueReadModels:
                 ("汇款", "SELECT COUNT(*) FROM revenue_payments WHERE counterparty_kind='master_agent'", "/revenue/reconciliation?filter=remittance"),
                 ("智能匹配建议", "SELECT COUNT(*) FROM revenue_reconciliation_suggestions s WHERE s.review_status='pending' AND " + self.visibility.operational_suggestion_predicate("s"), "/revenue/reconciliation?filter=suggested"),
                 ("未分配收款", "SELECT COUNT(*) FROM revenue_payments WHERE status='confirmed' AND allocated_cents<amount_cents", "/revenue/reconciliation?filter=unallocated"),
-                ("已完成对账", "SELECT COUNT(*) FROM revenue_reconciliation_runs WHERE status='confirmed'", "/revenue/reconciliation?filter=completed"),
+                ("已完成对账", "SELECT COUNT(*) FROM revenue_reconciliation_runs r WHERE r.status='confirmed' AND NOT EXISTS (SELECT 1 FROM revenue_documents d WHERE d.id=r.source_document_id AND d.document_kind IN ('toorak_test_invoice','school_commission_invoice'))", "/revenue/reconciliation?filter=completed"),
                 ("差异与争议", "SELECT COUNT(*) FROM revenue_disputes WHERE status='open'", "/revenue/reconciliation?filter=disputed"),
             ),
         }
@@ -534,6 +540,75 @@ class RevenueReadModels:
         if isinstance(value, (list, tuple)):
             value = value[0] if value else ""
         return str(value or "").strip()
+
+    def school_commission_configuration(self, contract_uid: str, *, pilot=None) -> dict[str, Any]:
+        from revenue.school_commission_pilot import FORMAL_CONTRACT
+        kind = FORMAL_CONTRACT if pilot else "school_commission_contract"
+        school_id = pilot.school_id if pilot else None
+        entity_id = pilot.entity_id if pilot else None
+        schools = [dict(row) for row in self.connection.execute(
+            """SELECT id,school_name FROM schools
+                WHERE deleted_at IS NULL AND (? IS NULL OR id=?) ORDER BY school_name,id""", (school_id,school_id)
+        )]
+        bindings = [dict(row) for row in self.connection.execute(
+            """SELECT s.id,s.school_name,e.legal_name,l.effective_from,
+                      (SELECT v.uid FROM revenue_contract_versions v
+                         JOIN revenue_contract_groups g ON g.id=v.contract_group_id
+                         JOIN revenue_documents d ON d.id=v.document_id
+                        WHERE g.revenue_entity_id=e.id AND g.contract_kind='direct_commission'
+                          AND d.document_kind=?
+                          AND (? IS NULL OR EXISTS (SELECT 1 FROM revenue_rule_snapshots draft
+                            WHERE draft.source_rule_uid=d.uid
+                              AND json_extract(draft.canonical_json,'$.pilot_simulation')=?))
+                        ORDER BY v.id LIMIT 1) AS contract_uid
+                 FROM revenue_entity_provider_links l
+                 JOIN revenue_entities e ON e.id=l.revenue_entity_id
+                 JOIN schools s ON s.id=l.school_id
+                WHERE e.entity_type='school' AND e.status='active' AND l.effective_to IS NULL
+                  AND s.deleted_at IS NULL AND (? IS NULL OR e.id=?) ORDER BY s.school_name,s.id""", (kind,entity_id,pilot.simulation if pilot else True,entity_id,entity_id)
+        )]
+        selected = next((row for row in bindings if row["contract_uid"] == contract_uid), None)
+        contract = None
+        if selected is not None:
+            row = self.connection.execute(
+                """SELECT v.uid,v.status,v.version_no,v.effective_from,v.effective_to,
+                          g.reference_code,d.uid AS document_uid,r.uid AS rule_uid,
+                          json_extract(snap.canonical_json,'$.instalments[0].rate_basis_points') AS rate_basis_points,
+                          json_extract(snap.canonical_json,'$.source.clause_reference') AS clause_reference,
+                          json_extract(snap.canonical_json,'$.source.evidence_text') AS evidence_text,
+                          json_extract(snap.canonical_json,'$.claim_trigger.terms[0].value') AS commencement_days,
+                          json_extract(snap.canonical_json,'$.document_requirements[0]') AS required_document,
+                          json_extract(snap.canonical_json,'$.toorak_tier_package') AS toorak_package,
+                          json_extract(snap.canonical_json,'$.gst_mode') AS gst_mode
+                     FROM revenue_contract_versions v
+                     JOIN revenue_contract_groups g ON g.id=v.contract_group_id
+                     JOIN revenue_documents d ON d.id=v.document_id
+                     LEFT JOIN revenue_commission_rule_versions r
+                       ON r.contract_version_id=v.id AND r.status='active'
+                     LEFT JOIN revenue_rule_snapshots snap ON snap.id=r.rule_snapshot_id
+                    WHERE v.uid=?""",
+                (contract_uid,),
+            ).fetchone()
+            if row is not None:
+                contract = {**dict(row), "school": selected}
+        toorak_schools = [school for school in schools
+                          if " ".join(school["school_name"].casefold().split()) == "toorak college"]
+        drafts = [dict(row) for row in self.connection.execute(
+            """SELECT snap.uid,d.uid AS document_uid,school.school_name
+                 FROM revenue_rule_snapshots snap
+                 JOIN revenue_documents d ON d.uid=snap.source_rule_uid
+                 JOIN schools school ON school.id=json_extract(snap.canonical_json,'$.school_id')
+                WHERE snap.rule_kind='commission' AND d.document_kind=?
+                  AND school.deleted_at IS NULL AND (? IS NULL OR school.id=?)
+                  AND (? IS NULL OR (json_extract(snap.canonical_json,'$.pilot_entity_id')=?
+                       AND json_extract(snap.canonical_json,'$.pilot_simulation')=?))
+                  AND json_extract(snap.canonical_json,'$.toorak_draft')=1
+                  AND NOT EXISTS (SELECT 1 FROM revenue_contract_versions v WHERE v.document_id=d.id)
+                ORDER BY snap.id DESC""", (kind,school_id,school_id,entity_id,entity_id,pilot.simulation if pilot else True)
+        )]
+        return {"formal":bool(pilot), "simulation":pilot.simulation if pilot else True, "schools": schools, "bindings": bindings, "contract": contract,
+                "toorak_schools": toorak_schools, "toorak_drafts": drafts,
+                "toorak_draft": next((row for row in drafts if row["uid"] == contract_uid), None)}
 
     def _workspace_action(
         self, name: str, *, selected: str = "", case_uid: str = ""
@@ -565,7 +640,9 @@ class RevenueReadModels:
                      FROM revenue_contract_versions v
                      JOIN revenue_contract_groups g ON g.id=v.contract_group_id
                      JOIN revenue_entities e ON e.id=g.revenue_entity_id
+                    JOIN revenue_documents d ON d.id=v.document_id
                     WHERE v.status IN ('draft','under_review')
+                      AND d.document_kind NOT IN ('school_commission_contract','school_commission_signed_contract')
                  ORDER BY v.created_at DESC,v.id DESC"""
             )]
             activatable_contracts = [dict(row) for row in self.connection.execute(
@@ -573,7 +650,9 @@ class RevenueReadModels:
                      FROM revenue_contract_versions v
                      JOIN revenue_contract_groups g ON g.id=v.contract_group_id
                      JOIN revenue_entities e ON e.id=g.revenue_entity_id
+                    JOIN revenue_documents d ON d.id=v.document_id
                     WHERE v.status='under_review'
+                      AND d.document_kind NOT IN ('school_commission_contract','school_commission_signed_contract')
                       AND EXISTS(
                           SELECT 1 FROM revenue_contract_extractions x
                           JOIN revenue_contract_parse_runs p ON p.id=x.parse_run_id
@@ -740,7 +819,10 @@ class RevenueReadModels:
                      FROM revenue_commission_lines l
                      JOIN revenue_entities e ON e.id=l.revenue_entity_id
                      JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id
-                    WHERE """ + self.visibility.case_predicate("c") + """
+                    WHERE NOT EXISTS (
+                          SELECT 1 FROM revenue_rule_snapshots s WHERE s.id=l.rule_snapshot_id
+                            AND json_extract(s.canonical_json,'$.toorak_forecast')=1
+                    ) AND """ + self.visibility.case_predicate("c") + """
                  ORDER BY l.id"""
             ):
                 outstanding = int(row["claimed_cents"]) - int(row["allocated_cents"])
@@ -755,6 +837,10 @@ class RevenueReadModels:
                 """SELECT claim.uid,claim.claim_number,claim.gross_cents
                      FROM revenue_claims claim
                     WHERE claim.claim_kind='direct' AND claim.status='issued'
+                      AND NOT EXISTS(
+                          SELECT 1 FROM revenue_audit_events a WHERE a.aggregate_uid=claim.uid
+                            AND a.action IN ('toorak_internal_claim_issued','school_commission_claim_issued')
+                      )
                       AND EXISTS(
                           SELECT 1 FROM revenue_claim_allocations allocation
                           JOIN revenue_commission_instalments instalment
@@ -1032,7 +1118,7 @@ class RevenueReadModels:
                  FROM revenue_commission_lines l
                  JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id
                  JOIN revenue_entities e ON e.id=l.revenue_entity_id
-                WHERE """ + self.visibility.case_predicate("c") + """
+                WHERE """ + _GENERIC_COMMISSION_LINE + " AND " + self.visibility.case_predicate("c") + """
              ORDER BY l.calculated_at DESC,l.id DESC LIMIT 100"""
         ).fetchall()
         labels = {
@@ -1201,6 +1287,8 @@ class RevenueReadModels:
                  FROM revenue_contract_versions v
                  JOIN revenue_contract_groups g ON g.id=v.contract_group_id
                  JOIN revenue_entities e ON e.id=g.revenue_entity_id
+                 LEFT JOIN revenue_documents d ON d.id=v.document_id
+                WHERE COALESCE(d.document_kind,'')!='school_commission_signed_contract'
              ORDER BY v.created_at DESC,v.id DESC LIMIT 100"""
         ).fetchall()
         contract_labels = {
@@ -1371,8 +1459,10 @@ class RevenueReadModels:
                 "occurred_at": str(row["confirmed_at"] or row["created_at"]),
                 "href": f"/revenue/reconciliation?record={quote(str(row['uid']), safe='')}",
             } for row in self.connection.execute(
-                """SELECT * FROM revenue_reconciliation_runs
-                    WHERE status='confirmed' ORDER BY confirmed_at DESC,id DESC"""
+                """SELECT r.* FROM revenue_reconciliation_runs r WHERE r.status='confirmed'
+                     AND NOT EXISTS (SELECT 1 FROM revenue_documents d
+                       WHERE d.id=r.source_document_id AND d.document_kind IN ('toorak_test_invoice','school_commission_invoice'))
+                    ORDER BY r.confirmed_at DESC,r.id DESC"""
             ))
         return rows[:200]
 
@@ -1625,7 +1715,7 @@ class RevenueReadModels:
                       COALESCE(MAX(CASE WHEN i.status='paid' THEN 1 ELSE 0 END),0)
                  FROM revenue_commission_instalments i
                  JOIN revenue_commission_lines l ON l.id=i.commission_line_id
-                WHERE l.commercial_case_id=?""",
+                WHERE l.commercial_case_id=? AND """ + _GENERIC_COMMISSION_LINE,
             (case_id,),
         ).fetchone()
         if instalments and int(instalments[2]):
@@ -1636,7 +1726,7 @@ class RevenueReadModels:
             return "可申领"
         statuses = {
             str(row[0]) for row in self.connection.execute(
-                "SELECT DISTINCT status FROM revenue_commission_lines WHERE commercial_case_id=?",
+                "SELECT DISTINCT l.status FROM revenue_commission_lines l WHERE l.commercial_case_id=? AND " + _GENERIC_COMMISSION_LINE,
                 (case_id,),
             ).fetchall()
         }

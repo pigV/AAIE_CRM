@@ -4,8 +4,10 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
+import pwd
 from pathlib import Path
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -17,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from runtime_configuration import RuntimeConfiguration, RuntimeConfigurationError, canonical, preflight
+from tools.runtime_invoice_mail_config import invoice_pdf_environment, load_mail_config
 from staging_environment import ManagedRuntime, IsolationError, SCHOOL_REPORT_PDFUNITE
 from tools import school_map_tile_control, build_document_ocr
 from wechat_runtime import runtime_wechat_environment, runtime_wechat_network_rules
@@ -45,6 +48,9 @@ def require_gate(config):
 
 
 def process_command(config, role):
+    if role=="invoice-mail":
+        return [PYTHON,"-B",str(config.source_root/"tools/runtime_invoice_mail_worker.py"),
+                "--config",str(config.path)]
     if role in ("extraction", "agent-reach"):
         from tools.runtime_auxiliary_control import process_command as auxiliary_command
         return auxiliary_command(config, role)
@@ -228,6 +234,7 @@ def environment(config, *, include_wechat=True):
     # the terminal or loaded from another deployment's .env file.
     root = config.root
     adapter = ManagedRuntime.from_configuration(config)
+    mail = load_mail_config(config)
     return {
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(root / "home"),
         "TMPDIR": str(root / "tmp"), "TMP": str(root / "tmp"), "TEMP": str(root / "tmp"),
@@ -240,10 +247,122 @@ def environment(config, *, include_wechat=True):
                                             if adapter.school_library_read_roots else root / "school_library_files"),
         "AAIE_CRM_SECURE_ASSET_DIR": str(root / "secure_assets"),
         "AAIE_CRM_CONTENT_REPORT_DIR": str(root / "import_reports"),
-        "REVENUE_SECURE_STORAGE_ROOT": str(root / "revenue_documents"),
+        "REVENUE_SECURE_STORAGE_ROOT": str(mail.pdf_root if mail and config.mode=="staging" else root/"revenue_documents"),
+        **invoice_pdf_environment(config),
+        **invoice_mail_environment(config,mail),
         "XDG_CACHE_HOME": str(root / "cache"), "HF_HOME": str(root / "cache/huggingface"),
         **(runtime_wechat_environment(config) if include_wechat else {}),
     }
+
+
+def invoice_mail_environment(config, mail):
+    if mail is None:
+        return {}
+    result = {"AAIE_INVOICE_MAIL_EXTERNAL":"1"}
+    if config.mode=="staging":
+        result["AAIE_SCHOOL_COMMISSION_FORMAL_REHEARSAL"]="1"
+    if mail.enabled:
+        result["AAIE_SCHOOL_INVOICE_MAIL_RELEASE"]="candidate" if config.mode=="staging" else "production"
+        result["AAIE_SCHOOL_INVOICE_MAIL_APPROVED_TO"]=mail.recipient
+    return result
+
+
+def invoice_mail_keychain():
+    return canonical(Path(pwd.getpwuid(os.geteuid()).pw_dir)/"Library/Keychains/login.keychain-db")
+
+
+def invoice_mail_profile(config, mail, *, probe=False):
+    keychain=invoice_mail_keychain()
+    invoice_root=invoice_pdf_environment(config).get("AAIE_INVOICE_PDF_ROOT")
+    paths = [config.source_root,config.root,Path(PYTHON).parents[2],mail.pdf_root]
+    if invoice_root:
+        paths.append(Path(invoice_root))
+    quote = lambda path: json.dumps(str(path))
+    targets = [str(config.db)+suffix for suffix in ("","-wal","-shm","-journal")]
+    return "\n".join([
+        "(version 1)", "(allow default)", "(deny file-write*)",
+        '(deny file-read* (subpath "/Users") (subpath "/Volumes"))',
+        *[f"(allow file-read* (subpath {quote(path)}))" for path in paths],
+        *[f"(allow file-read-metadata (literal {quote(path)}))"
+          for path in sorted({parent for entry in paths for parent in entry.parents})],
+        *[f"(allow file-read* (literal {quote(path)}))" for root in paths[3:] for path in root.parents],
+        f"(allow file-read* (literal {quote(keychain)}))",
+        *[f"(allow file-read-metadata (literal {quote(path)}))" for path in keychain.parents],
+        *([] if probe else [
+            *[f"(allow file-write* (literal {quote(path)}))" for path in targets],
+            f"(allow file-write* (subpath {quote(config.root/'logs')}))",
+        ]),
+        '(allow file-write* (literal "/dev/null"))',
+        "(deny network-outbound network-inbound network-bind)",
+        '(allow network-outbound (remote tcp "*:465"))',
+        "(deny process-exec)",
+        f'(allow process-exec (literal {quote(PYTHON)}) (literal {quote(Path(PYTHON).resolve())}) (literal "/usr/bin/security"))',
+    ])+"\n"
+
+
+def run_invoice_mail(config, *, probe=False):
+    mail = load_mail_config(config)
+    if mail is None or (not probe and not mail.enabled):
+        return {"ready":False,"invoice_mail":"configuration_missing_invalid_or_disabled"}
+    if not probe:
+        config.require_ready()
+    if not probe and state_path(config,"invoice-mail").exists():
+        raise RuntimeControlError("Invoice worker PID exists; inspect status before start")
+    profile=config.root/"config"/("invoice-mail-probe.sb" if probe else "invoice-mail.sb")
+    with runtime_file(config,profile,"w") as stream:
+        stream.write(invoice_mail_profile(config,mail,probe=probe))
+    address = socket.getaddrinfo("smtphz.qiye.163.com",465,socket.AF_INET,socket.SOCK_STREAM)[0][4][0]
+    env={**environment(config,include_wechat=False),"AAIE_MANAGED_SMTP_ADDRESS":address,
+         "AAIE_MANAGED_SMTP_KEYCHAIN":str(invoice_mail_keychain())}
+    command=["/usr/bin/sandbox-exec","-f",str(profile),*process_command(config,"invoice-mail")]
+    if probe:
+        result=subprocess.run([*command,"--probe"],cwd=config.source_root,env=env,stdin=subprocess.DEVNULL,
+                              capture_output=True,text=True,timeout=115)
+        data=json.loads(result.stdout.splitlines()[-1]) if result.stdout.strip().startswith("{") else {}
+        return {"ready":result.returncode==0 and data.get("smtp_login") is True,**data,
+                "invoice_mail":"probe","diagnostic":result.stdout.strip() if not data else None}
+    with runtime_file(config,config.root/"logs/invoice-mail.log","ab") as log:
+        process=subprocess.Popen(command,cwd=config.source_root,env=env,stdin=subprocess.DEVNULL,
+                                 stdout=log,stderr=log,start_new_session=True)
+    try:
+        birth=observe(process.pid,"lstart")
+        if not birth or process.poll() is not None:
+            raise RuntimeControlError("Invoice worker exited during startup")
+        with runtime_file(config,state_path(config,"invoice-mail"),"x") as stream:
+            json.dump(dict(pid=process.pid,started=birth,role="invoice-mail",
+                           config_sha256=config.config_sha256,data_root=str(config.root)),stream)
+    except BaseException:
+        process.terminate()
+        process.wait(timeout=8)
+        raise
+    return {"invoice_mail":"started","pid":process.pid}
+
+
+def invoice_mail_status(config):
+    path=state_path(config,"invoice-mail")
+    if not path.exists():
+        return {"invoice_mail":"stopped"}
+    record=json.loads(path.read_text())
+    if not verify_process(config,"invoice-mail",record):
+        return {"invoice_mail":"exited","pid":record["pid"]}
+    mail=load_mail_config(config)
+    if mail is None or not mail.enabled:
+        return {"invoice_mail":"stopping","pid":record["pid"]}
+    log=config.root/"logs/invoice-mail.log"
+    try:
+        with log.open("rb") as stream:
+            stream.seek(max(0,log.stat().st_size-8192))
+            entries=stream.read(8192).splitlines()
+    except OSError:
+        entries=[]
+    for line in reversed(entries):
+        try:
+            item=json.loads(line)
+        except (ValueError,UnicodeError):
+            continue
+        if isinstance(item,dict) and item.get("pid")==record["pid"] and item.get("smtp_login") is True:
+            return {"invoice_mail":"running","pid":record["pid"],"smtp_login":True}
+    return {"invoice_mail":"starting","pid":record["pid"]}
 
 
 def sandbox_profile(config):
@@ -253,15 +372,27 @@ def sandbox_profile(config):
     # approved NAS attachments but cannot write NAS or expose a LAN listener.
     if config.mode != "production" and (adapter.nas_write_roots or adapter.admin_lan_ip):
         raise RuntimeControlError("Staging cannot inherit production NAS write/LAN access")
-    roots = (config.source_root, config.root, Path(PYTHON).parents[2], *adapter.read_roots)
+    mail = load_mail_config(config)
+    pdf_config = invoice_pdf_environment(config)
+    invoice_root = pdf_config.get("AAIE_INVOICE_PDF_ROOT")
+    pdf_paths = [mail.pdf_root] if mail else []
+    if invoice_root:
+        pdf_paths.append(Path(invoice_root))
+    pdf = tuple(dict.fromkeys(pdf_paths))
+    keychain = invoice_mail_keychain() if invoice_root else None
+    roots = (config.source_root, config.root, Path(PYTHON).parents[2], *adapter.read_roots, *pdf)
     return "\n".join([
         "(version 1)", "(allow default)", "(deny file-write*)",
         f'(allow file-write* (subpath {q(config.root)}) (literal "/dev/null"))',
         '(deny file-read* (subpath "/Users") (subpath "/Volumes"))',
         *[f"(allow file-read* (subpath {q(p)}))" for p in roots],
-        *[f"(allow file-write* (subpath {q(p)}))" for p in adapter.nas_write_roots],
+        *[f"(allow file-write* (subpath {q(p)}))" for p in (*adapter.nas_write_roots,*pdf)],
         *[f"(allow file-read-metadata (literal {q(p)}))"
           for p in sorted({p for root in roots for p in root.parents})],
+        *[f"(allow file-read* (literal {q(parent)}))" for path in pdf for parent in path.parents],
+        *([f"(allow file-read* (literal {q(keychain)}))",
+           *[f"(allow file-read-metadata (literal {q(parent)}))" for parent in keychain.parents]]
+          if keychain else []),
         "(deny network-outbound)", "(deny network-bind)", "(deny network-inbound)",
         *[f'(allow network-bind network-inbound (local ip "localhost:{p}"))'
           for p in (config.admin_port, config.parent_port)],
@@ -274,6 +405,7 @@ def sandbox_profile(config):
         f'(allow process-exec (literal {q(config.root / "tools/document-vision-ocr")}))',
         *school_report_browser_sandbox_rules(config.root / "tmp"),
         *([f"(allow process-exec (literal {q(SCHOOL_REPORT_PDFUNITE)}))"] if adapter.school_library_read_roots else []),
+        *(['(allow process-exec (literal "/usr/bin/security"))'] if keychain else []),
         *(['(allow process-exec (literal "/sbin/mount"))'] if config.mode == "production" else []),
     ]) + "\n"
 
@@ -421,7 +553,7 @@ def start(config):
 
 def stop(config):
     # Verify every recorded owner before sending the first signal.
-    for role in ROLES:
+    for role in (*ROLES,"invoice-mail"):
         path = state_path(config, role)
         if path.exists():
             verify_process(config, role, json.loads(path.read_text()))
@@ -429,6 +561,8 @@ def stop(config):
     map_state = canonical(config.root / "map_tile_service/pid.json")
     if map_state.exists():
         school_map_tile_control.verify_process(adapter, json.loads(map_state.read_text()))
+    if state_path(config,"invoice-mail").exists():
+        stop_one(config,"invoice-mail",process_group=True)
     for role in reversed(ROLES):
         stop_one(config, role)
     school_map_tile_control.stop(adapter)
@@ -478,7 +612,7 @@ def source_identity(config):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preflight", "start", "status", "stop"))
+    parser.add_argument("action", choices=("preflight","start","status","stop","mail-probe","mail-start","mail-status","mail-stop"))
     parser.add_argument("--config", required=True)
     parser.add_argument("--allow-production-control", action="store_true")
     args = parser.parse_args(argv)
@@ -492,10 +626,18 @@ def main(argv=None):
             sandbox_profile(config)
         elif args.action == "status":
             result = status(config)
+        elif args.action == "mail-status":
+            result = invoice_mail_status(config)
         else:
             require_control_authority(config, args.allow_production_control)
             with lifecycle_lock(config):
-                result = start(config) if args.action == "start" else stop(config)
+                if args.action in {"mail-probe","mail-start"}:
+                    result=run_invoice_mail(config,probe=args.action=="mail-probe")
+                elif args.action=="mail-stop":
+                    stop_one(config,"invoice-mail",process_group=True)
+                    result=invoice_mail_status(config)
+                else:
+                    result = start(config) if args.action == "start" else stop(config)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ready", True) else 1
     except (RuntimeConfigurationError, RuntimeControlError, IsolationError, OSError, ValueError, subprocess.SubprocessError) as exc:

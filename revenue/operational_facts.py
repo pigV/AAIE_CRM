@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+import re
 
 
 def _value(row, name, default=None):
@@ -186,6 +188,54 @@ class RevenueOperationalFacts:
             application_type=_value(row, "application_type"), status=_value(row, "status"),
             version=self._version(row, "updated_at", "created_at"),
         )
+
+    def toorak_granted_visa(self, cycle_id, student_id, commencement_date):
+        present = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='visa_decision_events'"
+        ).fetchone()
+        events = self.connection.execute(
+            "SELECT * FROM visa_decision_events WHERE application_cycle_id=?", (cycle_id,)
+        ).fetchall() if present else []
+        if len(events) != 1 or events[0]["decision_type"] != "grant" or events[0]["student_id"] != student_id:
+            raise ValueError("缺少该学生申请周期唯一已确认的签证获批证据。")
+        event = events[0]
+        case = self._require("visa_cases", event["visa_case_id"])
+        role = str(_value(case, "relationship_to_student") or "").strip().casefold()
+        if (case["student_id"] != student_id or case["application_cycle_id"] != cycle_id
+                or _value(case, "archived_at") or role not in {"self", "student", "本人", "学生本人"}):
+            raise ValueError("签证持有人不是已确认的学生本人。")
+        document_id = _value(event, "student_document_id")
+        record_id = _value(event, "visa_record_id")
+        document = self._require("student_documents", document_id) if document_id else None
+        record = self._require("visas", record_id) if record_id else None
+        if document is not None and (document["student_id"] != student_id
+                or document["document_type"] != "VisaGrantLetter" or not document["is_active"]
+                or _value(document, "voided_at")):
+            raise ValueError("签证批签文件不属于该学生或已失效。")
+        if record is not None and record["student_id"] != student_id:
+            raise ValueError("签证记录不属于该学生。")
+        if document is None and record is None:
+            raise ValueError("签证缺少已确认的来源记录。")
+        subclass = str(case["visa_subclass"] or "").strip()
+        grant_dates = {value for value in (_value(event, "decision_date"),
+                       _value(case, "grant_date"), _value(record, "visa_grant_date")) if value}
+        expiry_dates = {value for value in (_value(case, "expiry_date"), _value(record, "visa_expiry_date")) if value}
+        if len(grant_dates) != 1 or len(expiry_dates) > 1:
+            raise ValueError("签证来源日期缺失或不一致。")
+        grant = next(iter(grant_dates))
+        expiry = next(iter(expiry_dates), None)
+        try:
+            start = max(date.fromisoformat(grant), date.fromisoformat(_value(record, "visa_start_date") or grant))
+            day = date.fromisoformat(commencement_date)
+            end = date.fromisoformat(expiry) if expiry else None
+        except (TypeError, ValueError) as exc:
+            raise ValueError("签证有效日期待核对。") from exc
+        if (not re.fullmatch(r"[0-9]{3}", subclass) or subclass == "590" or day < start
+                or (end is None and subclass in {"188", "500"}) or (end and day > end)):
+            raise ValueError("该签证在实际开学日无法确认有效。")
+        return {"subclass": subclass, "decision_id": event["id"], "case_id": case["id"],
+                "document_id": document_id, "record_id": record_id, "valid_from": start.isoformat(),
+                "expiry_date": expiry, "case_version": self._version(case, "updated_at", "grant_date")}
 
     def offer(self, offer_event_id: int) -> OfferFact:
         row = self._require("offer_received_events", offer_event_id)

@@ -7,7 +7,29 @@ import sqlite3
 
 
 REVENUE_MODULE_KEY = "revenue_commission"
-REVENUE_ADMIN_ACTIONS = frozenset({
+SCHOOL_COMMISSION_CONTRACT_ACTIONS = frozenset({
+    "contracts/school/bind",
+    "contracts/school/configurable-draft",
+    "contracts/school/configurable-preview",
+    "contracts/school/configurable-activate",
+    "contracts/school/stage",
+    "contracts/school/upload",
+    "contracts/school/preview",
+    "contracts/school/activate",
+    "contracts/school/toorak-draft",
+    "contracts/school/toorak-preview",
+    "contracts/school/toorak-activate",
+    "toorak-forecast/preview",
+    "toorak-forecast/save",
+    "toorak-claim/evidence",
+    "toorak-claim/preview",
+    "toorak-claim/issue",
+    "toorak-claim/invoice",
+    "toorak-settlement/delivery",
+    "toorak-settlement/payment",
+    "toorak-settlement/reconcile",
+})
+REVENUE_ADMIN_ACTIONS = SCHOOL_COMMISSION_CONTRACT_ACTIONS | frozenset({
     "contracts/extraction/review",
     "contracts/activate",
     "financial/refund",

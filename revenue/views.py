@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from html import escape
+from urllib.parse import quote
 import sqlite3
 
 from revenue.read_models import RevenueReadModels, exception_code_label
@@ -360,6 +361,208 @@ def _render_workspace_action(data: dict, csrf: str, token: str) -> str:
     return f'<aside id="revenue-action" class="revenue-action-note"><strong>当前无可执行操作</strong><p>{unavailable}</p></aside>'
 
 
+def _toorak_contract_configuration(data, csrf, token):
+    schools = data.get("toorak_schools") or []
+    if not schools:
+        return ""
+    options = "".join(f'<option value="{int(s["id"])}">{escape(s["school_name"])}</option>'
+                      for s in schools)
+    links = "".join(
+        f'<li><a href="/revenue/contracts?contract={quote(d["uid"], safe="")}">'
+        f'{escape(d["school_name"])} · V1 待登记 · {escape(d["uid"][-8:])}</a></li>'
+        for d in data["toorak_drafts"]
+    )
+    detail = ""
+    draft = data["toorak_draft"]
+    if draft:
+        categories = (("subclass_188", "Subclass 188"), ("other_resident_confirmed", "已确认的其他居民签证"),
+                      ("full_student", "完整学生签证"), ("unknown", "无法确认"))
+        def select_visa(name, selected):
+            items = "".join(f'<option value="{key}"{" selected" if key == selected else ""}>{label}</option>'
+                            for key, label in categories)
+            return f'<select name="{name}">{items}</select>'
+
+        detail = f"""<p><a href="/revenue/documents/{quote(draft["document_uid"], safe="")}/download">下载 PDF 原件</a></p>
+        <p>本地首年学费 5% · 第 7 页 §7(a)(i)｜国际首年学费 17% · 第 7 页 §7(a)(ii)</p>
+        <p>申领须有代理招募及署名申请、注册、向学校支付课程费、开学和有效发票。直接申请无佣金。学校收到有效发票后 30 天内付款。</p>
+        <form method="post" action="/revenue/contracts/school/toorak-preview" class="revenue-action-form">
+          {_hidden_security(csrf, token, "toorak-preview")}
+          <input type="hidden" name="draft_uid" value="{escape(draft["uid"], quote=True)}">
+          <label>本地档签证 {select_visa("local_visa", "subclass_188")}</label>
+          <label>首年本地学费样本（AUD）<input name="local_tuition" inputmode="decimal" required></label>
+          <label>国际档签证 {select_visa("international_visa", "full_student")}</label>
+          <label>首年国际学费样本（AUD）<input name="international_tuition" inputmode="decimal" required></label>
+          <label>GST<select name="gst_mode"><option value="">待确认</option><option value="none">不适用</option><option value="exclusive">另加 10%</option><option value="inclusive">已含 10%</option></select></label>
+          <label>协议生效日<input type="date" name="effective_from"></label>
+          <label>确认到期日（合同期限两年）<input type="date" name="effective_to"></label>
+          <button class="primary" type="submit">分别预览两档</button>
+        </form>"""
+    signed = ('<label><input type="checkbox" name="signed_confirmed" value="1" required>'
+              '已核对这是双方签署的合同原件</label>') if data.get("formal") else ""
+    return f"""<section class="revenue-panel"><h3>Toorak College · 双档规则</h3>
+      <form method="post" action="/revenue/contracts/school/toorak-draft" enctype="multipart/form-data" class="revenue-action-form">
+        {_hidden_security(csrf, token, "toorak-draft")}
+        <label>学校<select name="school_id">{options}</select></label>
+        <label>合同原件<input type="file" name="contract_file" accept=".pdf,application/pdf" required></label>
+        {signed}<button class="primary" type="submit">登记待确认草稿</button>
+      </form><ul>{links}</ul>{detail}</section>"""
+
+
+def render_toorak_commission_preview(preview, csrf, token):
+    def amount(cents):
+        return "待确认" if cents is None else _money(cents)
+
+    labels = {"local": "首年本地学费", "international": "首年国际学费"}
+    rows = []
+    for row in preview["rows"]:
+        outcome = "Needs Attention：签证与学费档不匹配或尚未确认。"
+        if row["commission_cents"] is not None:
+            outcome = (f'样本 {_money(row["tuition_cents"])} · 佣金 {_money(row["commission_cents"])}'
+                       f' · GST {amount(row["gst_cents"])} · 合计 {amount(row["total_cents"])}')
+        rows.append(f'<li>{labels[row["tuition_kind"]]} · {row["rate_basis_points"] // 100}%'
+                    f' · {escape(row["source"])}<br>{outcome}</li>')
+    fields = {**preview["confirmation_fields"], "preview_digest": preview["digest"]}
+    gst_labels = {None: "待确认", "none": "不适用", "exclusive": "另加 10%", "inclusive": "已含 10%"}
+    gst = gst_labels[preview["gst_mode"]]
+    start = escape(preview["effective_from"] or "待确认")
+    end = escape(preview["effective_to"] or "待确认")
+    action = '<p>两档匹配结果、GST 或协议有效期待确认，暂不能激活。</p>'
+    if preview["can_activate"]:
+        hidden = "".join(f'<input type="hidden" name="{key}" value="{escape(value, quote=True)}">'
+                         for key, value in fields.items())
+        action_label = "确认并激活两档规则" if preview.get("formal") else "确认并在测试库整套激活"
+        action = f"""<form method="post" action="/revenue/contracts/school/toorak-activate">
+          {_hidden_security(csrf, token, "toorak-activate")}{hidden}
+          <button class="primary" type="submit">{action_label}</button>
+        </form>"""
+    return f"""<section class="revenue-panel"><h2>{escape(preview["school_name"])} · 双档佣金预览</h2>
+      <a href="/revenue/documents/{quote(preview["document_uid"], safe="")}/download">下载 PDF 原件</a>
+      <p>GST {gst} · 生效日 {start} · 到期日 {end}</p>
+      <ul>{''.join(rows)}</ul>{action}
+      <a href="/revenue/contracts?contract={quote(fields["draft_uid"], safe="")}">返回合同草稿</a>
+    </section>"""
+
+
+def _school_contract_configuration(data: dict, csrf: str, token: str) -> str:
+    schools = "".join(
+        f'<option value="{int(school["id"])}">{escape(school["school_name"])}</option>'
+        for school in data["schools"]
+    )
+    bindings = data["bindings"]
+    upload_options = "".join(
+        f'<option value="{int(binding["id"])}">{escape(binding["school_name"])} · '
+        f'{escape(binding["legal_name"])}</option>'
+        for binding in bindings if not binding["contract_uid"]
+    )
+    registered = "".join(
+        f'<li><a href="/revenue/contracts?contract={escape(quote(binding["contract_uid"], safe=""), quote=True)}">'
+        f'{escape(binding["school_name"])} · {escape(binding["legal_name"])}</a></li>'
+        for binding in bindings if binding["contract_uid"]
+    )
+    bind_form = f"""
+      <form method="post" action="/revenue/contracts/school/bind" class="revenue-action-form">
+        {_hidden_security(csrf, token, "school-bind")}
+        <label>学校<select name="school_id" required>{schools}</select></label>
+        <label>签约及付款主体<input name="legal_name" maxlength="200" required></label>
+        <label>绑定生效日<input type="date" name="effective_from" required></label>
+        <button class="primary" type="submit">绑定学校佣金主体</button>
+      </form>""" if schools else ""
+    upload_form = f"""
+      <form method="post" action="/revenue/contracts/school/upload" enctype="multipart/form-data" class="revenue-action-form">
+        {_hidden_security(csrf, token, "school-upload")}
+        <label>已绑定学校<select name="school_id" required>{upload_options}</select></label>
+        <label>合同参考编号<input name="reference_code" maxlength="100"></label>
+        <label>合同生效日<input type="date" name="effective_from" required></label>
+        <label>合同到期日<input type="date" name="effective_to" required></label>
+        <label>已签 PDF<input name="contract_file" type="file" accept=".pdf,application/pdf" required></label>
+        <button class="primary" type="submit">登记学校合同 V1</button>
+      </form>""" if upload_options else ""
+    detail = ""
+    contract = data.get("contract")
+    if contract:
+        school = contract["school"]
+        uid = escape(contract["uid"], quote=True)
+        document_uid = escape(quote(contract["document_uid"], safe=""), quote=True)
+        detail = f"""<section class="revenue-panel">
+          <h3>{escape(school["school_name"])} · 合同 V{int(contract["version_no"])}</h3>
+          <p>付款主体 {escape(school["legal_name"])} · 参考编号 {escape(contract["reference_code"] or "—")}</p>
+          <p>有效期 {escape(contract["effective_from"])} 至 {escape(contract["effective_to"] or "—")}</p>
+          <a href="/revenue/documents/{document_uid}/download">下载 PDF 原件</a>"""
+        if contract.get("toorak_package"):
+            detail += '<p>双档已在测试库激活 · 首年本地学费 5% / 首年国际学费 17%</p>'
+        elif contract["rule_uid"]:
+            rate = int(contract["rate_basis_points"])
+            required = "需要 COE 和对应文件" if contract["required_document"] else "无附加材料要求"
+            detail += (
+                f'<p>规则已在测试库激活 · 佣金比例 {rate // 100}.{rate % 100:02d}% '
+                f'· 开学后 {int(contract["commencement_days"])} 天 · {required}</p>'
+                f'<p>来源 {escape(contract["clause_reference"] or "—")} · '
+                f'{escape(contract["evidence_text"] or "—")}</p>'
+            )
+        if contract["status"] == "draft":
+            detail += f"""
+          <form method="post" action="/revenue/contracts/school/preview" class="revenue-action-form">
+            {_hidden_security(csrf, token, "school-preview")}
+            <input type="hidden" name="school_id" value="{int(school["id"])}">
+            <input type="hidden" name="contract_version_uid" value="{uid}">
+            <label>计佣学费样本（AUD）<input name="sample_tuition" inputmode="decimal" required></label>
+            <label>单期佣金比例（%）<input name="rate_percent" inputmode="decimal" required></label>
+            <label>GST<select name="gst_mode"><option value="exclusive">佣金另加 10% GST</option></select></label>
+            <label>开学后可申领天数<input name="commencement_days" type="number" min="0" max="365" required></label>
+            <label><input name="required_coe" type="checkbox" value="1"> 需要 COE 及对应文件</label>
+            <label>来源页码或条款<input name="clause_reference" maxlength="100" required></label>
+            <label class="revenue-action-form__wide">条款证据<textarea name="evidence_text" maxlength="2000" required></textarea></label>
+            <button class="primary" type="submit">预览佣金规则</button>
+          </form>"""
+        detail += "</section>"
+    links = ""
+    if data.get("allow_invoicing",True):
+        links = ('<p><a href="/revenue/school-commission-invoices">按学校开具佣金发票</a>'
+                 ' · <a href="/revenue/commission-invoice-templates">编辑佣金发票模板</a></p>')
+    elif data.get("allow_invoice_preview"):
+        links = '<p><a href="/revenue/school-commission-invoices">预览学校佣金发票</a></p>'
+    if data.get("formal"):
+        bind_form = upload_form = ""
+    mode = "隔离测试环境 · " if data.get("simulation",True) else ""
+    return f"""<section class="revenue-panel" aria-label="学校佣金合同配置">
+      <h2>学校佣金合同配置</h2><p>{mode}人工核对已签合同</p>
+      {links}
+      {_toorak_contract_configuration(data, csrf, token)}
+      {bind_form}{upload_form}<ul>{registered}</ul>{detail}
+    </section>"""
+
+
+def render_school_commission_preview(preview: dict, csrf: str, token: str) -> str:
+    fields = {**preview["confirmation_fields"], "preview_digest": preview["digest"]}
+    hidden_fields = "".join(
+        f'<input type="hidden" name="{escape(key, quote=True)}" value="{escape(str(value), quote=True)}">'
+        for key, value in fields.items()
+    )
+    contract_uid = quote(str(fields["contract_version_uid"]), safe="")
+    contract = preview["contract"]
+    document_uid = quote(contract["document_uid"], safe="")
+    clause = escape(str(fields["clause_reference"]))
+    evidence = escape(str(fields["evidence_text"]))
+    required = "需要 COE 和对应文件" if fields["required_coe"] == "1" else "无附加材料要求"
+    rate = escape(str(fields["rate_percent"]))
+    days = escape(str(fields["commencement_days"]))
+    return f"""<section class="revenue-panel">
+      <h2>学校佣金规则预览</h2>
+      <p>{escape(contract["school_name"])} · {escape(contract["legal_name"])} · 合同 V1</p>
+      <p>参考编号 {escape(contract["reference_code"] or "—")} · 有效期
+        {escape(contract["effective_from"])} 至 {escape(contract["effective_to"])}</p>
+      <a href="/revenue/documents/{escape(document_uid, quote=True)}/download">下载 PDF 原件</a>
+      <p>样本学费 {_money(preview["tuition_cents"])} · 单期比例 {rate}%</p>
+      <p>净佣金 {_money(preview["net_cents"])} · GST {_money(preview["gst_cents"])} · 合计 {_money(preview["gross_cents"])}</p>
+      <p>开学后 {days} 天 · {required}</p><p>来源 {clause} · {evidence}</p>
+      <form method="post" action="/revenue/contracts/school/activate">
+        {_hidden_security(csrf, token, "school-activate")}{hidden_fields}
+        <button class="primary" type="submit">确认条款并在测试库激活</button>
+      </form>
+      <a href="/revenue/contracts?contract={escape(contract_uid, quote=True)}">返回合同</a>
+    </section>"""
+
+
 def render_revenue_workspace_page(
     data: dict, csrf: str, action_token: str = "", mobile: bool = False
 ) -> str:
@@ -469,6 +672,13 @@ def render_revenue_workspace_page(
         '<p>合同上传、对账单导入、正式申领与收款确认请在桌面端完成。</p></aside>'
         if mobile else _render_workspace_action(data, csrf, action_token)
     )
+    if not mobile and data.get("can_administer") and data.get("school_commission"):
+        action_content = _school_contract_configuration(
+            data["school_commission"], csrf, action_token
+        ) + action_content
+    if not mobile and data.get("multischool_commission"):
+        from revenue.multischool_views import render_multischool_configuration
+        action_content = render_multischool_configuration(data["multischool_commission"],csrf,action_token) + action_content
     mobile_variant = " revenue-workspace-page--mobile" if mobile else ""
     access_badge = "仅限管理员" if data.get("can_administer", True) else "已授权用户"
     revenue_home_href = str(data.get("revenue_home_href") or "/revenue")
@@ -510,6 +720,217 @@ def render_revenue_workspace_page(
       {action_content}
       <input type="hidden" name="csrf" value="{escape(str(csrf), quote=True)}">
     </main>"""
+
+
+def render_toorak_forecast_preview(preview, csrf, token, confirm_other):
+    case_url = "/revenue/cases/" + quote(preview["case_uid"], safe="")
+    component = escape(preview["component_uid"], quote=True)
+    digest = escape(preview["digest"], quote=True)
+    tier = preview["tier"]
+    basis = "首年本地学费" if tier["tuition_kind"] == "local" else "首年国际学费"
+    visa = preview["visa"]
+    tuition = preview["tuition"]
+    rule = preview["rule"]
+    visa_line = ""
+    if visa:
+        visa_source = visa["document_id"] or visa["record_id"]
+        visa_line = f'<p>签证 Subclass {escape(visa["subclass"])} · 批签证据编号 {int(visa_source)}</p>'
+    return f"""<section class="revenue-panel">
+      <h2>{escape(preview["school"])} · 学生预计佣金</h2>
+      <p>学生 {escape(preview["student_id"])} · 实际开学日 {escape(preview["commencement"]["actual_commencement_date"])}</p>
+      {visa_line}
+      <p>{basis} {_aud_money(tuition["tuition_cents"])} · 学费证据编号 {int(tuition["evidence_document_id"])}</p>
+      <p>合同 V{int(rule["version_no"])} · {escape(rule["effective_from"])} 至 {escape(rule["effective_to"])}
+         · {escape(tier["source"])} · {tier["rate_basis_points"] / 100:g}%</p>
+      <p>净佣金 {_aud_money(preview["net_cents"])} · GST {_aud_money(preview["gst_cents"])}
+         · 含税 {_aud_money(preview["gross_cents"])}</p>
+      <form method="post" action="{case_url}/toorak-forecast/save">
+        {_hidden_security(csrf, token, "toorak-forecast-save")}
+        <input type="hidden" name="component_uid" value="{component}">
+        <input type="hidden" name="preview_digest" value="{digest}">
+        <input type="hidden" name="confirm_other" value="{int(confirm_other)}">
+        <button class="primary" type="submit">保存预计佣金</button>
+      </form><a href="{case_url}">返回学生业务档案</a>
+    </section>"""
+
+
+def render_toorak_claim_preview(data, csrf, token, *, simulation=True):
+    path = "/revenue/cases/" + quote(data["case_uid"],safe="")
+    def evidence_value(item):
+        return str(item.get("document_uid") or item["student_document_id"])
+
+    evidence = "".join(
+        f'<li>{escape(item["label"])} · {escape(item["filename"])} · {escape(evidence_value(item))}</li>'
+        for item in data["evidence"]
+    )
+    keys = ("agent_document_id","enrolment_document_id","payment_document_id")
+    hidden = "".join(
+        f'<input type="hidden" name="{item.get("field",key)}" value="{escape(evidence_value(item),quote=True)}">'
+        for key,item in zip(keys,data["evidence"])
+    )
+    claim_label = "内部测试 Claim" if simulation else "内部 Claim"
+    recruited = "configured_rule" if data.get("school_commission_configurable") else "agent_named"
+    title = "学校佣金" if data.get("school_commission_configurable") else "Toorak College"
+    return f"""<section class="revenue-panel"><h2>{title} · 内部 Claim 核对</h2>
+      <p>学生 {escape(data["student_id"])} · 开学 {escape(data["commencement"]["actual_commencement_date"])}</p>
+      <ul>{evidence}</ul>
+      <p>净佣金 {_aud_money(data["net_cents"])} · GST {_aud_money(data["gst_cents"])}
+         · 含税 {_aud_money(data["gross_cents"])}</p>
+      <p>{claim_label}。学校收到有效发票后才开始计算付款期限。</p>
+      <form method="post" action="{path}/toorak-claim/issue">
+        {_hidden_security(csrf,token,"toorak-claim-issue")}{hidden}
+        <input type="hidden" name="line_uid" value="{escape(data["line_uid"],quote=True)}">
+        <input type="hidden" name="preview_digest" value="{escape(data["digest"],quote=True)}">
+        <input type="hidden" name="recruited" value="{recruited}">
+        <input type="hidden" name="reviewed" value="1">
+        <button class="primary" type="submit">确认并签发内部 Claim</button>
+      </form><a href="{path}">返回学生业务档案</a>
+    </section>"""
+
+
+def _toorak_settlement_controls(line, path, csrf, token, *, allow_actions=True):
+    data = line.get("settlement")
+    if not data:
+        return ""
+    delivery = data["delivery"]
+    reconciliation = data["reconciliation"]
+    uid = escape(line["invoice_uid"],quote=True)
+    hidden = f'<input type="hidden" name="invoice_uid" value="{uid}">'
+    status = {"unpaid":"未收款","partial":"部分收款","awaiting_reconciliation":"已收清，待核销",
+              "reconciled":"已核销"}[data["status"]]
+    timing = {"late":"逾期后收清","due_day":"到期当天收清","early":"到期前收清",
+              "overdue":"逾期未收清"}.get(data["timing"],"")
+    received = escape(delivery["received_on"]) if delivery else "待确认"
+    due = escape(delivery["due_date"]) if delivery else "待确认"
+    term = ""
+    if delivery:
+        days = delivery.get("term_days",30)
+        term = " · 立即到期" if days == 0 else f" · 付款期限 {int(days)} 天"
+    allocation_inputs = ""
+    if len(line.get("lines", [])) > 1:
+        allocation_inputs = "".join(
+            f'<label>{escape(item["student_id"])} · {escape(item["claim_number"])} · 未收 '
+            f'{_aud_money(item["outstanding_cents"])}<input name="allocation_{escape(item["invoice_line_uid"],quote=True)}" '
+            f'inputmode="decimal" placeholder="0.00" {"disabled" if item["outstanding_cents"]==0 else ""}></label>'
+            for item in line["lines"]
+        )
+    by_id = {item["invoice_line_id"]:item["student_id"] for item in line.get("lines", [])}
+    evidence_link = ""
+    if delivery:
+        evidence_link = f' · <a href="/revenue/documents/{quote(delivery["document_uid"],safe="")}/download">收件凭证</a>'
+    payments = "".join(
+        f'<li>{escape(payment["received_date"])} · {escape(payment["external_reference"])} · '
+        f'{_aud_money(payment["invoice_cents"])} · {escape(by_id.get(payment.get("invoice_line_id"),""))} '
+        f'<a href="/revenue/documents/{quote(payment["document_uid"],safe="")}/download">汇款凭证</a></li>'
+        for payment in data["payments"] if payment["document_uid"]
+    )
+    action = ""
+    evidence_input = '<label>PDF 凭证<input type="file" name="settlement_evidence" accept=".pdf,application/pdf" required></label>'
+    fixed_term = line.get("payment_days")
+    term_options = ((0,"立即到期"),(7,"7 天"),(15,"15 天"),(30,"30 天"))
+    options = "".join(
+        f'<option value="{days}"{" selected" if days==(30 if fixed_term is None else fixed_term) else ""}>{label}</option>'
+        for days,label in term_options if fixed_term is None or fixed_term==days
+    )
+    if not delivery:
+        action = f"""<form method="post" action="{path}/delivery" enctype="multipart/form-data" class="revenue-action-form">
+          {_hidden_security(csrf,token,"toorak-delivery")}{hidden}
+          <label>学校收到有效发票日期<input type="date" name="received_on" required></label>
+          <label>付款期限<select name="term_days" required>{options}</select></label>{evidence_input}
+          <button class="primary" type="submit">确认学校收件</button></form>"""
+    elif data["outstanding_cents"]>0 and not reconciliation:
+        action = f"""<form method="post" action="{path}/payment" enctype="multipart/form-data" class="revenue-action-form">
+          {_hidden_security(csrf,token,"toorak-school-payment")}{hidden}
+          <label>学校到账日<input type="date" name="received_on" required></label>
+          <label>到账金额（AUD）<input name="amount_aud" inputmode="decimal" required></label>
+          <label>银行流水参考号<input name="bank_reference" maxlength="100" required></label>{allocation_inputs}{evidence_input}
+          <button class="primary" type="submit">登记学校到账</button></form>"""
+    elif not reconciliation:
+        action = f"""<form method="post" action="{path}/reconcile" class="revenue-action-form">
+          {_hidden_security(csrf,token,"toorak-reconcile")}{hidden}
+          <label><input type="checkbox" name="reviewed" value="1" required>已核对发票与全部学校银行流水</label>
+          <button class="primary" type="submit">确认最终核销</button></form>"""
+    else:
+        action = (f'<p>核销记录 {escape(reconciliation["uid"])} · 管理员 #{int(reconciliation["confirmed_by"])}'
+                  f' · {escape(reconciliation["confirmed_at"])}</p>')
+    return f"""<div class="revenue-panel">
+      <p>发票签发日 {escape(line["issue_date"])} · 学校收件日 {received} · 到期日 {due}{term}{evidence_link}</p>
+      <p>{status} {timing} · 应收 {_aud_money(line["gross_cents"])}
+         · 已收 {_aud_money(data["received_cents"])} · 未收 {_aud_money(data["outstanding_cents"])}</p>
+      <ul>{payments}</ul>{action if allow_actions or reconciliation else ""}
+    </div>"""
+
+
+def _toorak_claim_controls(data, csrf, token):
+    claim = data.get("toorak_claim")
+    if not claim or not data.get("can_administer"):
+        return ""
+    path = "/revenue/cases/" + quote(data["case"]["uid"],safe="") + "/toorak-claim"
+    fields = {}
+    for field in claim["fields"]:
+        options = "".join(f'<option value="{escape(str(doc["id"]),quote=True)}">{escape(doc["original_name"])}</option>'
+                          for doc in field["options"])
+        fields[field["name"]] = (f'<label>{escape(field["label"])}<select name="{field["name"]}" required>'
+                                 f'<option value="">请选择证据</option>{options}</select></label>')
+    blocks = []
+    simulation = data.get("school_commission_simulation",True)
+    invoice_label = "测试佣金发票" if simulation else "佣金发票"
+    template_label = "合成测试发票格式" if simulation else "已审批发票模板和财务资料"
+    finance_label = "测试财务资料" if simulation else "财务资料"
+    for line in claim["lines"]:
+        uid = escape(line["uid"],quote=True)
+        if line["invoice_document_uid"]:
+            document = quote(line["invoice_document_uid"],safe="")
+            blocks.append(f'<p>内部 Claim {escape(line["claim_number"])} · {invoice_label} '
+                          f'<a href="/revenue/documents/{document}/download">{escape(line["invoice_number"])}</a>'
+                          '</p>')
+            settlement_path = "/revenue/cases/" + quote(data["case"]["uid"],safe="") + "/toorak-settlement"
+            invoice = quote(line["invoice_uid"],safe="")
+            if line["grouped_invoice"]:
+                blocks.append(f'<p><a href="/revenue/school-commission-invoices?invoice={invoice}">查看合开发票与学校到账</a></p>')
+            else:
+                blocks.append(_toorak_settlement_controls(
+                    line,settlement_path,csrf,token,allow_actions=data.get("school_commission_settlement",True),
+                ))
+        elif line["claim_uid"]:
+            blocks.append(f"""<form method="post" action="{path}/invoice" class="revenue-action-form">
+              {_hidden_security(csrf,token,"toorak-claim-invoice")}
+              <input type="hidden" name="claim_uid" value="{escape(line["claim_uid"],quote=True)}">
+              <input type="hidden" name="template_revision" value="{escape(claim["template_revision"],quote=True)}">
+              <input type="hidden" name="finance_revision" value="{escape(claim["finance_revision"],quote=True)}">
+              <p>模板版本 {escape(claim["template_revision"][-10:] or "默认")} · {finance_label} {escape(claim["finance_revision"][-10:] or "默认占位")}</p>
+              <p>内部 Claim {escape(line["claim_number"])} · {_aud_money(line["gross_cents"])}</p>
+              <label><input type="checkbox" name="template_confirmed" value="1" required>确认使用{template_label}</label>
+              <button class="primary" type="submit">生成{invoice_label}</button></form>""")
+        elif line["status"] == "forecast":
+            selected_fields = "".join(fields[key] for key in line.get("evidence_field_names",fields) if key in fields)
+            recruitment = ('<input type="hidden" name="recruited" value="configured_rule">' if line.get("configurable")
+                           else '<label>招募来源<select name="recruited" required><option value="">请选择</option>'
+                                '<option value="agent_named">代理招募并提交署名申请</option>'
+                                '<option value="direct">学生直接申请</option></select></label>')
+            blocks.append(f"""<form method="post" action="{path}/preview" class="revenue-action-form">
+              {_hidden_security(csrf,token,"toorak-claim-preview")}
+              <input type="hidden" name="line_uid" value="{uid}">
+              {selected_fields}{recruitment}
+              <label><input type="checkbox" name="reviewed" value="1" required>已按合同核对该学生的申领条件和凭证</label>
+              <button class="primary" type="submit">核对申领证据</button></form>""")
+    intake = ""
+    if data.get("school_commission_formal") and any(line["status"]=="forecast" for line in claim["lines"]):
+        categories = "".join(
+            f'<option value="{value}">{label}</option>' for value,label in (
+                ("ToorakAgentNamedApplication","代理招募及署名申请"),
+                ("ToorakEnrolmentConfirmation","学校注册确认"),
+                ("ToorakSchoolTuitionPaid","学校课程费实收证据"),
+            )
+        )
+        intake = f"""<form method="post" action="{path}/evidence" enctype="multipart/form-data"
+                           class="revenue-action-form">
+          {_hidden_security(csrf,token,"toorak-claim-evidence")}
+          <label>申领凭证类别<select name="evidence_kind" required>{categories}</select></label>
+          <label>PDF 凭证<input type="file" name="claim_evidence" accept=".pdf,application/pdf" required></label>
+          <button type="submit">登记申领凭证</button></form>"""
+    heading = "<h3>学校佣金测试申领与发票</h3>" if simulation else "<h3>学校佣金申领与发票</h3>"
+    return heading + intake + "".join(blocks)
 
 
 def render_revenue_case_workbench(
@@ -648,6 +1069,32 @@ def render_revenue_case_workbench(
         f'<a href="{escape(str(item["href"]), quote=True)}">{escape(str(item["label"]))}</a>'
         for item in data.get("context_links") or []
     )
+    def toorak_forecast_controls():
+        if mobile or not data.get("can_administer") or not data.get("toorak_forecast_components"):
+            return ""
+        path = "/revenue/cases/" + quote(data["case"]["uid"], safe="") + "/toorak-forecast/preview"
+        controls = []
+        for component in data["toorak_forecast_components"]:
+            if component["forecast_cents"] is not None:
+                label = "预计佣金" if component["commission_status"] == "forecast" else "已有佣金明细"
+                controls.append(f'<p>{label} · {_aud_money(component["forecast_cents"])}</p>')
+                continue
+            uid = escape(component["uid"], quote=True)
+            school = component.get("school_name") or "Toorak College"
+            visa_confirmation = ""
+            if school.strip().casefold()=="toorak college":
+                visa_confirmation = ('<label><input type="checkbox" name="confirm_other" value="1">'
+                                     '已查验签证原件，确认属于合同所指的其他临时／永久居民签证</label>')
+            controls.append(f"""<form method="post" action="{path}" class="revenue-action-form">
+              {_hidden_security(csrf, action_token, "toorak-forecast-preview")}
+              <input type="hidden" name="component_uid" value="{uid}">
+              <p>{escape(school)} · 入学确认 {int(component["final_acceptance_id"])}</p>
+              <p>请确认实际开学日，并登记有证据的首年学费（期间 year_1，费用类型 tuition_local 或 tuition_international）。</p>
+              {visa_confirmation}
+              <button class="primary" type="submit">预览预计佣金</button>
+            </form>""")
+        return "".join(controls)
+
     sections = []
     for section in data.get("sections") or []:
         key = str(section["key"])
@@ -659,6 +1106,9 @@ def render_revenue_case_workbench(
             content = client_billing_content()
         elif key == "invoice_payment_receipt":
             content = payment_receipt_content()
+        elif key == "direct_commission":
+            claim_controls = "" if mobile else _toorak_claim_controls(data, csrf, action_token)
+            content = toorak_forecast_controls() + claim_controls + safe_generic_content(section)
         else:
             content = safe_generic_content(section)
         sections.append(case_section(key, str(section["title"]), content))

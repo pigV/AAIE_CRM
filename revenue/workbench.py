@@ -7,6 +7,7 @@ This module is intentionally query-only.  Every mutation remains in
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import sqlite3
 from typing import Any
 from urllib.parse import quote
@@ -41,6 +42,79 @@ class RevenueWorkbench:
         self.connection = connection
         self.connection.row_factory = sqlite3.Row
 
+    def toorak_forecast_components(self, case_id, *, school_id=None, entity_id=None, formal=False, simulation=True):
+        return self._rows(
+            """SELECT ec.uid,ec.final_acceptance_id,school.school_name,
+                      l.gross_cents AS forecast_cents,l.status AS commission_status
+                 FROM revenue_enrolment_components ec
+                 JOIN cycle_final_acceptances a ON a.id=ec.final_acceptance_id
+                 JOIN schools school ON school.id=a.school_id
+                 LEFT JOIN revenue_commission_lines l ON l.enrolment_component_id=ec.id
+                   AND (?=0 OR (l.revenue_entity_id=? AND EXISTS (
+                     SELECT 1 FROM revenue_rule_snapshots snap WHERE snap.id=l.rule_snapshot_id
+                       AND json_extract(snap.canonical_json,'$.school_commission_formal')=1
+                       AND json_extract(snap.canonical_json,'$.school_commission_simulation')=?
+                   )))
+                WHERE ec.commercial_case_id=? AND ec.component_kind='school'
+                  AND ec.status='active' AND a.acceptance_status='active'
+                  AND ((?=1 AND a.school_id=?) OR (?=0 AND lower(trim(school.school_name))='toorak college'))
+                ORDER BY ec.id""", (formal,entity_id,simulation,case_id,formal,school_id,formal),
+        )
+
+    def toorak_claim_workbench(self, case_id, student_id, *, formal=False, entity_id=None, simulation=True):
+        from revenue.invoice_templates import FORMAL_INVOICE_KIND, TEST_INVOICE_KIND, current_invoice_template_revisions
+        from revenue.toorak_claims import EVIDENCE_FIELDS, claim_evidence_fields, formal_evidence_options
+        from revenue.toorak_settlement import settlement_summary
+
+        lines = self._rows(
+            """SELECT l.uid,l.status,l.gross_cents,claim.uid AS claim_uid,claim.claim_number,
+                      invoice.uid AS invoice_uid,invoice.invoice_number,invoice.issue_date,
+                      invoice.commercial_case_id IS NULL AS grouped_invoice,
+                      il.id AS invoice_line_id,d.uid AS invoice_document_uid,d.document_kind,
+                      json_extract(ev.authoritative_facts_json,'$.payment_days') AS payment_days,
+                      s.canonical_json AS forecast_json
+                 FROM revenue_commission_lines l JOIN revenue_rule_snapshots s ON s.id=l.rule_snapshot_id
+                 LEFT JOIN revenue_claim_eligibility_evaluations ev ON ev.commission_line_id=l.id
+                      AND json_extract(ev.authoritative_facts_json,'$.toorak_claim')=1
+                      AND COALESCE(json_extract(ev.authoritative_facts_json,'$.school_commission_formal'),0)=?
+                      AND (?=0 OR json_extract(ev.authoritative_facts_json,'$.school_commission_simulation')=?)
+                 LEFT JOIN revenue_claims claim ON claim.id=ev.claim_id
+                 LEFT JOIN revenue_invoice_lines il ON il.source_kind='claim' AND il.source_uid=claim.uid
+                 LEFT JOIN revenue_invoices invoice ON invoice.id=il.invoice_id
+                 LEFT JOIN revenue_documents d ON d.id=invoice.document_id
+                WHERE l.commercial_case_id=? AND json_extract(s.canonical_json,'$.toorak_forecast')=1
+                  AND COALESCE(json_extract(s.canonical_json,'$.school_commission_formal'),0)=?
+                  AND (?=0 OR json_extract(s.canonical_json,'$.school_commission_simulation')=?)
+                  AND (? IS NULL OR l.revenue_entity_id=?)
+                ORDER BY l.id""", (formal,formal,simulation,case_id,formal,formal,simulation,entity_id,entity_id),
+        )
+        if not lines:
+            return None
+        invoice_kind = FORMAL_INVOICE_KIND if formal else TEST_INVOICE_KIND
+        for line in lines:
+            forecast = json.loads(line.pop("forecast_json"))
+            line["configurable"] = forecast.get("school_commission_configurable") is True
+            line["evidence_field_names"] = [field for field,_,_ in claim_evidence_fields(forecast)]
+            if line["document_kind"] == invoice_kind and not line["grouped_invoice"]:
+                line["settlement"] = settlement_summary(
+                    self.connection,line["invoice_uid"],line["invoice_line_id"],line["gross_cents"],formal=formal,
+                )
+        fields = [
+            {"name":field,"label":label,"options":(
+                formal_evidence_options(self.connection,case_id,student_id,entity_id,kind,simulation)
+                if formal else self._rows(
+                """SELECT id,original_name FROM student_documents
+                    WHERE student_id=? AND document_type=? AND is_active=1 ORDER BY id""",
+                (student_id,kind),
+            ))}
+            for field,kind,label in EVIDENCE_FIELDS
+            if any(field in line["evidence_field_names"] for line in lines)
+        ]
+        template,profile = current_invoice_template_revisions(
+            self.connection,formal=formal,entity_id=entity_id,simulation=simulation,
+        )
+        return {"lines":lines,"fields":fields,"template_revision":template,"finance_revision":profile,"formal":formal}
+
     def load(self, case_uid: str) -> dict[str, Any]:
         case_row = self.connection.execute(
             "SELECT * FROM revenue_commercial_cases WHERE uid=?", (case_uid,)
@@ -65,13 +139,18 @@ class RevenueWorkbench:
             "revenue_commencement_facts", "enrolment_component_id", component_ids
         )
         commissions = self._rows(
-            "SELECT * FROM revenue_commission_lines WHERE commercial_case_id=? ORDER BY id",
+            """SELECT l.* FROM revenue_commission_lines l WHERE l.commercial_case_id=?
+               AND NOT EXISTS (SELECT 1 FROM revenue_rule_snapshots s WHERE s.id=l.rule_snapshot_id
+                               AND json_extract(s.canonical_json,'$.school_commission_formal')=1)
+               ORDER BY l.id""",
             (case_id,),
         )
         line_ids = [int(row["id"]) for row in commissions]
         statements = self._statement_items(line_ids)
         invoices = self._rows(
-            "SELECT * FROM revenue_invoices WHERE commercial_case_id=? ORDER BY id",
+            """SELECT i.* FROM revenue_invoices i WHERE i.commercial_case_id=?
+               AND NOT EXISTS (SELECT 1 FROM revenue_documents d WHERE d.id=i.document_id
+                               AND d.document_kind='school_commission_invoice') ORDER BY i.id""",
             (case_id,),
         )
         fee_items = self._client_fee_items(case_id)
@@ -400,8 +479,10 @@ class RevenueWorkbench:
             LEFT JOIN revenue_invoice_lines il ON il.id=a.invoice_line_id
             LEFT JOIN revenue_invoices i ON i.id=il.invoice_id
             LEFT JOIN revenue_commission_lines c ON c.id=a.commission_line_id
-                WHERE cf.commercial_case_id=? OR i.commercial_case_id=?
-                   OR c.commercial_case_id=? ORDER BY p.id""",
+                WHERE (cf.commercial_case_id=? OR i.commercial_case_id=? OR c.commercial_case_id=?)
+                  AND COALESCE(ed.document_kind,'') NOT IN ('toorak_school_remittance_evidence',
+                                                         'school_commission_remittance_evidence')
+                ORDER BY p.id""",
             (case_id, case_id, case_id),
         )
 
@@ -450,8 +531,12 @@ class RevenueWorkbench:
                 LEFT JOIN revenue_payments rp ON rp.id=r.payment_id
                 LEFT JOIN revenue_client_payment_allocations rpa ON rpa.payment_id=rp.id
                 LEFT JOIN revenue_fee_items rf ON rf.id=rpa.fee_item_id
-               WHERE i.commercial_case_id=? OR cl.commercial_case_id=?
-                  OR cf.commercial_case_id=? OR rf.commercial_case_id=? ORDER BY d.id""",
+               WHERE (i.commercial_case_id=? OR cl.commercial_case_id=?
+                  OR cf.commercial_case_id=? OR rf.commercial_case_id=?)
+                 AND d.document_kind NOT IN ('school_commission_invoice','school_commission_claim_evidence',
+                                             'school_commission_delivery_evidence',
+                                             'school_commission_remittance_evidence')
+               ORDER BY d.id""",
             (case_id, case_id, case_id, case_id),
         )
         for row in rows:
