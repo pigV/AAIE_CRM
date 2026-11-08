@@ -88,6 +88,9 @@ class InvoicePDFStore:
             raise StorageUnavailable() from error
 
     def write(self, pdf):
+        return self.publish(pdf)[0]
+
+    def publish(self, pdf):
         if not isinstance(pdf,bytes) or not 0<len(pdf)<=MAX_PDF:
             raise StorageUnavailable()
         digest=sha256(pdf).hexdigest()
@@ -108,13 +111,13 @@ class InvoicePDFStore:
         if not re.fullmatch("[0-9a-f]{64}",digest) or not 0<size<=MAX_PDF:
             raise StorageUnavailable()
         self._decrypt(data,digest,size)
-        return self._publish(digest+SUFFIX,digest,size,data)
+        return self._publish(digest+SUFFIX,digest,size,data)[0]
 
     def _publish(self,name,digest,size,payload):
         with self.directory() as fd:
             try:
                 self._read(fd,name,digest,size)
-                return self.root/name
+                return self.root/name, False
             except FileNotFoundError:
                 pass
             scratch=".pending-"+uuid.uuid4().hex
@@ -127,14 +130,15 @@ class InvoicePDFStore:
                     os.fsync(handle)
                 try:
                     os.link(scratch,name,src_dir_fd=fd,dst_dir_fd=fd,follow_symlinks=False)
+                    created = True
                 except FileExistsError:
-                    pass
+                    created = False
             finally:
                 os.close(handle)
                 os.unlink(scratch,dir_fd=fd)
             os.fsync(fd)
             self._read(fd,name,digest,size)
-        return self.root/name
+        return self.root/name, created
 
 
 def configured_invoice_store():
@@ -165,6 +169,10 @@ def configured_invoice_store():
             raise StorageUnavailable() from error
         if config.mode!=mode or current!={"AAIE_INVOICE_PDF_ROOT":str(root),"AAIE_INVOICE_PDF_KEYCHAIN_ITEM":item}:
             raise StorageUnavailable()
+    return keychain_pdf_store(root, item)
+
+
+def keychain_pdf_store(root, item):
     keychain=Path("/Users/faqiang/Library/Keychains/login.keychain-db")
     command=["/usr/bin/security","find-generic-password","-s",item,"-a","AAIE CRM","-w",str(keychain)]
     try:

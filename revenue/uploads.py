@@ -77,11 +77,12 @@ def _validate_upload_identity(extension: str, content_type: str, payload: bytes)
 
 
 def stage_revenue_upload(
-    root: Path,
+    root: Path | None,
     upload,
     allowed_extensions: Iterable[str],
     *,
     max_bytes: int = 20 * 1024 * 1024,
+    encrypted_store=None,
 ) -> StagedRevenueUpload:
     filename = str(getattr(upload, "filename", "") or "")
     if (
@@ -105,7 +106,10 @@ def stage_revenue_upload(
 
     from revenue.secure_storage import write_immutable
     digest = hashlib.sha256(payload).hexdigest()
-    target, created = write_immutable(root, f"{digest}{extension}", payload)
+    if encrypted_store is None:
+        target, created = write_immutable(root, f"{digest}{extension}", payload)
+    else:
+        target, created = encrypted_store.publish(payload)
     return StagedRevenueUpload(
         path=target,
         original_filename=filename,

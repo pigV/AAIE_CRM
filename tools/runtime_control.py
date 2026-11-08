@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from runtime_configuration import RuntimeConfiguration, RuntimeConfigurationError, canonical, preflight
 from tools.runtime_invoice_mail_config import invoice_pdf_environment, load_mail_config
+from revenue.school_contract_storage import contract_pdf_environment
 from staging_environment import ManagedRuntime, IsolationError, SCHOOL_REPORT_PDFUNITE
 from tools import school_map_tile_control, build_document_ocr
 from wechat_runtime import runtime_wechat_environment, runtime_wechat_network_rules
@@ -249,6 +250,7 @@ def environment(config, *, include_wechat=True):
         "AAIE_CRM_CONTENT_REPORT_DIR": str(root / "import_reports"),
         "REVENUE_SECURE_STORAGE_ROOT": str(mail.pdf_root if mail and config.mode=="staging" else root/"revenue_documents"),
         **invoice_pdf_environment(config),
+        **contract_pdf_environment(config),
         **invoice_mail_environment(config,mail),
         "XDG_CACHE_HOME": str(root / "cache"), "HF_HOME": str(root / "cache/huggingface"),
         **(runtime_wechat_environment(config) if include_wechat else {}),
@@ -376,10 +378,10 @@ def sandbox_profile(config):
     pdf_config = invoice_pdf_environment(config)
     invoice_root = pdf_config.get("AAIE_INVOICE_PDF_ROOT")
     pdf_paths = [mail.pdf_root] if mail else []
-    if invoice_root:
-        pdf_paths.append(Path(invoice_root))
+    contract_root = contract_pdf_environment(config).get("AAIE_SCHOOL_CONTRACT_PDF_ROOT")
+    pdf_paths.extend(Path(path) for path in (invoice_root, contract_root) if path)
     pdf = tuple(dict.fromkeys(pdf_paths))
-    keychain = invoice_mail_keychain() if invoice_root else None
+    keychain = invoice_mail_keychain() if invoice_root or contract_root else None
     roots = (config.source_root, config.root, Path(PYTHON).parents[2], *adapter.read_roots, *pdf)
     return "\n".join([
         "(version 1)", "(allow default)", "(deny file-write*)",

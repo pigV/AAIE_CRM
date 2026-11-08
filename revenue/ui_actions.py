@@ -10,6 +10,7 @@ from __future__ import annotations
 from revenue.access_policy import can_operate_revenue
 
 from datetime import date
+import os
 from pathlib import Path
 import sqlite3
 
@@ -160,11 +161,20 @@ class RevenueUIActions:
             self._required(form, "idempotency_key"),
         )
 
+    def _stage_signed_school_contract(self, upload):
+        if self.school_pilot and (
+            not self.school_pilot.simulation or os.environ.get("AAIE_SCHOOL_CONTRACT_PDF_ROOT")
+        ):
+            from revenue.school_contract_storage import configured_contract_store
+            return stage_revenue_upload(None, upload, {".pdf"},
+                                        encrypted_store=configured_contract_store())
+        return stage_revenue_upload(self.document_root / "school-contracts", upload, {".pdf"})
+
     def upload_toorak_draft(self, form: dict, upload) -> dict:
         self._require_admin()
         school_id = self._positive_integer(form, "school_id")
         key = self._required(form, "idempotency_key")
-        staged = stage_revenue_upload(self.document_root / "school-contracts", upload, {".pdf"})
+        staged = self._stage_signed_school_contract(upload)
         return self._school_contracts().upload_toorak_draft(
             school_id,staged,key,signed_confirmed=self._optional(form,"signed_confirmed")=="1",
         )
@@ -172,7 +182,7 @@ class RevenueUIActions:
     def upload_configurable_school_draft(self, form, upload):
         school_id = self._positive_integer(form,"school_id")
         key = self._required(form,"idempotency_key")
-        staged = stage_revenue_upload(self.document_root/"school-contracts",upload,{".pdf"})
+        staged = self._stage_signed_school_contract(upload)
         try:
             return self._school_contracts().upload_configurable_draft(
                 school_id,staged,key,signed_confirmed=self._optional(form,"signed_confirmed")=="1",

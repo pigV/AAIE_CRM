@@ -29193,10 +29193,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         from revenue.secure_storage import read_reference, StorageUnavailable
         from revenue.storage_locations import resolve_location
         from revenue.data_invoice_storage import SUFFIX, read_invoice_pdf
+        from revenue.school_commission_pilot import FORMAL_CONTRACT
+        from revenue.school_contract_storage import configured_contract_store
         try:
             storage_path = resolve_location(document,db.all)
             if document["document_kind"]=="school_commission_invoice" and str(storage_path).endswith(SUFFIX):
                 payload = read_invoice_pdf(storage_path,str(document["sha256"]),int(document["size_bytes"]))
+            elif document["document_kind"] == FORMAL_CONTRACT and str(storage_path).endswith(SUFFIX):
+                payload = configured_contract_store().read(
+                    storage_path, str(document["sha256"]), int(document["size_bytes"]),
+                )
             else:
                 payload = read_reference(
                     Path(db.path).parent/"revenue_documents",storage_path,
