@@ -52,6 +52,51 @@ class IssuedCommissionMailTests(unittest.TestCase):
             return open_directory(path, **kwargs)
         self.enterContext(patch.object(secure_storage, "_open_directory", fixture_directory))
 
+    def _seed_second_toorak_claim(self, connection):
+        def clone(table, **changes):
+            row = dict(connection.execute(f'SELECT * FROM "{table}" ORDER BY id LIMIT 1').fetchone())
+            row.pop("id")
+            row.update(changes)
+            fields = ",".join(row)
+            marks = ",".join("?" for _ in row)
+            return connection.execute(f'INSERT INTO "{table}" ({fields}) VALUES ({marks}) RETURNING id',
+                                  tuple(row.values())).fetchone()[0]
+
+        connection.execute("INSERT INTO students VALUES('TOORAK-B')")
+        cycle = clone("application_cycles", cycle_uid="cycle-toorak-b", student_id="TOORAK-B")
+        case = clone("revenue_commercial_cases", uid="case-toorak-b", application_cycle_id=cycle, student_id="TOORAK-B")
+        component = clone("revenue_enrolment_components", uid="component-toorak-b", commercial_case_id=case)
+        amounts = {"net_cents":170000,"gst_cents":17000,"gross_cents":187000}
+        line = clone("revenue_commission_lines", uid="commission-toorak-b", commercial_case_id=case,
+                     enrolment_component_id=component, **amounts)
+        instalment = clone("revenue_commission_instalments", uid="instalment-toorak-b", commission_line_id=line,
+                           claimed_cents=187000, eligible_cents=187000, **amounts)
+        claim = clone("revenue_claims", uid="claim-toorak-b", claim_number="TEST-CLAIM-B", **amounts)
+        clone("revenue_claim_allocations", uid="claim-allocation-b", claim_id=claim,
+              commission_instalment_id=instalment, claimed_cents=187000)
+        clone("revenue_claim_eligibility_evaluations", uid="eligibility-toorak-b", claim_id=claim,
+              commission_line_id=line)
+        return "claim-toorak-b"
+
+    def _save_contact(self, repo, entity, tag, recipients):
+        from revenue.invoice_billing_details import billing_details, save_billing_details
+        previous = billing_details(repo.connection, entity, True)
+        form = dict(billing_name=f"TEST {tag} billing office", billing_address="8 Synthetic Avenue",
+                    billing_phone="+61 2 5550 1234", recipient=recipients, verified="1", enabled="1",
+                    billing_revision=previous["revision"], settings_revision=previous["settings_revision"])
+        return save_billing_details(repo, entity, 1, "billing-" + tag, form, simulation=True)
+
+    def _verify_preview(self, pdf, tag, amount, contacts):
+        from io import BytesIO
+        from os import environ
+        from pathlib import Path
+        from pypdf import PdfReader
+        text = " ".join(page.extract_text() for page in PdfReader(BytesIO(pdf)).pages)
+        for value in (*contacts, amount, "TEST ONLY"):
+            self.assertIn(value, text)
+        if output := environ.get("AAIE_COMMISSION_MAIL_TEST_ARTIFACTS"):
+            (Path(output) / f"{tag}-preview.pdf").write_bytes(pdf)
+
     def verify_delivery(self, repo, uid, amount, tag, recipients, *, fail_first=False, concurrent=False):
         from concurrent.futures import ThreadPoolExecutor
         from email import policy
@@ -111,9 +156,17 @@ class IssuedCommissionMailTests(unittest.TestCase):
         self.assertEqual(["failed", "sent"] if fail_first else ["sent"],
                          [attempt["result"] for attempt in record["attempts"]])
         self.assertTrue(record["sent_at"])
-        revision = mail_settings(connection, event["entity_id"])["revision"]
-        save_mail_settings(repo, event["entity_id"], 1, "changed-" + tag, "new@example.test",
-                           True, True, revision, payer_routing=True)
+        if tag in {"Toorak", "NSW"}:
+            from revenue.invoice_billing_details import billing_details
+            before = billing_details(connection, event["entity_id"], True)
+            self._verify_preview(pdf, f"{tag}-signed", f"{amount/100:,.2f}",
+                                 (before["name"], before["address"], before["phone"], *recipients.split(", ")))
+            self._save_contact(repo, event["entity_id"], tag+" updated", "new@example.test")
+            self.assertEqual(pdf, self.store.read(Path(document["storage_path"]), document["sha256"], document["size_bytes"]))
+        else:
+            revision = mail_settings(connection, event["entity_id"])["revision"]
+            save_mail_settings(repo, event["entity_id"], 1, "changed-" + tag, "new@example.test",
+                               True, True, revision, payer_routing=True)
         self.assertEqual(record, invoice_mail_history(connection, [event["entity_id"]], True,
                                                       number=event["invoice_number"])[0][0])
         filters = dict(entity_id="", number="", status="", start="", end="", page="1")
@@ -140,7 +193,7 @@ class IssuedCommissionMailTests(unittest.TestCase):
         from revenue.services import RevenueService
         from tests.revenue_test_support import RevenueDatabaseFixture
         from tests.test_revenue_authority_formal import seed_formal_authorities
-        from tests.test_revenue_state_school_commission import agreement_lines, seed_state_commission_students
+        from tests.test_revenue_state_school_commission import agreement_lines, seed_state_commission_students, seed_state_enrolment
 
         class Fixture(RevenueDatabaseFixture, unittest.TestCase):
             pass
@@ -151,6 +204,7 @@ class IssuedCommissionMailTests(unittest.TestCase):
         repo = RevenueRepository(fixture.connect())
         service = RevenueService(repo)
         seed_state_commission_students(repo.connection, service)
+        seed_state_enrolment(repo.connection, service, 124, "TEST-NSW-SECOND", 15, 500000, "2026-09-01")
         source = Path(__file__).resolve().parents[1]
         seed_formal_authorities(repo, source)
         repo.connection.executescript((source / "migrations/20260908_036_revenue_storage_locations.sql").read_text())
@@ -160,13 +214,17 @@ class IssuedCommissionMailTests(unittest.TestCase):
                                               contract_intake=True, education_authorities=pilot.education_authorities)
         for state, rate, gross, recipients in (
             ("VIC", 8, 176000, "ap@vic.example.test, finance@vic.example.test"),
-            ("NSW", 12, 120000, "ap@nsw.example.test"),
+            ("NSW", 12, 120000, "ap@nsw.example.test, finance@nsw.example.test"),
         ):
             payer_row = authority_payer(repo.connection, state)
             payer = payer_row["id"]
-            settings = mail_settings(repo.connection, payer)
-            save_mail_settings(repo, payer, 1, "configure-" + state, recipients, True, True,
-                               settings["revision"], payer_routing=True)
+            if state == "NSW":
+                contact = self._save_contact(repo, payer, state, recipients)
+                printed = (contact["name"], contact["address"], contact["phone"], *recipients.split(", "))
+            else:
+                settings = mail_settings(repo.connection, payer)
+                save_mail_settings(repo, payer, 1, "configure-" + state, recipients, True, True,
+                                   settings["revision"], payer_routing=True)
             signed_pdf = SimpleNamespace(path=self.root / f"{state}.pdf", sha256=("1" if state == "VIC" else "2") * 64,
                                          mime_type="application/pdf", size_bytes=120)
             contract = contracts.upload_authority_draft(state, signed_pdf, "signed-" + state)
@@ -186,18 +244,58 @@ class IssuedCommissionMailTests(unittest.TestCase):
                          "eligible": "1"}, terms, "proof-" + row["component_uid"],
                     )
             selected = [row for row in workflow.candidates(terms) if row.get("uid")]
-            self.assertEqual(2 if state == "VIC" else 1, len(selected))
+            self.assertEqual(2, len(selected))
+            revision = _digest(sorted(row["revision"] for row in selected))
+            if state == "NSW":
+                repo.connection.execute("SAVEPOINT grouped_preview")
+                try:
+                    grouped = workflow.create_invoice_draft(
+                        [row["uid"] for row in selected], _digest(sorted(row["revision"] for row in selected)),
+                        terms, "draft-NSW-grouped",
+                    )
+                    self._verify_preview(AuthorityInvoice(workflow, grouped, rehearsal=True).preview_pdf(),
+                                         "NSW-grouped", "1,800.00", printed)
+                finally:
+                    repo.connection.execute("ROLLBACK TO grouped_preview")
+                    repo.connection.execute("RELEASE grouped_preview")
+                selected = [row for row in selected if row["student_id"] == "TEST-NSW-SYD"]
             draft = workflow.create_invoice_draft(
-                [row["uid"] for row in selected], _digest(sorted(row["revision"] for row in selected)),
-                terms, "draft-" + state,
+                [row["uid"] for row in selected], revision, terms, "draft-" + state,
             )
             formal = AuthorityInvoice(workflow, draft, rehearsal=True, payer_mail=True)
             token = formal.preview_token()
+            if state == "NSW":
+                self._verify_preview(formal.preview_pdf(), "NSW-single", "1,200.00", printed)
             invoice = formal.issue(token)
             self.assertEqual(invoice, formal.issue(token))
             self.verify_delivery(repo, invoice["uid"], gross, state, recipients, fail_first=state == "NSW",
                                  concurrent=state == "VIC")
             self.assertIsNone(formal.detail(invoice["uid"])["settlement"]["delivery"])
+            from datetime import date
+            from revenue.uploads import stage_revenue_upload
+            from tests.test_revenue_toorak_settlement import ToorakSettlementTests
+            evidence = ToorakSettlementTests().evidence("TEST bank and receipt")
+            proof = stage_revenue_upload(None, evidence, {".pdf"}, encrypted_store=self.store)
+            day = date.today().isoformat()
+            invoice_uid = invoice["uid"]
+            formal.delivery(None, invoice_uid, day, proof, 30)
+            if state == "VIC":
+                line_ids = {row["student_id"]: row["invoice_line_uid"] for row in formal.detail(invoice_uid)["lines"]}
+                a, b = line_ids["TEST-VIC-MEL"], line_ids["TEST-VIC-GEE"]
+                first = formal.record_payment(invoice_uid, state, 100000, day, "TEST-1", proof, {a: 80000, b: 20000})
+                self.assertEqual(76000, first["outstanding_cents"])
+                self.assertEqual(first, formal.record_payment(invoice_uid, state, 100000, day, "TEST-1", proof,
+                                                              {a: 80000, b: 20000}))
+                with self.assertRaises(ValueError):
+                    formal.reconcile(None, invoice_uid, True)
+                formal.record_payment(invoice_uid, state, 76000, day, "TEST-2", proof, {b: 76000})
+            else:
+                with self.assertRaises(ValueError):
+                    formal.record_payment(invoice_uid, "VIC", 120000, day, "TEST-NSW", proof)
+                formal.record_payment(invoice_uid, state, 120000, day, "TEST-NSW", proof)
+            result = formal.reconcile(None, invoice_uid, True)
+            self.assertEqual(result, formal.reconcile(None, invoice_uid, True))
+            self.assertEqual("reconciled", formal.detail(invoice_uid)["settlement"]["status"])
 
     def test_school_issues_route_to_toorak_and_new_crm_payer(self):
         from datetime import date, timedelta
@@ -255,9 +353,17 @@ class IssuedCommissionMailTests(unittest.TestCase):
             connection.executescript(migration.read_text())
             recipients = "finance@toorak.example.test, ap@toorak.example.test"
             if send:
-                save_mail_settings(service.repository, entity, 1, "mail-on", recipients, True, True, "",
-                                   payer_routing=True)
+                contact = self._save_contact(service.repository, entity, "Toorak", recipients)
             preview = issuer.invoice_preview(entity, [claim["uid"]])
+            if send:
+                printed = (contact["name"], contact["address"], contact["phone"], *recipients.split(", "))
+                self._verify_preview(issuer.invoice_preview_pdf(entity, [claim["uid"]], preview["digest"]),
+                                     "Toorak-single", "550.00", printed)
+                second = self._seed_second_toorak_claim(connection)
+                selected = [claim["uid"], second]
+                grouped = issuer.invoice_preview(entity, selected)
+                self._verify_preview(issuer.invoice_preview_pdf(entity, selected, grouped["digest"]),
+                                     "Toorak-grouped", "2,420.00", printed)
             invoice = issuer.issue_school_invoice(entity, [claim["uid"]], preview["digest"])
             if send:
                 self.verify_delivery(service.repository, invoice["uid"], 55000, "Toorak", recipients, concurrent=True)

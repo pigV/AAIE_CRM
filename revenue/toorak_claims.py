@@ -486,7 +486,7 @@ class ToorakClaims:
         rows = self._checked_invoice_claims(entity_id, claim_uids)
         snapshot = self._invoice_snapshot(rows,"DRAFT")
         revisions = current_invoice_template_revisions(self.connection,formal=self.formal,entity_id=self.entity_id,
-                                                       simulation=self.simulation)
+                                                       simulation=self.simulation,include_billing=True)
         digest = hashlib.sha256(canonical_json([entity_id,claim_uids,snapshot,revisions]).encode()).hexdigest()
         return rows,snapshot,digest
 
@@ -523,6 +523,10 @@ class ToorakClaims:
         while self.connection.execute("SELECT 1 FROM revenue_invoices WHERE invoice_number=?",(number,)).fetchone():
             number = self.service._next_number(sequence,"COM",int(today[:4]))
         data = {**snapshot,"document_number":number}
+        if self.formal:
+            from revenue.invoice_billing_details import bill_to_fields
+
+            data["invoice_bill_to"] = bill_to_fields(self.connection, self.entity_id, self.simulation)
         pdf,template_uid,profile_uid = self._render_invoice(data,use_default)
         digest = hashlib.sha256(pdf).hexdigest()
         if invoice_store:
@@ -567,7 +571,7 @@ class ToorakClaims:
                              release=self.mail_release, claim_uids=[line["claim_uid"] for line in data["lines"]])
         return {**invoice,"document_uid":document["uid"],
                 "template_uid":template_uid,"finance_profile_uid":profile_uid,
-                **({"simulation":self.simulation} if self.formal else {})}
+                **({"simulation":self.simulation, "invoice_bill_to":data["invoice_bill_to"]} if self.formal else {})}
 
     def issue_school_invoice(self, entity_id, claim_uids, digest):
         ids = self._selected_claims(claim_uids)

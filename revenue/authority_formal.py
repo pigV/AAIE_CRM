@@ -108,10 +108,10 @@ class AuthorityInvoice(ToorakSettlement):
 
     def preview_token(self):
         revisions = current_invoice_template_revisions(self.connection, formal=True, entity_id=self.entity_id,
-                                                       simulation=self.simulation)
+                                                       simulation=self.simulation, include_billing=True)
         return sha256(canonical_json([self.draft, self.entity_id, self.payer, revisions]).encode()).hexdigest()
 
-    def _render(self, number, issue_date):
+    def _render(self, number, issue_date, *, invoice_bill_to=None):
         draft = self.draft
         totals = {key:draft[key] for key in ("net_cents","gst_cents","gross_cents")}
         lines = [{**line,"description":" | ".join((line["student_name"],line["student_id"],
@@ -119,7 +119,7 @@ class AuthorityInvoice(ToorakSettlement):
                  for line in draft["lines"]]
         snapshot = {"bill_to":self.payer,"document_number":number,"issue_date":issue_date,"due_date":None,
                     "test_only":self.simulation,"payment_terms":f'Within {draft["payment_days"]} days of valid invoice receipt',
-                    **totals,"lines":lines}
+                    **totals,"lines":lines,"invoice_bill_to":invoice_bill_to}
         rendered = render_with_active_template(self.connection, snapshot, formal=True, simulation=self.simulation,
                                                entity_id=self.entity_id)
         return totals, lines, rendered
@@ -148,7 +148,10 @@ class AuthorityInvoice(ToorakSettlement):
             number = self.service._next_number("school_commission_invoice","COM",int(issue_date[:4]))
             while self.connection.execute("SELECT 1 FROM revenue_invoices WHERE invoice_number=?", (number,)).fetchone():
                 number = self.service._next_number("school_commission_invoice","COM",int(issue_date[:4]))
-            totals, lines, (pdf, template_uid, profile_uid) = self._render(number, issue_date)
+            from revenue.invoice_billing_details import bill_to_fields
+
+            addressee = bill_to_fields(self.connection, self.entity_id, self.simulation)
+            totals, lines, (pdf, template_uid, profile_uid) = self._render(number, issue_date, invoice_bill_to=addressee)
             store = configured_invoice_store()
             if store is None:
                 raise StorageUnavailable()
@@ -188,7 +191,8 @@ class AuthorityInvoice(ToorakSettlement):
                              authority_draft=[self.contract.uid, draft["uid"]])
             return {"uid":uid,"state":self.state,"draft_uid":draft["uid"],"simulation":self.simulation,"number":number,
                     "document_uid":document["uid"],"sha256":document["sha256"],"template_uid":template_uid,
-                    "profile_uid":profile_uid,"terms_revision":draft["terms_revision"],**totals}
+                    "profile_uid":profile_uid,"terms_revision":draft["terms_revision"],
+                    "invoice_bill_to":addressee,**totals}
 
         return self.repository.command(
             idempotency_key=f"authority-issue:{draft['uid']}", command_type=ISSUED, aggregate_type="invoice",

@@ -28341,7 +28341,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return school_commission_authority(self.user,"contract-intake") or False, "contract-intake"
         if action == "mail-recipient":
             school_id = self._school_commission_scope_id("school_id")
-            if school_id and school_id > 0 and school_invoice_payer_mail_mode():
+            if school_id and school_id > 0:
                 scope = school_commission_authority(self.user, "contracts", school_id=school_id)
                 if scope:
                     return scope, "contracts"
@@ -28679,14 +28679,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         authority_finance = render_authority_finance(
                             target[1], terms, authority_payer(connection, target[1]), self.csrf, new_token(),
                         )
-                if target and school_invoice_payer_mail_mode():
+                if target:
                     from revenue.authority_formal import authority_payer
-                    from revenue.school_contract_pages import DRAFT_ROOT, render_payer_mail_settings
+                    from revenue.invoice_billing_details import billing_details
+                    from revenue.school_contract_pages import DRAFT_ROOT, render_payer_billing_details
 
                     payer_id = None
                     if target[0] == "school":
                         scope = school_commission_authority(self.user, "contracts", school_id=target[1])
-                        if scope:
+                        if scope and has_active_school_commission_rule(connection, scope):
                             payer_id = scope.entity_id
                             action = "/revenue/contracts/school/mail-recipient"
                             fields = {"school_id": target[1]}
@@ -28694,14 +28695,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         terms and terms.get("payment_mode") == vic_rcti.PAYMENT
                     ):
                         payer = authority_payer(connection, target[1])
-                        work = next((row[2] for row in schools[target]["confirmed"] if row[2]), None)
-                        if payer and work:
+                        if payer and terms:
                             payer_id = payer["id"]
-                            action = DRAFT_ROOT + "/" + quote(work, safe="")
-                            fields = {"operation": "payer-mail-settings"}
+                            action = DRAFT_ROOT + "/" + quote(terms["uid"], safe="")
+                            fields = {"operation": "payer-billing-details"}
                     if payer_id is not None:
-                        mail_form = render_payer_mail_settings(
-                            action, fields, mail_settings(connection, payer_id), self.csrf, new_token(),
+                        mail_form = render_payer_billing_details(
+                            action, fields, billing_details(connection, payer_id, intake.simulation), self.csrf, new_token(),
                             simulation=intake.simulation,
                         )
                 claim_href = ""
@@ -29555,17 +29555,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     destination = f"/revenue/contracts?school_id={school_id}#school-commission-contracts"
                     message = "学校已登记到佣金学校表。"
             elif action_name == "contracts/school/mail-recipient":
-                if not school_invoice_payer_mail_mode():
-                    raise ValueError("当前发信配置不可用，请刷新后重试。")
-                save_mail_settings(
-                    actions.repository, pilot.entity_id, actions.actor_user_id,
-                    self.form.get("idempotency_key"), self.form.get("recipient"),
-                    self.form.get("enabled") == "1", self.form.get("verified") == "1",
-                    str(self.form.get("settings_revision") or ""),
-                    payer_routing=True, simulation=pilot.simulation,
-                )
+                from revenue.invoice_billing_details import save_billing_details
+
+                if not has_active_school_commission_rule(connection, pilot):
+                    raise ValueError("请先确认该学校的佣金合同。")
+                save_billing_details(actions.repository, pilot.entity_id, actions.actor_user_id,
+                                     self.form.get("idempotency_key"), self.form, simulation=pilot.simulation)
                 destination = f"/revenue/contracts?school_id={pilot.school_id}#school-invoice-mail-recipient"
-                message = "学校发票收件邮箱设置已保存。"
+                message = "学校开票资料已保存。"
             elif action_name == "contracts/school/bind":
                 actions.bind_school_commission_entity(self.form)
                 destination, message = "/revenue/contracts", "学校佣金主体已绑定。"
@@ -29883,7 +29880,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             terms = workflow.terms()
             operation = self.form.get("operation") if method == "POST" else None
             if (terms or {}).get("payment_mode") == vic_rcti.PAYMENT and (
-                requested or operation in {"invoice", "payer-mail-settings"} or
+                requested or operation in {"invoice", "payer-billing-details"} or
                 (isinstance(operation, str) and operation.startswith("authority-formal-"))
             ):
                 return self.error_page(vic_rcti.BLOCK_INVOICE, HTTPStatus.FORBIDDEN)
@@ -29917,7 +29914,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 self._begin_school_commission_write(connection, pilot, "contract-intake")
                 workflow = workflow_class(repository, pilot, draft_uid, int(self.user["id"]))
                 terms = workflow.terms()
-                if (terms or {}).get("payment_mode") == vic_rcti.PAYMENT and operation in {"invoice", "payer-mail-settings"}:
+                if (terms or {}).get("payment_mode") == vic_rcti.PAYMENT and operation in {"invoice", "payer-billing-details"}:
                     return self.error_page(vic_rcti.BLOCK_INVOICE, HTTPStatus.FORBIDDEN)
                 key = str(self.form.get("idempotency_key") or "")
                 if operation == "authority-payer":
@@ -29929,18 +29926,17 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                              rehearsal=pilot.simulation, confirmed_terms=terms)
                     connection.commit()
                     return self.redirect(confirmed_url(workflow.target))
-                if operation == "payer-mail-settings":
-                    if not payer_mail_mode or not terms or requested or workflow.target[0] != "authority":
-                        raise PermissionError("请从已确认教育局佣金合同核对邮箱。")
+                if operation == "payer-billing-details":
+                    from revenue.invoice_billing_details import save_billing_details
+
+                    if (not terms or requested or workflow.target[0] != "authority"
+                            or terms != self._confirmed_authority_terms(connection, pilot, workflow.target[1])):
+                        raise PermissionError("请从最新已确认的教育局佣金合同保存开票资料。")
                     payer = authority_payer(connection, workflow.target[1])
                     if not payer:
                         raise ValueError("请先登记该州教育局的法定付款主体。")
-                    save_mail_settings(
-                        repository, payer["id"], int(self.user["id"]), key, self.form.get("recipient"),
-                        self.form.get("enabled") == "1", self.form.get("verified") == "1",
-                        str(self.form.get("settings_revision") or ""),
-                        payer_routing=True, simulation=pilot.simulation,
-                    )
+                    save_billing_details(repository, payer["id"], int(self.user["id"]), key,
+                                         self.form, simulation=pilot.simulation)
                     connection.commit()
                     return self.redirect(confirmed_url(workflow.target) + "#school-invoice-mail-recipient")
                 if isinstance(operation, str) and operation.startswith("authority-formal-"):

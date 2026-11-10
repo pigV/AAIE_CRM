@@ -125,7 +125,7 @@ def _page(title, body, *, back_href="/revenue", back_label="返回收入与佣�
       </main>'''
 
 
-def render_payer_mail_settings(action, fields, settings, csrf, token, *, simulation):
+def render_payer_billing_details(action, fields, settings, csrf, token, *, simulation):
     checked = " checked" if settings["enabled"] and settings.get("routing") == "payer" else ""
     verified = "已核对" if settings["verified"] else "未核对"
     mode = "模拟投递" if simulation else "发送"
@@ -133,15 +133,21 @@ def render_payer_mail_settings(action, fields, settings, csrf, token, *, simulat
         return f'<input type="hidden" name="{escape(name, quote=True)}" value="{escape(str(value), quote=True)}">'
     hidden = "".join(hidden_input(name, value) for name, value in fields.items())
     return f'''<section id="school-invoice-mail-recipient">
-      <h3>发票收票邮箱</h3><p>{verified} · 抄送 accounts@aaie.com.hk</p>
+      <h3>学校开票资料</h3><p>以下资料会显示在发票 Invoice To 区块。{verified} · 发信抄送 accounts@aaie.com.hk</p>
       <form method="post" action="{escape(action, quote=True)}" class="revenue-action-form">
-        {_hidden_security(csrf, token, "payer-mail-settings")}{hidden}
-        {hidden_input("settings_revision", settings["revision"])}
-        <label>收票邮箱（多个地址用逗号分隔）<input name="recipient" type="email" multiple maxlength="2048"
+        {_hidden_security(csrf, token, "payer-billing-details")}{hidden}
+        {hidden_input("settings_revision", settings["settings_revision"])}
+        {hidden_input("billing_revision", settings["revision"])}
+        <label>发票显示名称<input name="billing_name" maxlength="180" required
+               value="{escape(settings['name'], quote=True)}"></label>
+        <label>账单地址<textarea name="billing_address" maxlength="300" rows="2" required>{escape(settings['address'])}</textarea></label>
+        <label>联系电话<input name="billing_phone" type="tel" maxlength="60" required
+               value="{escape(settings['phone'], quote=True)}"></label>
+        <label>收票邮箱（多个地址用逗号分隔）<input name="recipient" type="email" multiple maxlength="2048" required
                value="{escape(settings["recipient"], quote=True)}"></label>
         <label><input name="verified" type="checkbox" value="1">我已核对收票邮箱</label>
         <label><input name="enabled" type="checkbox" value="1"{checked}>签发后自动{mode}</label>
-        <button type="submit">保存收票邮箱</button>
+        <button type="submit">保存开票资料</button>
       </form></section>'''
 
 

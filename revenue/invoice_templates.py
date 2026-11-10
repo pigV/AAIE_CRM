@@ -30,7 +30,7 @@ TEST_INVOICE_KIND = "toorak_test_invoice"
 FIELD_GROUPS = {
     "issuer": ("issuer_name","issuer_address","issuer_email","issuer_website","issuer_abn"),
     "invoice": ("invoice_title","document_number","issue_date","please_pay","due_date"),
-    "bill_to": ("bill_to","bill_to_address"),
+    "bill_to": ("bill_to","bill_to_address","bill_to_phone","bill_to_email"),
     "totals": ("net_cents","gst_cents","gross_cents","total_due"),
     "payment": ("account_name","bank_address","bank_name","bsb","account_number","swift","payment_terms"),
 }
@@ -38,7 +38,7 @@ COLUMNS = ("product","description","quantity","rate","gst","amount")
 LABELS = {
     "issuer_name":"", "issuer_address":"", "issuer_email":"Email", "issuer_website":"Website",
     "issuer_abn":"ABN", "invoice_title":"", "document_number":"Invoice no.", "issue_date":"Date",
-    "please_pay":"Please Pay", "due_date":"Due Date", "bill_to":"", "bill_to_address":"",
+    "please_pay":"Please Pay", "due_date":"Due Date", "bill_to":"", "bill_to_address":"", "bill_to_phone":"Tel", "bill_to_email":"Email",
     "net_cents":"Subtotal", "gst_cents":"GST Total", "gross_cents":"Total", "total_due":"Total Due",
     "account_name":"Account Name", "bank_address":"Bank Address", "bank_name":"Bank Name",
     "bsb":"BSB", "account_number":"Account Number", "swift":"SWIFT Code", "payment_terms":"Payment Terms",
@@ -181,7 +181,7 @@ def validate_layout(layout, logo=None):
             raise ValueError("佣金明细必须保留全部六列。")
         data_keys.update(used)
         result.append({"kind":kind,"heading":_text(block.get("heading",""),50),"fields":normalized})
-    mandatory=set().union(*FIELD_GROUPS.values())
+    mandatory=set().union(*FIELD_GROUPS.values()) - {"bill_to_phone", "bill_to_email"}
     if not mandatory.issubset(data_keys):
         raise ValueError("发票必填内容缺失："+"、".join(FIELD_LABELS[k] for k in sorted(mandatory-data_keys)))
     if preset=="invoice_1762" and tuple(block["kind"] for block in result)!=REFERENCE_ORDER:
@@ -249,9 +249,31 @@ def financial_profile(connection, *, formal=False, entity_id=None, simulation=Tr
     return default,None
 
 
-def current_invoice_template_revisions(connection, *, formal=False, entity_id=None, simulation=True):
-    return (active_template_uid(connection,formal=formal,entity_id=entity_id,simulation=simulation),
-            financial_profile(connection,formal=formal,entity_id=entity_id,simulation=simulation)[1] or "")
+def current_invoice_template_revisions(connection, *, formal=False, entity_id=None, simulation=True,
+                                       include_billing=False):
+    revisions = (active_template_uid(connection,formal=formal,entity_id=entity_id,simulation=simulation),
+                 financial_profile(connection,formal=formal,entity_id=entity_id,simulation=simulation)[1] or "")
+    if formal and include_billing:
+        from revenue.invoice_billing_details import billing_details
+
+        billing = billing_details(connection, entity_id, simulation)
+        revisions += (billing["revision"], billing["settings_revision"])
+    return revisions
+
+
+def _bill_to_layout(layout, data):
+    """Let already published Invoice 1762 layouts display newly configured contact fields."""
+    if layout.get("preset") != "invoice_1762":
+        return layout
+    selected = {field["key"] for block in layout["blocks"] for field in block["fields"]}
+    missing = [{"key": key, "label": LABELS[key]} for key in FIELD_GROUPS["bill_to"]
+               if data.get(key) and key not in selected]
+    if not missing:
+        return layout
+    layout = deepcopy(layout)
+    block = next(block for block in layout["blocks"] if block["kind"] == "bill_to")
+    block["fields"].extend(missing)
+    return layout
 
 
 def render_with_active_template(connection, snapshot, *, formal=False, simulation=True, entity_id=None):
@@ -265,7 +287,13 @@ def render_with_active_template(connection, snapshot, *, formal=False, simulatio
     layout = _version(connection,uid,layout_source)["value"]
     data = {**snapshot,**profile}
     if formal:
+        from revenue.invoice_billing_details import bill_to_fields
+
         _formal_profile(profile)
+        fields = snapshot.get("invoice_bill_to")
+        data.update(bill_to_fields(connection, entity_id, simulation) if fields is None else fields)
+        if data.get("bill_to_phone") or data.get("bill_to_email"):
+            layout = _bill_to_layout(layout, data)
         approved = _latest_event(connection,(FORMAL_PROFILE_APPROVED,),profile_source)
         if not simulation and approved.get("simulation") is not False:
             raise ValueError("正式签发须使用当前环境独立批准的开票资料。")
