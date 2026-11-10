@@ -23,7 +23,8 @@ from tools.runtime_invoice_mail_config import invoice_pdf_environment, load_mail
 from revenue.school_contract_storage import contract_pdf_environment
 from staging_environment import ManagedRuntime, IsolationError, SCHOOL_REPORT_PDFUNITE
 from tools import school_map_tile_control, build_document_ocr
-from wechat_runtime import runtime_wechat_environment, runtime_wechat_network_rules
+from wechat_runtime import (SCHOOL_RADIUS_GEOCODING_ENV, runtime_wechat_environment,
+                            runtime_wechat_network_rules)
 from school_report_browser import sandbox_rules as school_report_browser_sandbox_rules
 
 PYTHON = "/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
@@ -230,7 +231,7 @@ def cleanup_started(config, processes, map_started, adapter, *, process_groups=F
     return errors
 
 
-def environment(config, *, include_wechat=True):
+def environment(config, *, include_wechat=True, allow_school_radius=False):
     # A deliberately explicit environment: credentials are not inherited from
     # the terminal or loaded from another deployment's .env file.
     root = config.root
@@ -254,6 +255,7 @@ def environment(config, *, include_wechat=True):
         **invoice_mail_environment(config,mail),
         "XDG_CACHE_HOME": str(root / "cache"), "HF_HOME": str(root / "cache/huggingface"),
         **(runtime_wechat_environment(config) if include_wechat else {}),
+        **({SCHOOL_RADIUS_GEOCODING_ENV: "1"} if allow_school_radius else {}),
     }
 
 
@@ -367,7 +369,7 @@ def invoice_mail_status(config):
     return {"invoice_mail":"starting","pid":record["pid"]}
 
 
-def sandbox_profile(config):
+def sandbox_profile(config, *, allow_school_radius=False):
     q = lambda p: json.dumps(str(p))
     adapter = ManagedRuntime.from_configuration(config)
     # Production grants are explicit files in its data root. Rehearsal may read
@@ -401,7 +403,7 @@ def sandbox_profile(config):
         *([f'(allow network-bind network-inbound (local ip "*:{config.admin_port}"))']
           if adapter.admin_lan_ip else []),
         *[f'(allow network-outbound (remote ip "localhost:{p}"))' for p in config.ports],
-        *runtime_wechat_network_rules(config),
+        *runtime_wechat_network_rules(config, allow_school_radius=allow_school_radius),
         "(allow process-fork)", "(deny signal)", "(deny process-exec)",
         f"(allow process-exec (literal {q(PYTHON)}) (literal {q(Path(PYTHON).resolve())}))",
         f'(allow process-exec (literal {q(config.root / "tools/document-vision-ocr")}))',
@@ -508,9 +510,13 @@ def start(config):
         build_document_ocr.build(data_root=config.root, source_root=config.source_root)
     except RuntimeError as exc:
         raise RuntimeControlError(str(exc)) from exc
-    profile = canonical(config.root / "config/runtime.sb")
-    with runtime_file(config, profile, "w") as stream:
-        stream.write(sandbox_profile(config))
+    profiles = {}
+    for role in ROLES:
+        name = "runtime-admin.sb" if role == "admin" else "runtime.sb"
+        profile = canonical(config.root / "config" / name)
+        with runtime_file(config, profile, "w") as stream:
+            stream.write(sandbox_profile(config, allow_school_radius=role == "admin"))
+        profiles[role] = profile
     started_processes = []
     map_started = False
     try:
@@ -520,8 +526,8 @@ def start(config):
             config.check_current()
             with runtime_file(config, config.root / f"logs/{role}.log", "ab") as log:
                 proc = subprocess.Popen(
-                    ["/usr/bin/sandbox-exec", "-f", str(profile), *process_command(config, role)],
-                    cwd=config.source_root, env=environment(config),
+                    ["/usr/bin/sandbox-exec", "-f", str(profiles[role]), *process_command(config, role)],
+                    cwd=config.source_root, env=environment(config, allow_school_radius=role == "admin"),
                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             # Popen owns this child. Cleanup below never trusts a PID file.
             started_processes.append((role, proc))

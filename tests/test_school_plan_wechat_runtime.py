@@ -83,6 +83,48 @@ class SchoolPlanWechatRuntimeTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 guard.audit('urllib.Request', (url,))
 
+    def test_radius_nominatim_permission_is_only_added_to_admin(self):
+        self.config.mode = 'staging'
+        rule = '(allow network-outbound (remote ip "*:443") (remote unix-socket))'
+        self.assertNotIn(rule, control.sandbox_profile(self.config))
+        self.assertIn(rule, control.sandbox_profile(self.config, allow_school_radius=True))
+        self.assertNotIn('AAIE_MANAGED_SCHOOL_RADIUS_GEOCODING', control.environment(self.config))
+        self.assertEqual(control.environment(self.config, allow_school_radius=True)
+                         ['AAIE_MANAGED_SCHOOL_RADIUS_GEOCODING'], '1')
+
+    def test_only_scoped_radius_search_can_use_nominatim(self):
+        from wechat_runtime import WechatNetworkGuard, open_school_radius_nominatim
+        from urllib.request import Request
+        public_ip = '93.184.216.35'
+        endpoint = 'https://nominatim.openstreetmap.org/search?q=Chatswood+High+School'
+
+        def open_request(request, timeout):
+            guard.audit('urllib.Request', (request.full_url, None, {}, 'GET'))
+            guard.audit('socket.connect', (None, (public_ip, 443)))
+            for url in (
+                'http://nominatim.openstreetmap.org/search?q=Chatswood',
+                'https://nominatim.openstreetmap.org/reverse',
+                'https://api.weixin.qq.com/sns/userinfo',
+                'https://example.com/search',
+            ):
+                with self.assertRaises(PermissionError):
+                    guard.audit('urllib.Request', (url, None, {}, 'GET'))
+            with self.assertRaises(PermissionError):
+                guard.audit('socket.connect', (None, ('1.1.1.1', 443)))
+            return 'response'
+
+        guard = WechatNetworkGuard(self.config, allow_school_radius=True, allow_wechat=False)
+        with self.assertRaises(PermissionError):
+            guard.audit('urllib.Request', (endpoint, None, {}, 'GET'))
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (public_ip, 443))]
+        with patch('socket.getaddrinfo', return_value=addresses) as resolve, \
+                patch('urllib.request.build_opener') as build:
+            build.return_value.open.side_effect = open_request
+            self.assertEqual(open_school_radius_nominatim(Request(endpoint), timeout=12), 'response')
+        resolve.assert_called_once_with('nominatim.openstreetmap.org', 443, type=socket.SOCK_STREAM)
+        with self.assertRaises(PermissionError):
+            guard.audit('socket.connect', (None, (public_ip, 443)))
+
     def test_production_school_page_never_prompts_for_an_invented_identity(self):
         h = handler('school', enabled=False)
         ns = h.school_plan_share_login_required_page.__func__.__globals__

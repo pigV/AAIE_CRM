@@ -64,6 +64,7 @@ from document_preview_cache import (
     preview_source_signature, save_preview_cache, save_preview_image, synchronize_preview,
 )
 from school_map_tiles import load_tile as load_school_map_tile
+from wechat_runtime import open_school_radius_nominatim
 from pypdf import PdfReader, PdfWriter
 from production_environment import load_canonical_production_environment
 from system_health_authority import (
@@ -31069,7 +31070,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         try:
             self.school_radius_wait_for_nominatim_slot()
-            with urllib.request.urlopen(request, timeout=12) as response:
+            with open_school_radius_nominatim(request, timeout=12) as response:
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
         except Exception as exc:
             return None, f"OpenStreetMap Nominatim 暂时无法完成识别：{exc}"
@@ -31278,7 +31279,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         resolved["review_required"] = False
         if mismatch_row and matched_state != state:
             resolved["warning_message"] = f"选择的 State 是 {state}，但地址识别到 {matched_state}。请确认后再使用该结果。"
-        if resolved["input_type"] == "suburb":
+        is_named_place = (
+            resolved["geocode_source"] == "OpenStreetMap Nominatim"
+            and self.school_radius_normalize_query(resolved["formatted_address"].split(",", 1)[0]) == normalized
+            and self.school_radius_normalize_query(resolved["suburb"]) != normalized
+        )
+        if is_named_place:
+            resolved["display_label"] = f"搜索中心：{resolved['formatted_address']}"
+        elif resolved["input_type"] == "suburb":
             if self.school_radius_state_from_input(raw_input) and resolved["formatted_address"]:
                 resolved["display_label"] = f"搜索中心：{resolved['formatted_address']}"
             else:
@@ -31291,7 +31299,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             cbd_distance = self.school_radius_haversine_km(resolved["latitude"], resolved["longitude"], cbd["latitude"], cbd["longitude"])
             resolved["cbd_label"] = cbd["label"]
             resolved["cbd_distance_km"] = round(cbd_distance, 1)
-            basis = f"以 {resolved['suburb'] or raw_input} 区中心计算" if resolved["input_type"] == "suburb" else "以输入地址计算"
+            if is_named_place:
+                basis = "以匹配地点计算"
+            elif resolved["input_type"] == "suburb":
+                basis = f"以 {resolved['suburb'] or raw_input} 区中心计算"
+            else:
+                basis = "以输入地址计算"
             resolved["cbd_distance_text"] = f"距 {cbd['label']} 约 {resolved['cbd_distance_km']:.1f} km（{basis}，直线距离）"
         return resolved
 
