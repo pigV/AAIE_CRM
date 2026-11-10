@@ -16,7 +16,8 @@ from revenue.secure_storage import StorageUnavailable, configured_write_root
 class InvoiceMailConfig:
     enabled: bool
     pdf_root: Path
-    recipient: str
+    recipient: str | None
+    payer_routing: bool = False
 
 
 def _read_private(path):
@@ -52,16 +53,24 @@ def load_mail_config(config):
     path = config.root/"config/invoice-mail.json"
     try:
         value=_read_private(path)
-        if (not isinstance(value,dict) or set(value)!={"enabled","mode","pdf_root","recipient"}
-                or type(value["enabled"]) is not bool or value["mode"]!=config.mode):
+        if not isinstance(value, dict):
             return None
-        recipient = value["recipient"]
-        if not isinstance(recipient,str) or len(recipient)>254 or not EMAIL.fullmatch(recipient):
+        payer_routing = (set(value) == {"enabled", "mode", "pdf_root", "routing"}
+                         and value["routing"] == "payer")
+        if (not payer_routing and set(value) != {"enabled", "mode", "pdf_root", "recipient"}
+                or type(value["enabled"]) is not bool or value["mode"] != config.mode):
+            return None
+        recipient = value.get("recipient")
+        if payer_routing:
+            if config.mode != "production":
+                return None
+        elif not isinstance(recipient, str) or len(recipient) > 254 or not EMAIL.fullmatch(recipient):
             return None
         if config.mode=="staging":
             if recipient!=REHEARSAL_RECIPIENT or not Path(value["pdf_root"]).is_relative_to(config.root):
                 return None
-        elif config.mode!="production" or recipient.lower()==REHEARSAL_RECIPIENT or recipient.lower().endswith(".test"):
+        elif not payer_routing and (config.mode != "production"
+                or recipient.casefold() == REHEARSAL_RECIPIENT or recipient.casefold().endswith(".test")):
             return None
         if config.mode=="production":
             configured=invoice_pdf_environment(config).get("AAIE_INVOICE_PDF_ROOT")
@@ -73,6 +82,6 @@ def load_mail_config(config):
                                          {"REVENUE_SECURE_STORAGE_ROOT":value["pdf_root"]})
         if root==config.root or root.is_relative_to(config.db.parent):
             return None
-        return InvoiceMailConfig(value["enabled"],root,recipient)
+        return InvoiceMailConfig(value["enabled"], root, recipient, payer_routing)
     except (OSError,ValueError,TypeError,KeyError,StorageUnavailable):
         return None

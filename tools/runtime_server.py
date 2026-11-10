@@ -20,7 +20,8 @@ def main():
     if ACTIVE is None or not getattr(ACTIVE, "runtime_configuration", None):
         raise RuntimeError("Managed runtime required")
     ACTIVE.assert_sandbox()
-    ACTIVE.runtime_configuration.require_ready()
+    # ACTIVE already ran the full preflight inside the child's sandbox.
+    ACTIVE.runtime_configuration.check_current()
     os.umask(0o077)
     import app
     port = ACTIVE.admin_port if args.service == "admin" else ACTIVE.parent_port

@@ -9,6 +9,9 @@ import smtplib
 import ssl
 import subprocess
 
+from revenue.school_invoice_release import FINANCE_COPY_ADDRESS, payer_mail_addresses
+from revenue.school_invoice_reminders import EMAIL
+
 
 @lru_cache(maxsize=1)
 def _keychain_password(sender, service="AAIE CRM Staging SMTP"):
@@ -30,6 +33,7 @@ class RehearsalSMTP:
         self.claim_sets = claim_sets
         self.mode = mode
         self.simulation = simulation
+        self.cc = FINANCE_COPY_ADDRESS if mode == "production" else None
 
     def connect(self):
         password = (_keychain_password(self.sender) if self.simulation else
@@ -48,8 +52,22 @@ class RehearsalSMTP:
 
     def submit(self, recipient, content, allowed):
         message = BytesParser(policy=policy.default).parsebytes(content, headersonly=True)
-        if (recipient != self.recipient or message.get_all("To") != [self.recipient]
-                or message.get_all("From") != [self.sender] or message.get_all("Cc") or message.get_all("Bcc")):
+        expected_cc = [self.cc] if self.cc else []
+        if self.recipient is None and self.mode == "production" and not self.simulation:
+            try:
+                recipients = payer_mail_addresses(recipient, simulation=False)
+            except ValueError:
+                return "cancelled", "smtp_recipient_not_allowed", None
+        elif (isinstance(recipient, str) and recipient == self.recipient and EMAIL.fullmatch(recipient)
+              and (not self.cc or recipient.casefold() != self.cc.casefold())):
+            recipients = [recipient]
+        else:
+            return "cancelled", "smtp_recipient_not_allowed", None
+        to_headers = message.get_all("To") or []
+        if (len(to_headers) != 1 or to_headers[0].defects
+                or [address.addr_spec for address in to_headers[0].addresses] != recipients
+                or message.get_all("From") != [self.sender] or (message.get_all("Cc") or []) != expected_cc
+                or message.get_all("Bcc")):
             return "cancelled", "smtp_recipient_not_allowed", None
 
         smtp = None
@@ -57,7 +75,10 @@ class RehearsalSMTP:
             if not allowed():
                 return "cancelled", "smtp_disabled", None
             smtp = self.connect()
-            for command, address in ((smtp.mail, self.sender), (smtp.rcpt, recipient)):
+            envelope = [(smtp.mail, self.sender), *((smtp.rcpt, address) for address in recipients)]
+            if self.cc:
+                envelope.append((smtp.rcpt, self.cc))
+            for command, address in envelope:
                 code, _ = command(address)
                 if code not in (250, 251):
                     return "failed", "smtp_rejected", code

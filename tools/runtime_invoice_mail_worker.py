@@ -46,11 +46,10 @@ def main():
             print("invoice_mail_stopped: source write confinement unavailable",flush=True)
             return 2
     else:
-        from staging_environment import ACTIVE
-        if getattr(ACTIVE,"runtime_configuration",None)!=config:
+        from staging_environment import ACTIVE, InvoiceMailRuntime
+        if not isinstance(ACTIVE, InvoiceMailRuntime) or ACTIVE.runtime_configuration != config:
             return 2
-    if not args.probe:
-        config.require_ready()
+        # Importing the managed runtime has already validated the database.
         import app
     original=socket.getaddrinfo
     address=os.environ["AAIE_MANAGED_SMTP_ADDRESS"]

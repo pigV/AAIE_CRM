@@ -72,6 +72,47 @@ class RuntimeControllerTests(unittest.TestCase):
             self.assertFalse(control.status(self.cfg)["ready"])
 
 
+    def test_slow_parent_can_become_healthy_after_the_old_retry_window(self):
+        clock = [0.0]
+        child = SimpleNamespace(pid=123456, poll=lambda: None)
+
+        def probe(config, role, pid, *, timeout):
+            if clock[0] < 18:
+                raise ConnectionRefusedError()
+            return {"pid": pid, "role": role}
+
+        with patch.object(control.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(control.time, "sleep", side_effect=lambda delay: clock.__setitem__(0, clock[0]+delay)), \
+             patch.object(control, "health", side_effect=probe):
+            result = control.wait_for_service_health(self.cfg, "parent", child, timeout=60)
+        self.assertEqual(result, {"pid": child.pid, "role": "parent"})
+        self.assertEqual(clock[0], 18)
+
+    def test_unready_parent_stops_probing_at_the_deadline(self):
+        clock = [0.0]
+        child = SimpleNamespace(pid=123456, poll=lambda: None)
+        timeouts = []
+
+        def probe(config, role, pid, *, timeout):
+            timeouts.append(timeout)
+            clock[0] += timeout
+            raise TimeoutError()
+
+        with patch.object(control.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(control.time, "sleep", side_effect=lambda delay: clock.__setitem__(0, clock[0]+delay)), \
+             patch.object(control, "health", side_effect=probe):
+            with self.assertRaisesRegex(control.RuntimeControlError, "parent health timeout after 3s"):
+                control.wait_for_service_health(self.cfg, "parent", child, timeout=3)
+        self.assertEqual(timeouts, [2, .75])
+        self.assertEqual(clock[0], 3)
+
+    def test_parent_identity_mismatch_is_not_retried(self):
+        child = SimpleNamespace(pid=123456, poll=lambda: None)
+        with patch.object(control, "health", side_effect=control.RuntimeControlError("Listener identity mismatch")) as probe:
+            with self.assertRaisesRegex(control.RuntimeControlError, "Listener identity mismatch"):
+                control.wait_for_service_health(self.cfg, "parent", child, timeout=60)
+        probe.assert_called_once()
+
     def test_failed_final_health_rolls_back_started_children(self):
         from contextlib import ExitStack
         from unittest.mock import MagicMock

@@ -15,6 +15,7 @@ NAS_READ_ROOTS = (PROTECTED_STORAGE[0], Path('/Volumes/Server/Schools/CRM_School
 SCHOOL_REPORT_PDFUNITE = Path('/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/poppler/poppler/bin/pdfunite')
 SOURCE = Path(__file__).resolve().parent
 TEST_CONTENT_EXTRACTION_PORT = 18892
+INVOICE_MAIL_RUNTIME_ROLE = "invoice-mail"
 
 class IsolationError(RuntimeError):
     pass
@@ -312,13 +313,48 @@ class ManagedRuntime(Staging):
                 raise IsolationError('Managed runtime OS confinement missing')
 
 
+class InvoiceMailRuntime(ManagedRuntime):
+    """Validate the narrower sandbox used by the independent mail worker."""
+
+    @property
+    def nas_read_roots(self): return ()
+
+    @property
+    def school_library_read_roots(self): return ()
+
+    @property
+    def nas_write_roots(self): return ()
+
+    def assert_sandbox(self):
+        super().assert_sandbox()
+        lib = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+        lib.sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        lib.sandbox_check.restype = ctypes.c_int
+        for path in set((*PROTECTED_STORAGE, *NAS_READ_ROOTS)):
+            if lib.sandbox_check(os.getpid(), b'file-read-data', 1, str(path).encode()) != 1:
+                raise IsolationError('Invoice mail NAS read must be denied')
+        restricted = [self.root / 'config', self.root / 'storage']
+        pdf_root = os.environ.get("AAIE_INVOICE_PDF_ROOT") or os.environ.get("REVENUE_SECURE_STORAGE_ROOT")
+        if pdf_root:
+            restricted.append(Path(pdf_root))
+        for path in restricted:
+            if lib.sandbox_check(os.getpid(), b'file-write-data', 1, str(path).encode()) != 1:
+                raise IsolationError('Invoice mail write sandbox is too broad')
+        if lib.sandbox_check(os.getpid(), b'file-read-data', 1, str(self.db).encode()) != 0:
+            raise IsolationError('Invoice mail database read access is unavailable')
+
+
 ACTIVE = None
 if os.environ.get('AAIE_CRM_RUNTIME_CONFIG'):
     from runtime_configuration import RuntimeConfiguration
     config = RuntimeConfiguration.load(os.environ['AAIE_CRM_RUNTIME_CONFIG'], source_root=SOURCE)
     if os.environ.get('AAIE_STAGING_CONFIG') or os.environ.get('AAIE_CRM_ENV') != config.mode:
         raise IsolationError('Conflicting runtime environment')
-    ACTIVE = ManagedRuntime.from_configuration(config)
+    role = os.environ.get("AAIE_MANAGED_RUNTIME_ROLE")
+    if role not in (None, INVOICE_MAIL_RUNTIME_ROLE):
+        raise IsolationError("Unknown managed runtime role")
+    runtime = InvoiceMailRuntime if role == INVOICE_MAIL_RUNTIME_ROLE else ManagedRuntime
+    ACTIVE = runtime.from_configuration(config)
     ACTIVE.assert_sandbox()
     config.require_ready()
     ACTIVE.install_audit()

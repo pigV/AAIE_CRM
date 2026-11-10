@@ -17,6 +17,62 @@ class CommissionMailRoutingTests(unittest.TestCase):
             "Commission invoice COM-2026-001 | Victorian Education Authority",
         )
 
+    def test_smtp_envelope_includes_each_recipient_and_fixed_cc(self):
+        from email.message import EmailMessage
+        from unittest.mock import Mock, call, patch
+        from revenue.school_invoice_release import FINANCE_COPY_ADDRESS, SENDER
+        from revenue.school_invoice_smtp import RehearsalSMTP
+
+        addresses = "ap@school.example.org, finance@school.example.org"
+        transport = RehearsalSMTP(SENDER, None, None, mode="production", simulation=False)
+        email = EmailMessage()
+        email["From"], email["To"], email["Cc"] = SENDER, addresses, FINANCE_COPY_ADDRESS
+        email.set_content("Synthetic. Never sent over the network.")
+        server = Mock()
+        server.mail.return_value = server.rcpt.return_value = server.data.return_value = (250, b"ok")
+        with patch.object(transport, "connect", return_value=server):
+            self.assertEqual(("sent", None, 250), transport.submit(addresses, email.as_bytes(), lambda: True))
+            self.assertEqual(
+                [call("ap@school.example.org"), call("finance@school.example.org"), call(FINANCE_COPY_ADDRESS)],
+                server.rcpt.call_args_list,
+            )
+            server.reset_mock()
+            server.rcpt.side_effect = [(250, b"ok"), (550, b"invalid")]
+            self.assertEqual(("failed", "smtp_rejected", 550),
+                             transport.submit(addresses, email.as_bytes(), lambda: True))
+            server.data.assert_not_called()
+
+    def test_payer_worker_configuration_has_no_fixed_recipient(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import json
+        from tools.runtime_invoice_mail_config import load_mail_config
+        from tools.runtime_control import invoice_mail_environment
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            path = root / "config/invoice-mail.json"
+            pdf = root / "secure-pdf"
+            config = SimpleNamespace(root=root, mode="production", db=root / "db/test.sqlite")
+            values = dict(enabled=True, mode="production", pdf_root=str(pdf), routing="payer")
+            path.write_text(json.dumps(values))
+            path.chmod(0o600)
+            with patch("tools.runtime_invoice_mail_config.invoice_pdf_environment",
+                       return_value={"AAIE_INVOICE_PDF_ROOT": str(pdf)}):
+                result = load_mail_config(config)
+                self.assertTrue(result.payer_routing)
+                self.assertIsNone(result.recipient)
+                self.assertNotIn("AAIE_SCHOOL_INVOICE_MAIL_APPROVED_TO", invoice_mail_environment(config, result))
+                self.assertEqual("1", invoice_mail_environment(config, result)["AAIE_COMMISSION_PAYER_MAIL_ENABLED"])
+                path.write_text(json.dumps({**values, "enabled": False}))
+                self.assertNotIn("AAIE_COMMISSION_PAYER_MAIL_ENABLED",
+                                 invoice_mail_environment(config, load_mail_config(config)))
+                path.write_text(json.dumps({**values, "recipient": "x@example.org"}))
+                self.assertIsNone(load_mail_config(config))
+
     def test_recipient_list_validation(self):
         from revenue.school_invoice_release import payer_mail_addresses
         addresses = payer_mail_addresses("a@ap.example.test, B@ap.example.test, A@ap.example.test", simulation=True)

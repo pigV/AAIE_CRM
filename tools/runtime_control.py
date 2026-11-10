@@ -21,7 +21,9 @@ if str(ROOT) not in sys.path:
 from runtime_configuration import RuntimeConfiguration, RuntimeConfigurationError, canonical, preflight
 from tools.runtime_invoice_mail_config import invoice_pdf_environment, load_mail_config
 from revenue.school_contract_storage import contract_pdf_environment
-from staging_environment import ManagedRuntime, IsolationError, SCHOOL_REPORT_PDFUNITE
+from staging_environment import (
+    INVOICE_MAIL_RUNTIME_ROLE, ManagedRuntime, IsolationError, SCHOOL_REPORT_PDFUNITE,
+)
 from tools import school_map_tile_control, build_document_ocr
 from wechat_runtime import (SCHOOL_RADIUS_GEOCODING_ENV, runtime_wechat_environment,
                             runtime_wechat_network_rules)
@@ -29,6 +31,8 @@ from school_report_browser import sandbox_rules as school_report_browser_sandbox
 
 PYTHON = "/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
 ROLES = ("admin", "parent")
+SERVICE_STARTUP_TIMEOUT = 60
+HEALTH_REQUEST_TIMEOUT = 2
 
 
 class RuntimeControlError(RuntimeError):
@@ -265,7 +269,11 @@ def invoice_mail_environment(config, mail):
     result = {"AAIE_INVOICE_MAIL_EXTERNAL":"1"}
     if config.mode=="staging":
         result["AAIE_SCHOOL_COMMISSION_FORMAL_REHEARSAL"]="1"
-    if mail.enabled:
+    if mail.payer_routing:
+        result["AAIE_COMMISSION_PAYER_MAIL_CONFIGURED"] = "1"
+        if mail.enabled:
+            result["AAIE_COMMISSION_PAYER_MAIL_ENABLED"] = "1"
+    elif mail.enabled:
         result["AAIE_SCHOOL_INVOICE_MAIL_RELEASE"]="candidate" if config.mode=="staging" else "production"
         result["AAIE_SCHOOL_INVOICE_MAIL_APPROVED_TO"]=mail.recipient
     return result
@@ -317,7 +325,8 @@ def run_invoice_mail(config, *, probe=False):
         stream.write(invoice_mail_profile(config,mail,probe=probe))
     address = socket.getaddrinfo("smtphz.qiye.163.com",465,socket.AF_INET,socket.SOCK_STREAM)[0][4][0]
     env={**environment(config,include_wechat=False),"AAIE_MANAGED_SMTP_ADDRESS":address,
-         "AAIE_MANAGED_SMTP_KEYCHAIN":str(invoice_mail_keychain())}
+         "AAIE_MANAGED_SMTP_KEYCHAIN":str(invoice_mail_keychain()),
+         "AAIE_MANAGED_RUNTIME_ROLE":INVOICE_MAIL_RUNTIME_ROLE}
     command=["/usr/bin/sandbox-exec","-f",str(profile),*process_command(config,"invoice-mail")]
     if probe:
         result=subprocess.run([*command,"--probe"],cwd=config.source_root,env=env,stdin=subprocess.DEVNULL,
@@ -431,10 +440,10 @@ def lifecycle_lock(config):
         os.close(fd)
 
 
-def health(config, role, pid):
+def health(config, role, pid, *, timeout=HEALTH_REQUEST_TIMEOUT):
     port = config.admin_port if role == "admin" else config.parent_port
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(f"http://127.0.0.1:{port}/health", timeout=2) as response:
+    with opener.open(f"http://127.0.0.1:{port}/health", timeout=timeout) as response:
         value = json.load(response)
     expected = {"status": "ok", "environment": config.mode, "service": role, "port": port,
                 "pid": pid, "database_path": str(config.db),
@@ -447,6 +456,22 @@ def health(config, role, pid):
     if config.mode == 'production' and value.get('business_write_gate', {}).get('state') not in ('OPEN', 'CLOSED'):
         raise RuntimeControlError('Production business write gate is unknown')
     return {"role": role, "pid": pid, "port": port, "healthy": True}
+
+
+def wait_for_service_health(config, role, proc, *, timeout):
+    deadline = time.monotonic() + timeout
+    while True:
+        if proc.poll() is not None:
+            raise RuntimeControlError(f"{role} exited; inspect its runtime log")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeControlError(
+                f"{role} health timeout after {timeout}s (PID {proc.pid} still running; see logs/{role}.log)"
+            )
+        try:
+            return health(config, role, proc.pid, timeout=min(HEALTH_REQUEST_TIMEOUT, remaining))
+        except (OSError, ValueError):
+            time.sleep(min(.25, max(0, deadline - time.monotonic())))
 
 
 def stop_one(config, role, *, process_group=False):
@@ -538,16 +563,7 @@ def start(config):
                           config_sha256=config.config_sha256, data_root=str(config.root))
             with runtime_file(config, state_path(config, role), "x") as state:
                 json.dump(record, state)
-            for _ in range(60):
-                if proc.poll() is not None:
-                    raise RuntimeControlError(f"{role} exited; inspect its runtime log")
-                try:
-                    health(config, role, proc.pid)
-                    break
-                except (OSError, ValueError):
-                    time.sleep(.25)
-            else:
-                raise RuntimeControlError(f"{role} health timeout")
+            wait_for_service_health(config, role, proc, timeout=SERVICE_STARTUP_TIMEOUT)
         result = status(config)
         if not result["ready"]:
             raise RuntimeControlError("Final service health failed")

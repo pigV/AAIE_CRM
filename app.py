@@ -257,7 +257,7 @@ from revenue.state_school_commission import STATE_AUTHORITIES, authority_contrac
 from revenue.school_invoice_smtp import RehearsalSMTP
 from revenue.school_invoice_release import SENDER
 from revenue.school_invoice_mail import (
-    dispatch_next, invoice_mail_history, mail_settings, mail_status,
+    dispatch_next, invoice_mail_history, mail_settings, mail_status, payer_invoice_approved,
     retry_mail, save_mail_release, save_mail_settings,
 )
 from revenue.school_invoice_reminders import draft_reminder, invoice_overviews, record_reminder, reminder_history
@@ -2330,8 +2330,29 @@ def school_invoice_mail_rehearsal():
             and not SAFE_PRODUCTION_ACTIVE)
 
 
+def _configured_payer_mail():
+    runtime = getattr(STAGING, "runtime_configuration", None)
+    if (os.environ.get("AAIE_COMMISSION_PAYER_MAIL_CONFIGURED") != "1"
+            or getattr(STAGING, "mode", None) != "production" or runtime is None
+            or Path(db.path).resolve() != STAGING.db.resolve()
+            or APP_WRITE_GATE is None or release_business_closed(APP_WRITE_GATE)):
+        return None
+    from tools.runtime_invoice_mail_config import load_mail_config
+    config = load_mail_config(runtime)
+    return config if config and config.payer_routing else None
+
+
 def school_invoice_payer_mail_mode():
-    return "mock" if school_invoice_mock_enabled() else None
+    if school_invoice_mock_enabled():
+        return "mock"
+    return "production" if _configured_payer_mail() else None
+
+
+def school_invoice_payer_mail_live():
+    if os.environ.get("AAIE_COMMISSION_PAYER_MAIL_ENABLED") != "1":
+        return False
+    config = _configured_payer_mail()
+    return bool(config and config.enabled)
 
 
 def school_invoice_mock_enabled():
@@ -2406,7 +2427,7 @@ def school_commission_authority(user, stage, *, school_id=None, entity_id=None, 
         return False
     override = os.environ.get("AAIE_SCHOOL_COMMISSION_REHEARSAL_POLICY") if rehearsal else None
     pilot = read_pilot_policy(STAGING.root,"rehearsal" if rehearsal else "production",override)
-    if stage == "contract-intake" and pilot.self_service and school_invoice_payer_mail_mode():
+    if stage == "contract-intake" and pilot.self_service and school_invoice_payer_mail_mode() == "mock":
         pilot = replace(pilot, self_service=False)
     if not pilot.allows(user,stage):
         return False
@@ -29115,12 +29136,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         connection = db.connect()
         try:
             mail_release = school_invoice_release_for(connection,pilot)
-            payer_mail = bool(pilot and school_invoice_payer_mail_mode() == "mock")
+            payer_mail = bool(pilot and (school_invoice_payer_mail_mode() == "mock"
+                                        or not pilot.simulation and school_invoice_payer_mail_live()))
             if operation in {"mail-settings","mail-retry"} and not (mail_enabled or mail_release or payer_mail):
                 return self.error_page("发票邮件阶段未开放。",HTTPStatus.FORBIDDEN)
             actions = RevenueUIActions(connection,None,int(self.user["id"]),self.user["role_name"],
                                        legacy_document_root=Path(db.path).parent/"revenue_documents",school_pilot=pilot,
-                                       school_mail_release=mail_release)
+                                       school_mail_release=mail_release or ("payer" if payer_mail and not pilot.simulation else None))
             issuer = actions._toorak_claims()
             settlement = actions._toorak_settlement()
             simulation = pilot.simulation if pilot else True
@@ -29219,6 +29241,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 digest = str(self.form.get("preview_digest") or "")
                 if operation == "issue":
                     self._begin_school_commission_write(connection,pilot,"invoicing")
+                    if issuer.mail_release == "payer" and not school_invoice_payer_mail_live():
+                        issuer.mail_release = None
                     issued = issuer.issue_school_invoice(entity_id,claim_uids,digest)
                     connection.commit()
                     return self.redirect(SCHOOL_INVOICE_URL+"?invoice="+quote(issued["uid"],safe=""))
@@ -29945,10 +29969,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     action = operation.removeprefix("authority-formal-")
                     issued = formal_authority.issued_uid()
                     if action == "issue" and self.form.get("reviewed") == "1":
+                        if formal_production:
+                            formal_authority.payer_mail = school_invoice_payer_mail_live()
                         formal_authority.issue(self.form.get("preview_token"))
                     elif not issued:
                         raise ValueError("请先核对并签发隔离测试发票。")
-                    elif action == "retry" and payer_mail_mode:
+                    elif action == "retry" and (payer_mail_mode == "mock" or school_invoice_payer_mail_live()):
                         formal_authority.retry_mock_mail(issued, int(self.form.get("attempt_count", "-1")))
                     elif action == "reconcile" and (rehearsal or pilot.stage == "settlement"):
                         formal_authority.reconcile(None, issued, self.form.get("reviewed") == "1")
@@ -81516,9 +81542,12 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
             if not configuration_valid():
                 return
             release = school_invoice_release_mode()
-            if not (school_invoice_mail_rehearsal() or release):
+            payer_mode = school_invoice_payer_mail_mode()
+            payer_live = (payer_mode == "production" and approved_pdf_root is not None
+                          and school_invoice_payer_mail_live())
+            if not (school_invoice_mail_rehearsal() or release or payer_live):
                 continue
-            mode = "production" if release=="production" else "rehearsal"
+            mode = "production" if release=="production" or payer_live else "rehearsal"
             override = os.environ.get("AAIE_SCHOOL_COMMISSION_REHEARSAL_POLICY") if mode=="rehearsal" else None
             policy = read_pilot_policy(STAGING.root,mode,override)
             if not policy.enabled or policy.stage not in {"invoicing","settlement"}:
@@ -81527,6 +81556,37 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
             try:
                 connection = db.connect()
                 connection.execute("PRAGMA busy_timeout=500")
+                if payer_live or payer_mode == "mock":
+                    def payer_eligible(event):
+                        if (self._invoice_mail_stop.is_set() or not configuration_valid()
+                                or school_invoice_payer_mail_mode() != payer_mode
+                                or not payer_invoice_approved(connection, event, not payer_live)):
+                            return False
+                        current = read_pilot_policy(STAGING.root, mode, override)
+                        if not current.enabled or current.stage not in {"invoicing", "settlement"}:
+                            return False
+                        scope = school_pilot_scope(connection, current, entity_id=event["entity_id"])
+                        if scope and scope.enabled and scope.stage in {"invoicing", "settlement"}:
+                            return payer_matches(scope, connection)
+                        if not current.contract_intake or not current.education_authorities:
+                            return False
+                        from revenue.authority_formal import authority_payer
+                        return any(payer and payer["id"] == event["entity_id"]
+                                   for state in current.education_authorities
+                                   if (payer := authority_payer(connection, state)))
+
+                    if payer_live:
+                        smtp = RehearsalSMTP(SENDER, None, None, mode="production", simulation=False)
+                        dispatch_next(RevenueRepository(connection), approved_pdf_root, payer_eligible, smtp=smtp)
+                        continue
+                    mock_root = STAGING.root
+                    result = dispatch_next(
+                        RevenueRepository(connection), mock_root, payer_eligible,
+                        mock_writable_mount=Path("/Volumes/Data") if mock_root.is_relative_to(
+                            Path("/Volumes/Data/AAIE_CRM/worktrees")) else None,
+                    )
+                    if result is not None:
+                        continue
                 if release:
                     settings = mail_settings(connection,policy.entity_id)
                     if settings.get("transport")!=release or not settings["enabled"]:
@@ -81539,7 +81599,8 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
                         continue
 
                 def eligible(event):
-                    if self._invoice_mail_stop.is_set() or not configuration_valid():
+                    if (self._invoice_mail_stop.is_set() or not configuration_valid()
+                            or event.get("routing") == "payer"):
                         return False
                     current = read_pilot_policy(STAGING.root,mode,override)
                     scope = school_pilot_scope(connection,current,entity_id=event["entity_id"])
@@ -81598,9 +81659,12 @@ def run_server(
     try:
         managed = getattr(STAGING, "runtime_configuration", None)
         if managed is not None:
-            managed.require_ready()
-            startup_preflight_done = True
-        if not startup_readonly(APP_WRITE_GATE):
+            if startup_preflight_done:
+                managed.check_current()
+            else:
+                managed.require_ready()
+                startup_preflight_done = True
+        elif not startup_readonly(APP_WRITE_GATE):
             ensure_dirs()
         if not startup_preflight_done:
             if startup_readonly(APP_WRITE_GATE):
