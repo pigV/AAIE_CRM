@@ -257,12 +257,13 @@ from revenue.state_school_commission import STATE_AUTHORITIES, authority_contrac
 from revenue.school_invoice_smtp import RehearsalSMTP
 from revenue.school_invoice_release import SENDER
 from revenue.school_invoice_mail import (
-    dispatch_next, mail_settings, mail_status,
+    dispatch_next, invoice_mail_history, mail_settings, mail_status,
     retry_mail, save_mail_release, save_mail_settings,
 )
 from revenue.school_invoice_reminders import draft_reminder, invoice_overviews, record_reminder, reminder_history
 from revenue.school_invoice_views import (
-    URL as SCHOOL_INVOICE_URL, render_school_invoice_detail, render_school_invoice_list,
+    MAIL_STATUS_LABELS, URL as SCHOOL_INVOICE_URL, render_school_invoice_detail, render_school_invoice_list,
+    render_school_mail_history,
     render_school_invoice_preview, render_school_reminder_center, render_school_reminder_preview,
 )
 from revenue.views import (
@@ -27252,7 +27253,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/revenue/documents/([^/]+)/(view|download)$", self.revenue_document),
                 (r"^/revenue/school-commission-candidates(?:/(review|confirm))?$",
                  self.revenue_school_claim_candidates),
-                (r"^/revenue/school-commission-invoices(?:/(preview|pdf|issue|delivery|payment|reconcile|reminder|reminder-sent|mail-settings|mail-retry))?$",
+                (r"^/revenue/school-commission-invoices(?:/(preview|pdf|issue|delivery|payment|reconcile|reminder|reminder-sent|mail-settings|mail-retry|mail-history))?$",
                  self.revenue_school_commission_invoices),
                 (r"^/revenue/commission-invoice-templates(?:/(save|rename|publish|rollback|profile|preview))?$", self.revenue_commission_invoice_templates),
                 (r"^/revenue/cases/([^/]+)/toorak-settlement/(delivery|payment|reconcile)$", self.revenue_case_toorak_settlement),
@@ -29036,22 +29037,80 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return self.send_html(page("学校佣金申领清单", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
                               headers=[("Cache-Control", "no-store")], presentation_surface="desktop")
 
+    def revenue_school_invoice_mail_history(self, pilot, entity_id):
+        def query_value(name):
+            return (self.query.get(name) or [""])[0].strip()
+
+        filters = {
+            "entity_id": str(entity_id or ""),
+            "number": query_value("number")[:40],
+            "status": query_value("status"),
+            "start": query_value("start"),
+            "end": query_value("end"),
+        }
+        try:
+            start = date.fromisoformat(filters["start"]) if filters["start"] else None
+            end = date.fromisoformat(filters["end"]) if filters["end"] else None
+            page_number = int(query_value("page") or "1")
+            if ((start and end and end < start) or end == date.max
+                    or not 1 <= page_number <= 10000
+                    or (filters["status"] and filters["status"] not in MAIL_STATUS_LABELS)):
+                raise ValueError()
+        except ValueError:
+            return self.error_page("请核对发票邮件历史的筛选条件。", HTTPStatus.BAD_REQUEST)
+
+        connection = db.connect()
+        try:
+            entities = [
+                (scope.entity_id, connection.execute(
+                    "SELECT legal_name FROM revenue_entities WHERE id=?", (scope.entity_id,),
+                ).fetchone()[0])
+                for scope in list_school_pilot_scopes(connection, pilot)
+                if scope.allows(self.user, "read")
+            ]
+            intake = school_commission_authority(self.user, "contract-intake")
+            if intake and intake.education_authorities:
+                from revenue.authority_formal import authority_payer
+                entities.extend((payer["id"], payer["legal_name"]) for state in intake.education_authorities
+                                if (payer := authority_payer(connection, state)))
+            entity_ids = [key for key, _ in entities]
+            if entity_id is not None:
+                if entity_id not in entity_ids:
+                    return self.error_page("无权限查看该学校的发票邮件。", HTTPStatus.FORBIDDEN)
+                entity_ids = [entity_id]
+            entries, has_next = invoice_mail_history(
+                connection, entity_ids, pilot.simulation, number=filters["number"], start=start, end=end,
+                status=filters["status"], offset=(page_number - 1) * 30,
+            )
+        finally:
+            db._release_connection(connection)
+        body = render_school_mail_history(entities, entries, filters, page_number, has_next)
+        return self.send_html(page("发票发送历史", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                              headers=[("Cache-Control", "no-store")], presentation_surface="desktop")
+
     def revenue_school_commission_invoices(self, method, operation):
         settlement_operation = operation in {"delivery","payment","reconcile"}
         reminder_operation = operation in {"reminder","reminder-sent"}
         stage = "settlement" if settlement_operation or reminder_operation else {
-            None:"read","preview":"preview","pdf":"preview",
+            None:"read","preview":"preview","pdf":"preview","mail-history":"read",
         }.get(operation,"invoicing")
         invoice_uid = ((self.query.get("invoice") or [""])[0] if method=="GET"
                        else str(self.form.get("invoice_uid") or ""))
         selected_entity = self._school_commission_scope_id("entity_id")
+        if operation == "mail-history":
+            pilot = school_commission_authority(self.user, "read")
+            if method != "GET":
+                return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
+            if not pilot or self.request_view_mode() == MOBILE_MODE:
+                return self.error_page("发票发送历史未开放。", HTTPStatus.FORBIDDEN)
+            return self.revenue_school_invoice_mail_history(pilot, selected_entity)
         pilot = school_commission_authority(self.user,stage,entity_id=selected_entity,invoice_uid=invoice_uid)
         if pilot is False or self.request_view_mode()==MOBILE_MODE:
             return self.error_page("学校佣金试点阶段未开放或无权限。",HTTPStatus.FORBIDDEN)
         mail_enabled = bool(pilot and pilot.simulation and school_invoice_mail_rehearsal())
         if settlement_operation:
             return self.revenue_case_toorak_settlement(method,None,operation)
-        if method != ("GET" if operation is None else "POST"):
+        if method != ("GET" if operation in (None, "mail-history") else "POST"):
             return self.error_page("不支持此请求方式。",HTTPStatus.METHOD_NOT_ALLOWED)
         connection = db.connect()
         try:
@@ -29150,7 +29209,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                                       if entity_id and allow_invoicing and (mail_enabled or mail_release)
                                                       and mail_settings(connection, entity_id).get("routing") != "payer" else None,
                                                       smtp_recipient=smtp_recipient,allow_preview=allow_preview,
-                                                      mail_release=mail_release)
+                                                      mail_release=mail_release, show_mail_history=bool(pilot))
             else:
                 entity_id = int(self.form.get("entity_id") or 0)
                 if pilot and entity_id!=pilot.entity_id:

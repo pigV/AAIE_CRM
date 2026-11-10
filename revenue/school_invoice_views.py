@@ -36,7 +36,7 @@ def _claim_table(lines, *, selectable=False):
 
 def render_school_invoice_list(entities, entity_id, claims, invoices, csrf, token, *,
                                allow_invoicing=True, simulation=True, overdue_only=False, auto_mail_settings=None, smtp_recipient=None,
-                               allow_preview=None, mail_release=None):
+                               allow_preview=None, mail_release=None, show_mail_history=False):
     options = "".join(
         f'<option value="{value}"{" selected" if value == entity_id else ""}>{escape(name)}</option>'
         for value, name in entities
@@ -76,9 +76,13 @@ def render_school_invoice_list(entities, entity_id, claims, invoices, csrf, toke
     if auto_mail_settings is not None:
         mail = (render_school_mail_release(entity_id,auto_mail_settings,csrf,token,claims,simulation)
                 if mail_release else render_school_mail_settings(entity_id,auto_mail_settings,csrf,token,smtp_recipient))
+    mail_history = ""
+    if show_mail_history:
+        suffix = f"?entity_id={entity_id}" if entity_id else ""
+        mail_history = f'<p><a href="{URL}/mail-history{suffix}">发票发送历史</a></p>'
     return f"""<section class="revenue-panel">
       <h1>学校佣金开票</h1><p>{mode}{instruction}</p>
-      {select}{mail}{selection}{history}</section>"""
+      {mail_history}{select}{mail}{selection}{history}</section>"""
 
 
 def render_school_invoice_preview(data, csrf, token, *, simulation=True, allow_issue=True):
@@ -222,6 +226,56 @@ MAIL_STATUS_LABELS = {
     "pending": "待发送", "sending": "发送中", "sent": "发送成功",
     "failed": "发送失败", "cancelled": "发送已取消", "needs_review": "发送结果待核对",
 }
+
+
+def render_school_mail_history(entities, entries, filters, page_number, has_next):
+    route = URL + "/mail-history"
+    options = "".join(
+        f'<option value="{key}"{" selected" if str(key) == filters["entity_id"] else ""}>{escape(name)}</option>'
+        for key, name in entities
+    )
+    statuses = "".join(
+        f'<option value="{key}"{" selected" if key == filters["status"] else ""}>{name}</option>'
+        for key, name in MAIL_STATUS_LABELS.items()
+    )
+    rows = []
+    for entry in entries:
+        name = escape(entry["invoice_number"])
+        href = f'{URL}?invoice={quote(entry["uid"], safe="")}#invoice-mail-history'
+        if draft := entry.get("authority_draft"):
+            contract_uid, draft_uid = (quote(item, safe="") for item in draft)
+            href = f'/revenue/institution-commission-drafts/{contract_uid}?invoice={draft_uid}'
+        status = MAIL_STATUS_LABELS[entry["status"]]
+        if entry["status"] == "sent":
+            status = "已写入模拟邮箱" if entry.get("transport", "mock") == "mock" else "邮件服务器已接受"
+        rows.append(
+            f'<tr><td>{escape(entry["school"])}</td><td><a href="{href}">{name}</a></td>'
+            f'<td>{escape(entry["recipient"])}</td><td>{escape(entry.get("cc") or "—")}</td>'
+            f'<td>{_mail_time(entry["sent_at"])}</td><td>{_mail_time(entry["history_at"])}</td>'
+            f'<td>{status}</td></tr>'
+        )
+    pages = []
+    for target, label, available in ((page_number - 1, "上一页", page_number > 1),
+                                     (page_number + 1, "下一页", has_next)):
+        if available:
+            href = route + "?" + urlencode({**filters, "page": target})
+            pages.append(f'<a href="{escape(href, quote=True)}">{label}</a>')
+    content = "".join(rows) or '<tr><td colspan="7">暂无符合条件的发票邮件。</td></tr>'
+    return f"""<section class="revenue-panel">
+      <h1>发票发送历史</h1><p>日期按墨尔本时间。发送时间以邮件服务器接受或模拟邮箱写入为准。</p>
+      <p><a href="{URL}">返回学校佣金开票</a></p>
+      <form method="get" action="{route}" class="revenue-action-form">
+        <label>学校<select name="entity_id"><option value="">全部学校</option>{options}</select></label>
+        <label>发票编号<input name="number" maxlength="40" value="{escape(filters["number"], quote=True)}"></label>
+        <label>从<input name="start" type="date" value="{escape(filters["start"], quote=True)}"></label>
+        <label>至<input name="end" type="date" value="{escape(filters["end"], quote=True)}"></label>
+        <label>状态<select name="status"><option value="">全部状态</option>{statuses}</select></label>
+        <button type="submit">查询</button>
+      </form>
+      <div class="revenue-table-scroll"><table><thead><tr><th>学校</th><th>发票</th><th>收件人</th><th>抄送</th>
+        <th>发送时间</th><th>最近记录时间</th><th>状态</th></tr></thead><tbody>{content}</tbody></table></div>
+      <nav aria-label="分页">第 {page_number} 页 · {" ".join(pages)}</nav>
+      </section>"""
 
 
 def render_school_mail_status(invoice_uid, mail, csrf, token, allow_retry, *, attachment_href=None):

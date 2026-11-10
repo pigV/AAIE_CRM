@@ -182,6 +182,54 @@ def mail_status(connection, invoice_uid):
             "queued_at": row["created_at"], "sent_at": row["dispatched_at"], "attempts": attempts}
 
 
+def invoice_mail_history(connection, entity_ids, simulation, *, number="", start=None, end=None,
+                         status="", offset=0, limit=30):
+    if not entity_ids:
+        return [], False
+    marks = ",".join("?" for _ in entity_ids)
+    filters = [f"i.revenue_entity_id IN ({marks})"]
+    params = [ATTEMPTED, QUEUED, *ISSUE_ACTIONS, int(simulation), *entity_ids]
+    if number:
+        filters.append("instr(upper(i.invoice_number), upper(?)) > 0")
+        params.append(number)
+    melbourne = ZoneInfo("Australia/Melbourne")
+    if start:
+        filters.append("history_at >= ?")
+        params.append(datetime.combine(start, datetime.min.time(), melbourne).astimezone(timezone.utc).isoformat())
+    if end:
+        filters.append("history_at < ?")
+        params.append(datetime.combine(end + timedelta(days=1), datetime.min.time(), melbourne)
+                      .astimezone(timezone.utc).isoformat())
+    matches = connection.execute(
+        """WITH history AS (
+            SELECT i.uid,i.invoice_number,i.revenue_entity_id,e.legal_name,
+                   coalesce(o.dispatched_at,
+                       (SELECT a.occurred_at FROM revenue_audit_events a
+                         WHERE a.aggregate_uid=i.uid AND a.action=? ORDER BY a.id DESC LIMIT 1),
+                       o.created_at) AS history_at
+              FROM revenue_outbox_events o JOIN revenue_invoices i ON i.uid=o.aggregate_uid
+              JOIN revenue_entities e ON e.id=i.revenue_entity_id
+             WHERE o.event_type=? AND EXISTS (
+                   SELECT 1 FROM revenue_audit_events a WHERE a.aggregate_uid=i.uid
+                     AND a.action IN (?,?)
+                     AND json_extract(a.after_json,'$.simulation')=?)
+        ) SELECT * FROM history i WHERE """ + " AND ".join(filters) + " ORDER BY history_at DESC,uid DESC",
+        params,
+    )
+    entries = []
+    for row in matches:
+        record = mail_status(connection, row["uid"])
+        if status and record["status"] != status:
+            continue
+        if offset:
+            offset -= 1
+            continue
+        if len(entries) == limit:
+            return entries, True
+        entries.append({**record, "school": row["legal_name"], "history_at": row["history_at"]})
+    return entries, False
+
+
 def retry_mail(repository, invoice_uid, entity_id, actor, key, attempt_count):
     payload = dict(uid=invoice_uid, entity_id=entity_id, attempt_count=attempt_count, actor=actor)
 
