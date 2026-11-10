@@ -1,13 +1,15 @@
 """Upload review and confirmation of commission contracts for registered institutions."""
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
 import json
 import re
+from zoneinfo import ZoneInfo
 
 from revenue import vic_rcti
+from revenue.money import aud_cents
 from revenue.repository import canonical_json, new_uid
 from revenue.school_commission_pilot import FORMAL_CONTRACT
 from revenue.school_contract_extract import (
@@ -17,10 +19,12 @@ from revenue.school_contracts import PROVIDER_REGISTRATION_ACTION, SCHOOL_REGIST
 from revenue.secure_storage import StorageUnavailable
 from revenue.state_school_commission import (
     DISCARDED_CONTRACT_UPLOAD, STATE_AUTHORITIES, authority_version_starts, discarded_contract_upload,
+    school_commission_assignment,
 )
 
 
 CONFIRMED = "institution_commission_terms_confirmed"
+FACTS = "institution_commission_evidence_confirmed"
 TIER_LABELS = {
     "onshore_full": "境内招募 · 全日制",
     "offshore_full": "境外招募 · 全日制",
@@ -272,3 +276,80 @@ class InstitutionCommissionDraft:
             idempotency_key=key, command_type=CONFIRMED, aggregate_type="institution_commission_terms",
             payload={"draft": self.uid, "form": dict(form)}, actor_user_id=self.actor, operation=operation,
         )
+
+    def _components(self):
+        from revenue.read_models import RevenueReadModels
+
+        if self.target != ("authority", "VIC"):
+            return []
+        assignment = school_commission_assignment(self.db)
+        school_ids = [key for key, (sector, state) in assignment.items() if state == "VIC" and sector != "private"]
+        rows = RevenueReadModels(self.db).school_claim_components(None, authority_school_ids=school_ids)
+        return [
+            {**row, "assignment_reason": "请补齐学校公私立分类。"} if not assignment[row["school_id"]][0] else row
+            for row in rows
+        ]
+
+    def _facts(self, terms):
+        rows = self.db.execute(
+            """SELECT after_json FROM revenue_audit_events
+                WHERE action=? AND aggregate_uid=? AND json_extract(after_json,'$.revision')=?
+                ORDER BY id""", (FACTS, self.uid, terms["revision"]),
+        )
+        result = {}
+        for row in rows:
+            value = json.loads(row[0])
+            result[value["component_uid"]] = value
+        return result
+
+    def confirm_student_evidence(self, form, terms, key):
+        if self.target != ("authority", "VIC") or terms.get("payment_mode") != vic_rcti.PAYMENT or terms != self.terms():
+            raise PermissionError("请先核对有效的维州 RCTI 合同。")
+        component, reference = _value(form, "component"), _value(form, "reference")
+        if not reference or len(reference) > 240 or _value(form, "eligible") != "1":
+            raise ValueError("请确认已核对申领条件和凭证。")
+        if not any(row["component_uid"] == component and not row.get("assignment_reason") for row in self._components()):
+            raise ValueError("请选择本机构已关联的学生入学项目。")
+        duration, english = _value(form, "duration"), _value(form, "english")
+        if duration not in {"short", "full"} or _value(form, "visa") != "500":
+            raise ValueError("请核对课程期限和学生 500 签证。")
+        if english not in {"no", "yes"}:
+            raise ValueError("请核对是否符合两学期强化英语课程要求。")
+        paid = aud_cents(_value(form, "paid_tuition") or ("0" if duration == "short" else ""))
+        bonus = aud_cents(_value(form, "english_paid")) if english == "yes" and duration == "full" else 0
+        if duration == "full" and (paid <= 0 or (english == "yes" and bonus <= 0)):
+            raise ValueError("请分别填写已核对的实付学费。")
+        result = {"uid": self.uid, "revision": terms["revision"], "component_uid": component,
+                  "tier": "standard", "reference": reference,
+                  "offer_on": date.fromisoformat(_value(form, "offer_on")).isoformat(),
+                  "duration": duration, "studying": _value(form, "studying") == "1",
+                  "paid_tuition_cents": paid, "english_paid_cents": bonus}
+        return self.repo.command(
+            idempotency_key=key, command_type=FACTS, aggregate_type="institution_commission_student_evidence",
+            payload=result, actor_user_id=self.actor, operation=lambda: result,
+        )
+
+    def candidates(self, terms):
+        if self.target == ("authority", "VIC") and terms.get("payment_mode") == vic_rcti.PAYMENT:
+            yield from self._vic_estimates(terms, self._facts(terms))
+
+    def _vic_estimates(self, terms, facts):
+        today = datetime.now(ZoneInfo("Australia/Melbourne")).date().isoformat()
+        next_start = min((start for start in authority_version_starts(self.db, "VIC", self.pilot.simulation)
+                          if start > terms["start"]), default="")
+        for student in self._components():
+            component = student["component_uid"]
+            row = {key: student[key] for key in ("student_id", "student_name", "component_uid", "school_name")
+                   if key in student}
+            if student.get("assignment_reason"):
+                yield {**row, "reason": student["assignment_reason"]}
+                continue
+            commenced = self.db.execute(
+                """SELECT actual_commencement_date FROM revenue_commencement_facts
+                    WHERE enrolment_component_id=? AND status='confirmed'""", (student["component_id"],),
+            ).fetchone()
+            fact = facts.get(component)
+            result = vic_rcti.estimate(terms, fact, commenced[0] if commenced else "", today, next_start=next_start)
+            if "gross_cents" in result:
+                result["eligible_on"] = (date.fromisoformat(commenced[0]) + timedelta(weeks=4)).isoformat()
+            yield {**row, **result, "evidence": fact["reference"] if fact else ""}

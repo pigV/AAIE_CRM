@@ -24166,6 +24166,13 @@ def infer_offer_details(upload):
         "deposit_currency": deposit_currency or "AUD",
         "extracted_text_found": bool(text.strip()),
     }
+    school_numbers = set(re.findall(
+        r"(?im)^[ \t]*Student[ \t]+(?:ID|No\.?|Number)[ \t]*[:#]?[ \t]*(?:\n[ \t]*)?"
+        r"([0-9]{1,30})(?=[ \t]*$|[ \t]{2,}[^0-9 \t])",
+        text,
+    ))
+    if len(school_numbers) == 1:
+        details["school_student_number"] = school_numbers.pop()
     if sa_offer:
         details["document_type"] = "SA_GOV_OFFER_TAX_INVOICE"
         details["_field_confidence"] = {"deposit_amount": "explicit", "deposit_currency": "explicit"}
@@ -27226,6 +27233,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/revenue/(contracts/upload|contracts/manual-extraction|contracts/extraction/review|contracts/activate|contracts/school/(?:bind|upload|preview|activate|toorak-draft|toorak-preview|toorak-activate|configurable-draft|configurable-preview|configurable-activate|stage)|master-agent/import|master-agent/match/confirm|master-agent/invoice|master-agent/payment|direct-commission/claim|direct-commission/invoice|direct-commission/payment|billing/payment|billing/receipt|cases/tuition|cases/commencement)$", self.revenue_action),
                 (r"^/revenue/contracts/upload-school$", self.revenue_school_contract_upload),
                 (r"^/revenue/institution-commission-drafts/([^/]+)$", self.revenue_institution_commission_draft),
+                (r"^/revenue/vic-rcti/([a-z0-9-]+)(?:/([a-z0-9-]+))?$", self.revenue_vic_rcti),
                 (r"^/revenue/documents/([^/]+)/(view|download)$", self.revenue_document),
                 (r"^/revenue/school-commission-invoices(?:/(preview|pdf|issue|delivery|payment|reconcile|reminder|reminder-sent|mail-settings|mail-retry))?$",
                  self.revenue_school_commission_invoices),
@@ -28504,7 +28512,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             schools = confirmed_contracts(connection, pilot, int(self.user["id"]), active_schools=bound)
             if target and target not in schools:
                 return False
-            self._send_school_contract_page(CONFIRMED_TITLE, render_confirmed_contracts(schools, target))
+            rcti_uid = None
+            if target == ("authority", "VIC"):
+                from revenue.vic_rcti import PAYMENT
+                from revenue.vic_rcti_reconciliation import ready
+
+                latest = next(((uid, json.loads(payload)) for uid, payload in authority_contracts(connection, "VIC", pilot.simulation)
+                               if payload), None)
+                if latest and latest[1].get("payment_mode") == PAYMENT and ready(connection):
+                    rcti_uid = latest[0]
+            self._send_school_contract_page(CONFIRMED_TITLE, render_confirmed_contracts(schools, target, rcti_uid=rcti_uid))
             return True
         finally:
             db._release_connection(connection)
@@ -28523,11 +28540,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if not pilot or (method == "POST" and self.request_view_mode() == MOBILE_MODE):
             return self.error_page("当前账号无权使用佣金草稿。", HTTPStatus.FORBIDDEN)
         operation = self.form.get("operation") if method == "POST" else None
-        if (method == "POST" and operation not in {"terms", "discard"}) or any(key in self.query for key in ("invoice", "pdf")):
+        if (method == "POST" and operation not in {"terms", "discard", "evidence"}) or any(key in self.query for key in ("invoice", "pdf")):
             return self.error_page("请选择有效的合同操作。", HTTPStatus.BAD_REQUEST)
 
         from document_ocr import extract_pdf_pages
-        from revenue.institution_commission_draft_views import render_workflow
+        from revenue.institution_commission_draft_views import render_vic_estimates, render_workflow
+        from revenue.vic_rcti import PAYMENT
+        from revenue.vic_rcti_reconciliation import VicReconciliation, ready as vic_rcti_ready
 
         def ocr(pdf, indexes):
             return extract_pdf_pages(pdf, indexes, data_root=STAGING.root, source_root=SOURCE_DIR,
@@ -28539,8 +28558,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 self._begin_school_commission_write(connection, pilot, "contract-intake")
             workflow = InstitutionCommissionDraft(RevenueRepository(connection), pilot, draft_uid, int(self.user["id"]))
             terms = workflow.terms()
+            vic_terms = (workflow.target == ("authority", "VIC") and terms
+                         and terms.get("payment_mode") == PAYMENT and vic_rcti_ready(connection))
+            contract_only = self.query.get("contract_only") == ["1"]
             if method == "POST":
                 key = str(self.form.get("idempotency_key") or "")
+                if operation == "evidence":
+                    if not vic_terms or contract_only or self.form.get("terms_revision") != terms["revision"]:
+                        raise ValueError("请刷新并核对当前维州 RCTI 合同版本。")
+                    reconciliation = VicReconciliation(workflow)
+                    reconciliation.remember_differences()
+                    workflow.confirm_student_evidence(self.form, terms, key)
+                    reconciliation.remember_differences()
+                    connection.commit()
+                    return self.redirect(f"{DRAFT_ROOT}/{quote(workflow.uid, safe='')}")
                 if operation == "discard":
                     workflow.discard(key)
                     connection.commit()
@@ -28559,6 +28590,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 connection.commit()
                 return self.redirect(confirmed_url(workflow.target))
             if terms:
+                if vic_terms and not contract_only:
+                    body = render_vic_estimates(workflow, terms, self.csrf, new_token())
+                    return self._send_school_contract_page("维州预计佣金", body)
                 return self.redirect(confirmed_url(workflow.target))
             body = render_workflow(workflow, self.csrf, new_token(), analysis=workflow.analyse(ocr))
             return self._send_school_contract_page("核对佣金合同", body)
@@ -29338,6 +29372,176 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             })
         return self.flash_redirect(destination, message, message_kind)
 
+    def revenue_vic_rcti(self, method, contract_uid, uid=None):
+        from revenue.institution_commission_draft import InstitutionCommissionDraft
+        from revenue.school_contract_storage import configured_contract_store
+        from revenue.secure_storage import StorageUnavailable
+        from revenue.uploads import stage_revenue_upload
+        from revenue.vic_rcti_reconciliation import CSV_COLUMNS, URL, VicReconciliation, read_statement_csv, read_pdf
+        from revenue.vic_rcti_views import render
+
+        pilot = school_commission_authority(self.user, "contract-intake")
+        if not pilot or self.request_view_mode() == MOBILE_MODE:
+            return self.error_page("无权操作维州 RCTI。", HTTPStatus.FORBIDDEN)
+        if method not in {"GET", "POST"}:
+            return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
+        root = URL + "/" + quote(contract_uid, safe="")
+        connection = db.connect()
+        error = ""
+        try:
+            if method == "POST":
+                self._begin_school_commission_write(connection, pilot, "contract-intake")
+            repo = RevenueRepository(connection)
+            workflow = InstitutionCommissionDraft(repo, pilot, contract_uid, int(self.user["id"]))
+            service = VicReconciliation(workflow)
+            try:
+                if method == "POST":
+                    operation = self.form.get("operation")
+                    if operation == "upload" and not uid:
+                        pdfs = [f for f in self.files if f.field_name == "pdf" and f.filename]
+                        details = [f for f in self.files if f.field_name == "students" and f.filename]
+                        if not (pdfs or details) or len(pdfs) > 20 or len(details) > 20:
+                            raise ValueError("请选择 PDF 或 CSV。每批各最多 20 份。")
+                        headers = [read_pdf(pdf.data, issuer_name=service.terms["payer"]) for pdf in pdfs]
+                        store = configured_contract_store()
+                        uploaded = []
+                        for pdf, header in zip(pdfs, headers):
+                            staged = stage_revenue_upload(None, pdf, {".pdf"}, encrypted_store=store)
+                            uploaded.append(service.upload(staged, header))
+                        fallback = None
+                        if len(uploaded) == len(details) == 1:
+                            if service.detail(uploaded[0])["pdf_sha"] == staged.sha256:
+                                fallback = uploaded[0]
+                        compared = []
+                        for detail in details:
+                            try:
+                                number, rows = read_statement_csv(detail.data)
+                                target = service.statement_for_csv(Path(detail.filename).stem, number, fallback)
+                                csv_doc = stage_revenue_upload(None, detail, {".csv"}, max_bytes=1024*1024,
+                                                               encrypted_store=store)
+                                service.add_csv(target, csv_doc, rows)
+                                compared.append(target)
+                            except StorageUnavailable:
+                                raise
+                            except (ValueError, sqlite3.IntegrityError) as exc:
+                                message = str(exc) if isinstance(exc, ValueError) else "该学生明细已用于另一张 RCTI。"
+                                raise ValueError(f"{detail.filename}：{message}") from None
+                        affected = set(uploaded + compared)
+                        if len(affected) > 1 or len(pdfs) > 1 or len(details) > 1:
+                            connection.commit()
+                            return self.redirect(root + "?uploaded=" + str(len(affected)))
+                        uid = affected.pop()
+                    elif operation == "add-csv" and uid:
+                        details = [f for f in self.files if f.field_name == "students" and f.filename]
+                        if len(details) != 1:
+                            raise ValueError("请为这张 RCTI 选择一份学生明细。")
+                        detail = details[0]
+                        number, rows = read_statement_csv(detail.data)
+                        if service.statement_for_csv(Path(detail.filename).stem, number, uid) != uid:
+                            raise ValueError("这份 CSV 对应另一张 RCTI，请检查单号。")
+                        csv_doc = stage_revenue_upload(None, detail, {".csv"}, max_bytes=1024*1024,
+                                                       encrypted_store=configured_contract_store())
+                        service.add_csv(uid, csv_doc, rows)
+                    elif operation == "replace-rcti" and uid:
+                        replacements = [file for file in self.files if file.field_name == "replacement" and file.filename]
+                        if len(replacements) != 1:
+                            raise ValueError("请选择一份教育局重发的 RCTI PDF。")
+                        new_pdf = replacements[0]
+                        header = read_pdf(new_pdf.data, issuer_name=service.terms["payer"])
+                        staged = stage_revenue_upload(None, new_pdf, {".pdf"},
+                                                       encrypted_store=configured_contract_store())
+                        service.replace_pdf(uid, staged, header)
+                    elif operation == "resolve-difference" and uid:
+                        service.resolve_difference(uid, str(self.form.get("signature") or ""),
+                                                   str(self.form.get("outcome") or ""),
+                                                   str(self.form.get("note") or ""),
+                                                   self.form.get("corrected_amount"))
+                    elif operation == "match-students" and uid:
+                        choices = {k[6:]:v for k,v in self.form.items()
+                                   if k.startswith("match_") and isinstance(v,str) and len(v)<=100}
+                        service.match_students(uid, choices)
+                    elif operation == "confirm" and uid:
+                        service.confirm(uid, str(self.form.get("digest") or ""), str(self.form.get("reason") or ""),
+                                        self.form.get("reviewed")=="1", self.form.get("total_only")=="1")
+                    elif operation == "bank" and uid:
+                        receipts = [file for file in self.files if file.field_name == "receipt" and file.filename]
+                        if len(receipts) > 1:
+                            raise ValueError("每笔到账请选择一份收据。")
+                        receipt = (stage_revenue_upload(None, receipts[0], {".pdf", ".png", ".jpg", ".jpeg"},
+                                                        encrypted_store=configured_contract_store())
+                                   if receipts else None)
+                        service.record_bank_receipt(uid, self.form.get("received_on"), self.form.get("amount"),
+                                                    self.form.get("reviewed") == "1",
+                                                    self.form.get("idempotency_key"), receipt)
+                    else:
+                        raise ValueError("请选择对账页面的操作。")
+                    connection.commit()
+                    return self.redirect(root + "/" + quote(uid, safe=""))
+            except StorageUnavailable:
+                raise
+            except (ValueError, sqlite3.IntegrityError) as exc:
+                connection.rollback()
+                error = str(exc) if isinstance(exc,ValueError) and re.search(r"[一-鿿]",str(exc)) else "记录已存在或资料已变更，请刷新后核对。"
+            record = service.detail(uid) if uid else None
+            file_kind = (self.query.get("file") or [""])[0]
+            if method == "GET" and file_kind:
+                if file_kind == "template" and not uid:
+                    data = (",".join(("rcti_number", *CSV_COLUMNS)) + "\n").encode()
+                    mime, filename, disposition = "text/csv", "vic-rcti-student-template.csv", "attachment"
+                elif file_kind == "receipt" and record:
+                    payment_uid = (self.query.get("payment") or [""])[0]
+                    receipt_id = next((item["receipt_id"] for item in record["bank"]
+                                       if item["uid"] == payment_uid), None)
+                    if receipt_id is None:
+                        return self.error_page("找不到该收据。", HTTPStatus.NOT_FOUND)
+                    document = connection.execute("SELECT * FROM revenue_documents WHERE id=?",
+                                                  (receipt_id,)).fetchone()
+                    data = configured_contract_store().read(Path(document["storage_path"]), document["sha256"],
+                                                            document["size_bytes"])
+                    mime = document["mime_type"]
+                    extension = {"application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg"}[mime]
+                    filename, disposition = "vic-rcti-receipt." + extension, "inline"
+                elif file_kind in {"pdf", "csv"} and record:
+                    document_id = record[file_kind+"_id"]
+                    version_id = (self.query.get("version") or [""])[0]
+                    if version_id:
+                        document_id = next((version[file_kind+"_id"] for version in
+                                            record["review"].get("previous_versions", ())
+                                            if str(version["pdf_id"]) == version_id), None)
+                    if document_id is None:
+                        return self.error_page("找不到该附件。", HTTPStatus.NOT_FOUND)
+                    document = connection.execute("SELECT * FROM revenue_documents WHERE id=?",
+                                                  (document_id,)).fetchone()
+                    data = configured_contract_store().read(Path(document["storage_path"]), document["sha256"],
+                                                            document["size_bytes"])
+                    mime, filename = document["mime_type"], "vic-rcti." + file_kind
+                    disposition = "inline" if file_kind == "pdf" else "attachment"
+                else:
+                    return self.error_page("找不到该附件。", HTTPStatus.NOT_FOUND)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Disposition", f'{disposition}; filename="{filename}"')
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            body = render(workflow, service, self.csrf, new_token(), record=record, error=error,
+                          batch_complete=(self.query.get("uploaded") or [""])[0].isdigit())
+            return self.send_html(page("维州 RCTI 对账", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                                  HTTPStatus.BAD_REQUEST if error else HTTPStatus.OK,
+                                  headers=[("Cache-Control","private, no-store")], presentation_surface="desktop")
+        except (PermissionError, LookupError):
+            return self.error_page("请先确认维州 RCTI 合同，或核对当前记录权限。", HTTPStatus.FORBIDDEN)
+        except StorageUnavailable:
+            return self.error_page(StorageUnavailable.message, HTTPStatus.SERVICE_UNAVAILABLE)
+        finally:
+            if connection.in_transaction:
+                connection.rollback()
+            db._release_connection(connection)
+
+
     def revenue_document(self, method, document_uid, disposition):
         """Serve immutable Revenue evidence without exposing its filesystem path."""
         if not can_access_revenue(self.user):
@@ -29347,6 +29551,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         document = db.one("SELECT * FROM revenue_documents WHERE uid=?", (document_uid,))
         if not document:
             return self.error_page("Revenue 文件不存在。", HTTPStatus.NOT_FOUND)
+        from revenue.vic_rcti_reconciliation import DOCUMENTS as VIC_RCTI_DOCUMENTS
+        if document["document_kind"] in VIC_RCTI_DOCUMENTS:
+            return self.error_page("请从维州 RCTI 记录打开原件。", HTTPStatus.FORBIDDEN)
         if document["document_kind"] in {"school_commission_contract","toorak_test_invoice","toorak_claim_evidence",
                                            "toorak_invoice_delivery_evidence","toorak_school_remittance_evidence"} and (
             school_commission_authority(self.user,"read") is not None

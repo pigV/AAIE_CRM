@@ -1577,6 +1577,38 @@ class RevenueReadModels:
             "href": case_url(uid, self.case_surface),
         }
 
+    def school_claim_components(self, school_id, component_uids=None, *, authority_school_ids=None):
+        """Use the accepted school and the same current Student visibility as Revenue."""
+        if authority_school_ids is not None and not authority_school_ids:
+            return []
+        params = [school_id] if authority_school_ids is None else list(authority_school_ids)
+        school_fields = ""
+        school_join = ""
+        school_filter = "a.school_id=?"
+        if authority_school_ids is not None:
+            school_fields = ", s.id AS school_id, s.school_name"
+            school_join = "JOIN schools s ON s.id=a.school_id"
+            school_filter = "a.school_id IN (" + ",".join("?" for _ in params) + ")"
+        selected = ""
+        if component_uids is not None:
+            selected = " AND ec.uid IN (" + ",".join("?" for _ in component_uids) + ")"
+            params.extend(component_uids)
+        rows = self.connection.execute(
+            f"""SELECT ec.id AS component_id, ec.uid AS component_uid, c.id AS case_id,
+                       c.uid AS case_uid, c.student_id{school_fields}
+                 FROM revenue_enrolment_components ec
+                 JOIN revenue_commercial_cases c ON c.id=ec.commercial_case_id
+                 JOIN cycle_final_acceptances a ON a.id=ec.final_acceptance_id
+                 {school_join}
+                WHERE {school_filter} AND a.acceptance_status='active'
+                  AND a.application_cycle_id=c.application_cycle_id AND a.student_id=c.student_id
+                  AND ec.component_kind='school' AND ec.status='active' AND """
+            + self.visibility.case_predicate("c") + selected + " ORDER BY c.student_id, ec.id",
+            params,
+        )
+        return [{**dict(row), "student_name": self._student_display_name(row["student_id"]),
+                 "href": case_url(row["case_uid"], self.case_surface)} for row in rows]
+
     def _student_display_name(self, student_id: str) -> str:
         if student_id in self._student_name_cache:
             return self._student_name_cache[student_id]

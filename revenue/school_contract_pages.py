@@ -99,7 +99,7 @@ def _page(title, body, *, back_href="/revenue", back_label="返回收入与佣�
 
 
 
-def render_confirmed_contracts(schools, target=None):
+def render_confirmed_contracts(schools, target=None, *, rcti_uid=None):
     if target is None:
         ordered = sorted(schools.items(), key=lambda pair: (pair[1]["name"].casefold(), pair[0]))
         entries = "".join(
@@ -120,6 +120,10 @@ def render_confirmed_contracts(schools, target=None):
           <a href="/revenue/documents/{quote(uid, safe="")}/view">查看原合同 PDF</a></article>'''
     if target[0] == "authority":
         content += f'<p><a href="{UPLOAD_ROOT}?education_authority={quote(target[1], safe="")}">上传续约合同</a></p>'
+    if rcti_uid and target == ("authority", "VIC"):
+        uid = quote(rcti_uid, safe="")
+        content += (f'<p><a class="button-link primary" href="/revenue/vic-rcti/{uid}">RCTI 对账</a> '
+                    f'<a class="secondary button-link" href="{DRAFT_ROOT}/{uid}">核对学生凭证与预计佣金</a></p>')
     return _page(CONFIRMED_TITLE, content, back_href=CONFIRMED_ROOT, back_label="返回已确认学校佣金")
 
 

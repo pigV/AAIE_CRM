@@ -1,12 +1,14 @@
 """The additive commission and quarterly RCTI in the Victorian DE schedule."""
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import re
 
+from revenue.money import apply_basis_points, commission_gst_amounts
 
 
 PROFILE = "vic_rcti"
 PAYMENT = "rcti_quarterly"
+BLOCK_INVOICE = "本合同由维州教育局按季度付款并出具 RCTI，CRM 仅显示预计佣金。"
 LABELS = {"standard": "基础佣金", "english_bonus": "强化英语课程额外奖励"}
 CONDITIONS = ("500 签证；本公司招募并收到教育局首次录取函，且当时合同有效；无教育局欠费；"
               "实际就读至少四周。课程不足 12 个月时，基础佣金按比例待复核，英语奖励不适用。"
@@ -65,3 +67,24 @@ def extract(pages):
                 fields["gst"] = _field("exclusive", _source(p, "§23(b)", match[0]))
         return fields
     return None
+
+
+def estimate(terms, fact, commenced, today, *, next_start=""):
+    """Calculate only when the contract-specific evidence permits an estimate."""
+    if not fact:
+        return {"reason": "请先核对首次录取函、500 签证、实付学费和欠费情况。", "needs_evidence": True}
+    offer = fact["offer_on"]
+    if not terms["start"] <= offer <= terms["end"] or (next_start and offer >= next_start):
+        return {"reason": "首次录取函日期不在本版合同适用期内。"}
+    if not commenced or not offer <= commenced <= today:
+        return {"reason": "缺少有效的实际开学日，或开学日早于首次录取函。"}
+    if fact["duration"] == "short":
+        return {"reason": "不足 12 个月：基础佣金按比例待复核，英语奖励不适用。", "needs_evidence": True}
+    if date.fromisoformat(today) < date.fromisoformat(commenced) + timedelta(weeks=4):
+        return {"reason": "尚未满四周，须继续核对实际就读。"}
+    if not fact["studying"]:
+        return {"reason": "请核对学生已实际就读四周。", "needs_evidence": True}
+    base = apply_basis_points(fact["paid_tuition_cents"], terms["rates"]["standard"])
+    extra = apply_basis_points(fact["english_paid_cents"], terms["rates"]["english_bonus"])
+    return {"standard_cents": base, "english_bonus_cents": extra,
+            **commission_gst_amounts(base + extra, terms["gst"])}

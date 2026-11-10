@@ -64,6 +64,17 @@ def gst_from_inclusive(gross_cents: int, gst_rate_basis_points: int) -> tuple[in
     return net_cents, gross_cents - net_cents
 
 
+def commission_gst_amounts(commission_cents: int, gst_mode: str) -> dict[str, int]:
+    if gst_mode == "inclusive":
+        net, gst = gst_from_inclusive(commission_cents, 1000)
+    elif gst_mode in {"exclusive", "none"}:
+        net = commission_cents
+        gst = apply_basis_points(commission_cents, 1000) if gst_mode == "exclusive" else 0
+    else:
+        raise ValueError("请选择有效的发票 GST 方式。")
+    return {"net_cents": net, "gst_cents": gst, "gross_cents": net + gst}
+
+
 def allocate_cents(total_cents: int, weights: list[int] | tuple[int, ...]) -> list[int]:
     total_cents = _integer(total_cents, "total_cents")
     normalized = [_integer(value, "weight") for value in weights]

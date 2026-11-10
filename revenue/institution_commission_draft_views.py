@@ -81,3 +81,48 @@ def render_workflow(workflow, csrf, token, *, analysis=None, terms=None, error="
             <label><input type="checkbox" name="reviewed" value="1" required>已核对签署合同与以上条款</label>
             <button class="primary" type="submit">确认佣金信息</button></form></section>'''
     return header + "<p>合同条款已确认。</p></section>"
+
+
+def _aud(cents):
+    return f"AUD {cents // 100:,}.{cents % 100:02d}"
+
+def _student_school(row):
+    return f' · {escape(row["school_name"])}' if row.get("school_name") else ""
+
+def _vic_estimate_panel(rows, terms, url, security):
+    lines = []
+    for row in rows:
+        student = escape(row["student_name"] or row["student_id"]) + _student_school(row)
+        status = escape(row.get("reason", ""))
+        if "standard_cents" in row:
+            status = (f'基础佣金 {_aud(row["standard_cents"])} · 英语奖励 {_aud(row["english_bonus_cents"])}'
+                      f' · GST {_aud(row["gst_cents"])} · 预计合计 <strong>{_aud(row["gross_cents"])}</strong>')
+        controls = ""
+        if row.get("needs_evidence") or "standard_cents" in row:
+            controls = f'''<details><summary>核对录取与实付凭证</summary>
+              <form action="{url}" method="post" class="revenue-action-form">
+                {security("evidence:"+row["component_uid"])}{_hidden("operation","evidence")}
+                {_hidden("component",row["component_uid"])}{_hidden("terms_revision",terms["revision"])}
+                <label>教育局首次录取函日期<input type="date" name="offer_on" required></label>
+                <label>凭证编号或来源<input name="reference" maxlength="240" required></label>
+                <label>签证<select name="visa" required><option value="">请选择</option><option value="500">500 学生签证</option></select></label>
+                <label>学校课程期限<select name="duration" required><option value="">请选择</option>
+                    <option value="full">至少 12 个月</option><option value="short">不足 12 个月</option></select></label>
+                <label>首年已付学费（AUD）<input name="paid_tuition" inputmode="decimal"></label>
+                <label>符合两学期强化英语课程<select name="english" required><option value="">请选择</option>
+                    <option value="no">否</option><option value="yes">是</option></select></label>
+                <label>英语课程已付学费（AUD）<input name="english_paid" inputmode="decimal"></label>
+                <label><input type="checkbox" name="studying" value="1">已核对实际就读至少四周</label>
+                <label><input type="checkbox" name="eligible" value="1" required>已核对本公司招募并收到首次录取函、学生无欠费及其他适用条件</label>
+                <button type="submit">保存凭证并更新预计佣金</button></form></details>'''
+        lines.append(f"<li>{student} · {status}{controls}</li>")
+    content = "<ul>" + "".join(lines) + "</ul>" if lines else "<p>CRM 暂无与维州公校关联的学生入学资料。</p>"
+    return ("<h3>维州预计佣金</h3><p>" + vic_rcti.BLOCK_INVOICE
+            + "</p><p>基础按首年已付学费，奖励按符合条件的英语课程实付学费分别计算。</p>" + content)
+
+def render_vic_estimates(workflow, terms, csrf, token):
+    url = f"{ROOT}/{quote(workflow.uid, safe='')}"
+    def security(suffix):
+        return _hidden("csrf", csrf) + _hidden("idempotency_key", f"institution-commission:{token}:{suffix}")
+    return ('<section class="revenue-panel"><p><a href="/revenue/contracts?education_authority=VIC">返回维州合同</a></p>'
+            + _vic_estimate_panel(workflow.candidates(terms), terms, url, security) + "</section>")
