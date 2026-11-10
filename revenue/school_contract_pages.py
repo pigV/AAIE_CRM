@@ -132,8 +132,8 @@ def render_payer_billing_details(action, fields, settings, csrf, token, *, simul
     def hidden_input(name, value):
         return f'<input type="hidden" name="{escape(name, quote=True)}" value="{escape(str(value), quote=True)}">'
     hidden = "".join(hidden_input(name, value) for name, value in fields.items())
-    return f'''<section id="school-invoice-mail-recipient">
-      <h3>学校开票资料</h3><p>以下资料会显示在发票 Invoice To 区块。{verified} · 发信抄送 accounts@aaie.com.hk</p>
+
+    form = f'''
       <form method="post" action="{escape(action, quote=True)}" class="revenue-action-form">
         {_hidden_security(csrf, token, "payer-billing-details")}{hidden}
         {hidden_input("settings_revision", settings["settings_revision"])}
@@ -148,7 +148,28 @@ def render_payer_billing_details(action, fields, settings, csrf, token, *, simul
         <label><input name="verified" type="checkbox" value="1">我已核对收票邮箱</label>
         <label><input name="enabled" type="checkbox" value="1"{checked}>签发后自动{mode}</label>
         <button type="submit">保存开票资料</button>
-      </form></section>'''
+      </form>'''
+
+    summary = ""
+    if settings["revision"]:
+        values = (
+            ("发票显示名称", escape(settings["name"])),
+            ("账单地址", "<br>".join(map(escape, settings["address"].splitlines()))),
+            ("联系电话", escape(settings["phone"])),
+            ("收票邮箱", "<br>".join(escape(address.strip()) for address in settings["recipient"].split(","))),
+        )
+        rows = "".join(f"<div><dt>{label}</dt><dd>{value or '未填写'}</dd></div>" for label, value in values)
+        summary = f'''<div class="revenue-school-contract-summary revenue-school-billing-summary">
+          <h4>当前已保存的开票资料</h4><dl>{rows}</dl></div>'''
+        form = f'''<details class="revenue-school-billing-editor">
+          <summary>修改</summary>
+          {form}
+        </details>'''
+    return f'''<section id="school-invoice-mail-recipient">
+      <h3>学校开票资料</h3><p>以下资料会显示在发票 Invoice To 区块。{verified} · 发信抄送 accounts@aaie.com.hk</p>
+      {summary}
+      {form}
+      </section>'''
 
 
 def render_authority_finance(state, terms, payer, csrf, token):

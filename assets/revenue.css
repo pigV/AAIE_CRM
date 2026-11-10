@@ -51,6 +51,19 @@
 .revenue-school-contract-summary dl { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin: 12px 0; }
 .revenue-school-contract-summary dt { color: var(--revenue-muted); font-size: 12px; }
 .revenue-school-contract-summary dd { font-weight: 700; margin: 3px 0 0; }
+.revenue-school-billing-summary dd { overflow-wrap: anywhere; }
+
+.revenue-school-billing-editor > summary {
+  background: var(--revenue-primary-soft);
+  border: 1px solid var(--revenue-line);
+  border-radius: 8px;
+  color: var(--revenue-primary);
+  cursor: pointer;
+  display: inline-block;
+  font-weight: 700;
+  padding: 8px 14px;
+}
+.revenue-school-billing-editor[open] > summary { margin-bottom: 12px; }
 
 .revenue-metrics { display: grid; gap: 12px; grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .revenue-metric { background: var(--revenue-card); border: 1px solid var(--revenue-line); border-radius: 16px; box-shadow: 0 8px 24px rgb(32 42 60 / 5%); display: flex; flex-direction: column; min-height: 132px; min-width: 0; padding: 17px; text-decoration: none; }
