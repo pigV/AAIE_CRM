@@ -3,6 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
+
+
+def aud_cents(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,9}(?:\.[0-9]{1,2})?", value.strip()):
+        raise ValueError("请填写有效的 AUD 金额，最多两位小数。")
+    major, _, minor = value.strip().partition(".")
+    return int(major) * 100 + int(minor.ljust(2, "0"))
 
 
 def _integer(value: int, label: str) -> int:
