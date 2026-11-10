@@ -188,9 +188,29 @@ class ToorakSettlement:
             kind,str(staged.path),staged.sha256,staged.mime_type,staged.size_bytes,"upload",self.actor,key,
         )
 
+    def _valid_payment_days(self, term_days):
+        return type(term_days) is int and term_days in (0, 7, 15, 30)
+
+    def _payment_command_key(self, invoice, token):
+        return f'{self.workflow}-school-bank:{invoice["revenue_entity_id"]}:{token}'
+
+    def _reconciliation_lines_valid(self, lines):
+        return all(line["commission_status"] == "claimed" and line["instalment_status"] == "claimed"
+                   for line in lines)
+
+    def _mark_reconciled_lines(self, lines):
+        self.connection.executemany(
+            "UPDATE revenue_commission_instalments SET status='paid' WHERE id=?",
+            [(line["instalment_id"],) for line in lines],
+        )
+        self.connection.executemany(
+            "UPDATE revenue_commission_lines SET status='paid' WHERE id=?",
+            [(line["commission_line_id"],) for line in lines],
+        )
+
     def delivery(self, case_uid, invoice_uid, received_on, staged, term_days=30):
         received_on = self._date(received_on)
-        if type(term_days) is not int or term_days not in (0,7,15,30):
+        if not self._valid_payment_days(term_days):
             raise ValueError("请选择立即到期、7 天、15 天或 30 天。")
         invoice = self._invoice(case_uid,invoice_uid)
         payload = dict(case_uid=invoice["case_uid"],invoice_uid=invoice_uid,received_on=received_on,sha256=staged.sha256)
@@ -288,7 +308,7 @@ class ToorakSettlement:
             return result
 
         return self.repository.command(
-            idempotency_key=f'{self.workflow}-school-bank:{invoice["revenue_entity_id"]}:{token}',
+            idempotency_key=self._payment_command_key(invoice,token),
             command_type=FORMAL_PAYMENT if self.formal else TEST_PAYMENT,aggregate_type="payment",
             payload=payload,actor_user_id=self.actor,operation=operation,
         )
@@ -308,7 +328,7 @@ class ToorakSettlement:
             payment_totals = defaultdict(int)
             for payment in summary["payments"]:
                 payment_totals[payment["uid"]] += payment["invoice_cents"]
-            if (any(line["commission_status"]!="claimed" or line["instalment_status"]!="claimed" for line in lines)
+            if (not self._reconciliation_lines_valid(lines)
                     or any(payment["counterparty_kind"]!="institution" or payment["payment_direction"]!="received"
                            or payment["revenue_entity_id"]!=current["revenue_entity_id"] or payment["currency_code"]!="AUD"
                            or payment_totals[payment["uid"]]!=payment["amount_cents"]
@@ -335,14 +355,7 @@ class ToorakSettlement:
                      "school_commission_invoice_line" if self.formal else "toorak_test_invoice_line",payment["invoice_line_uid"],
                      payment["invoice_cents"],canonical_json(evidence),self.actor,now),
                 )
-            self.connection.executemany(
-                "UPDATE revenue_commission_instalments SET status='paid' WHERE id=?",
-                [(line["instalment_id"],) for line in lines],
-            )
-            self.connection.executemany(
-                "UPDATE revenue_commission_lines SET status='paid' WHERE id=?",
-                [(line["commission_line_id"],) for line in lines],
-            )
+            self._mark_reconciled_lines(lines)
             return {"uid":uid,"invoice_uid":invoice_uid,"status":"confirmed","confirmed_by":self.actor,
                     "confirmed_at":now,"payment_uids":list(payment_totals),
                     "fully_received_on":summary["fully_received_on"],"timing":summary["timing"],

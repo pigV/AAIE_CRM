@@ -109,6 +109,48 @@ class RevenueUIActions:
             raise
         return {"document": document, "contract": contract, "parse_run": parse_run}
 
+    def register_school_for_commission(self, form: dict) -> dict:
+        self._require_admin()
+        pilot = self.school_pilot
+        if not pilot or not (pilot.enabled and (pilot.contract_intake or (pilot.self_service and pilot.simulation))):
+            raise ValueError("当前环境未开放学校佣金登记。")
+        return self._school_contracts().register_school(self._positive_integer(form, "school_id"))
+
+    def register_provider_for_commission(self, form: dict) -> dict:
+        return self._school_contracts().register_provider(
+            self._positive_integer(form, "higher_education_provider_id"),
+        )
+
+    def upload_authority_commission_draft(self, form, upload):
+        state = self._required(form, "education_authority")
+        key = self._required(form, "idempotency_key")
+        if self._optional(form, "signed_confirmed") != "1":
+            raise ValueError("请核对并上传已签署的 PDF 合同。")
+        staged = self._stage_signed_school_contract(upload)
+        try:
+            return self._school_contracts().upload_authority_draft(
+                state, staged, key, renewal=form.get("renewal") == "1",
+            )
+        except Exception:
+            discard_unregistered_upload(staged)
+            raise
+
+    def upload_provider_commission_draft(self, form, upload, *, register=False):
+        provider_id = self._positive_integer(form, "higher_education_provider_id")
+        key = self._required(form, "idempotency_key")
+        contracts = self._school_contracts()
+        if register:
+            contracts.register_provider(provider_id, allow_existing=True)
+        contracts.check_intake_provider(provider_id)
+        if self._optional(form, "signed_confirmed") != "1":
+            raise ValueError("请核对并上传已签署的 PDF 合同。")
+        staged = self._stage_signed_school_contract(upload)
+        try:
+            return contracts.upload_provider_draft(provider_id, staged, key, signed_confirmed=True)
+        except Exception:
+            discard_unregistered_upload(staged)
+            raise
+
     def bind_school_commission_entity(self, form: dict) -> dict:
         self._require_admin()
         return self._school_contracts().bind(
@@ -170,16 +212,17 @@ class RevenueUIActions:
                                         encrypted_store=configured_contract_store())
         return stage_revenue_upload(self.document_root / "school-contracts", upload, {".pdf"})
 
-    def upload_toorak_draft(self, form: dict, upload) -> dict:
+    def upload_toorak_draft(self, form: dict, upload, *, analysis_required=False) -> dict:
         self._require_admin()
         school_id = self._positive_integer(form, "school_id")
         key = self._required(form, "idempotency_key")
         staged = self._stage_signed_school_contract(upload)
         return self._school_contracts().upload_toorak_draft(
             school_id,staged,key,signed_confirmed=self._optional(form,"signed_confirmed")=="1",
+            analysis_required=analysis_required,
         )
 
-    def upload_configurable_school_draft(self, form, upload, *, register=False):
+    def upload_configurable_school_draft(self, form, upload, *, analyze_pdf=False, register=False):
         school_id = self._positive_integer(form,"school_id")
         key = self._required(form,"idempotency_key")
         contracts = self._school_contracts()
@@ -191,37 +234,8 @@ class RevenueUIActions:
         try:
             return contracts.upload_configurable_draft(
                 school_id,staged,key,signed_confirmed=self._optional(form,"signed_confirmed")=="1",
+                analyze_pdf=analyze_pdf,
             )
-        except Exception:
-            discard_unregistered_upload(staged)
-            raise
-
-    def upload_authority_commission_draft(self, form, upload):
-        state = self._required(form, "education_authority")
-        key = self._required(form, "idempotency_key")
-        if self._optional(form, "signed_confirmed") != "1":
-            raise ValueError("请核对并上传已签署的 PDF 合同。")
-        staged = self._stage_signed_school_contract(upload)
-        try:
-            return self._school_contracts().upload_authority_draft(
-                state, staged, key, renewal=form.get("renewal") == "1",
-            )
-        except Exception:
-            discard_unregistered_upload(staged)
-            raise
-
-    def upload_provider_commission_draft(self, form, upload, *, register=False):
-        provider_id = self._positive_integer(form, "higher_education_provider_id")
-        key = self._required(form, "idempotency_key")
-        contracts = self._school_contracts()
-        if register:
-            contracts.register_provider(provider_id, allow_existing=True)
-        contracts.check_intake_provider(provider_id)
-        if self._optional(form, "signed_confirmed") != "1":
-            raise ValueError("请核对并上传已签署的 PDF 合同。")
-        staged = self._stage_signed_school_contract(upload)
-        try:
-            return contracts.upload_provider_draft(provider_id, staged, key, signed_confirmed=True)
         except Exception:
             discard_unregistered_upload(staged)
             raise
@@ -245,6 +259,12 @@ class RevenueUIActions:
             "effective_from","effective_to","sample_tuition","gst_mode","commencement_days",
             "payment_days","registration_required","clause_reference",
         )}
+        if self.school_pilot and self.school_pilot.entity_id == 0:
+            fields["onboarding"] = "1"
+            payer = self._optional(form, "payer_name")
+            if payer:
+                fields["payer_name"] = payer
+                inputs["payer_name"] = payer
         return fields,{**inputs,"tiers":tiers}
 
     def preview_configurable_school_rule(self, form):
@@ -381,6 +401,7 @@ class RevenueUIActions:
     def _school_contracts(self):
         return SchoolCommissionContracts(
             self.service, self.actor_user_id, self.actor_role,
+            toorak_draft_release=bool(self.school_pilot and self.school_pilot.toorak_draft_release),
             contract_intake=bool(self.school_pilot and self.school_pilot.contract_intake),
             education_authorities=getattr(self.school_pilot, "education_authorities", ()),
             **self._school_scope(),

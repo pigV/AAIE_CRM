@@ -177,6 +177,10 @@ def render_configured_commission_invoice(snapshot: dict, layout: dict) -> bytes:
     normal=ParagraphStyle("CommissionBody",fontName=font,fontSize=size,leading=size+4,
                           textColor=colors.HexColor("#263247"),alignment=align)
     heading=ParagraphStyle("CommissionTitle",parent=normal,fontSize=size+8,leading=size+12,textColor=accent)
+    issuer_name_size=style.get("issuer_name_size",size+8)
+    issuer_text_size=style.get("issuer_text_size",size)
+    issuer_name=ParagraphStyle("CommissionIssuerName",parent=heading,fontSize=issuer_name_size,leading=issuer_name_size+4)
+    issuer_text=ParagraphStyle("CommissionIssuerText",parent=normal,fontSize=issuer_text_size,leading=issuer_text_size+4)
     small=ParagraphStyle("CommissionNotice",parent=normal,fontSize=9,leading=13,textColor=colors.HexColor("#922438"))
     right=ParagraphStyle("CommissionAmount",parent=normal,alignment=TA_RIGHT)
     test_only = snapshot.get("test_only",True)
@@ -230,7 +234,10 @@ def render_configured_commission_invoice(snapshot: dict, layout: dict) -> bytes:
                 key,label=field["key"],field["label"]
                 value=escape(str(values.get(key) or "—")).replace("\n","<br/>")
                 prefix=f"<b>{escape(label)}:</b> " if label else ""
-                story.append(Paragraph(prefix+value,heading if key in {"issuer_name","invoice_title"} else normal))
+                field_style = heading if key in {"issuer_name","invoice_title"} else normal
+                if kind == "issuer" and key != "invoice_title":
+                    field_style = issuer_name if key == "issuer_name" else issuer_text
+                story.append(Paragraph(prefix+value,field_style))
         story.append(Spacer(1,spacing))
     def page_notice(pdf_canvas, doc):
         pdf_canvas.saveState()

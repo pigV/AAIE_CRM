@@ -5,6 +5,25 @@ from revenue.school_invoice_reminders import EMAIL
 
 REHEARSAL_RECIPIENT = "zhang0723@gmail.com"
 SENDER = "accounts@aaie.com.hk"
+FINANCE_COPY_ADDRESS = "accounts@aaie.com.hk"
+
+
+def payer_mail_addresses(raw, *, simulation):
+    if not isinstance(raw, str) or len(raw) > 2048 or any(c in raw for c in "\r\n"):
+        raise ValueError("请输入有效的收票邮箱，用逗号分隔。")
+    addresses = []
+    seen = set()
+    for part in raw.split(","):
+        address = part.strip()
+        lower = address.casefold()
+        if (len(address) > 254 or not EMAIL.fullmatch(address)
+                or lower.endswith(".test") != simulation
+                or lower in {FINANCE_COPY_ADDRESS, REHEARSAL_RECIPIENT.casefold()}):
+            raise ValueError("收票邮箱不符合当前发信配置，请逐个核对。")
+        if lower not in seen:
+            addresses.append(address)
+            seen.add(lower)
+    return addresses
 
 
 def release_values(current, stage, recipient, evidence, approval, claims, simulation):
@@ -17,7 +36,7 @@ def release_values(current, stage, recipient, evidence, approval, claims, simula
         raise ValueError("请选择有效的邮件试点阶段。")
     recipient, evidence, approval = (str(value or "").strip() for value in (recipient,evidence,approval))
     if (len(recipient)>254 or not EMAIL.fullmatch(recipient) or not 1<=len(evidence)<=200
-            or (not simulation and (recipient.lower()==REHEARSAL_RECIPIENT
+            or (not simulation and (recipient.lower() in {REHEARSAL_RECIPIENT, FINANCE_COPY_ADDRESS}
                                      or recipient.lower().endswith(".test")))):
         raise ValueError("请核对学校财务邮箱，并填写可追溯的核对依据。")
     values.update(verified=True,recipient=recipient,evidence=evidence,

@@ -17,6 +17,9 @@ LAYOUT_SOURCE = "commission_invoice_template"
 PROFILE_SOURCE = "commission_invoice_test_finance_profile"
 PUBLICATION = "commission_invoice_template_published"
 ROLLBACK = "commission_invoice_template_rolled_back"
+RENAME = "commission_invoice_template_renamed"
+VERSION_NAME_LIMIT = 80
+ISSUER_FONT_BOUNDS = (8, 18)
 FORMAL_LAYOUT_SOURCE = "school_commission_formal_invoice_template"
 FORMAL_PROFILE_SOURCE = "school_commission_formal_finance_profile"
 FORMAL_PROFILE_APPROVED = "school_commission_formal_finance_approved"
@@ -144,6 +147,13 @@ def validate_layout(layout, logo=None):
     for key,(low,high) in bounds.items():
         if type(style.get(key)) is not int or not low<=style[key]<=high:
             raise ValueError("字号、间距或页边距超出支持范围。")
+    issuer_fonts = {}
+    for key in ("issuer_name_size", "issuer_text_size"):
+        if key in style:
+            value = style[key]
+            if type(value) is not int or not ISSUER_FONT_BOUNDS[0] <= value <= ISSUER_FONT_BOUNDS[1]:
+                raise ValueError("抬头字号须为 8 至 18 pt 的整数。")
+            issuer_fonts[key] = value
     blocks=layout.get("blocks")
     if not isinstance(blocks,list) or len(blocks)!=len(HEADINGS):
         raise ValueError("模板必须包含七个发票区块。")
@@ -177,7 +187,7 @@ def validate_layout(layout, logo=None):
     if preset=="invoice_1762" and tuple(block["kind"] for block in result)!=REFERENCE_ORDER:
         preset="block_flow"
     return {
-        "preset":preset,"blocks":result,"style":{k:style[k] for k in (*bounds,"accent","font","alignment")},
+        "preset":preset,"blocks":result,"style":{**{k:style[k] for k in (*bounds,"accent","font","alignment")},**issuer_fonts},
         "footer":_text(layout.get("footer",""),240),"logo":logo,
     }
 
@@ -282,8 +292,14 @@ class CommissionInvoiceTemplates:
 
     def state(self, selected=""):
         rows=[dict(row) for row in self.connection.execute(
-            "SELECT uid,created_at FROM revenue_rule_snapshots WHERE source_rule_uid=? ORDER BY id DESC",
-            (self.layout_source,),
+            """SELECT s.uid,s.created_at,
+                      COALESCE((SELECT json_extract(a.after_json,'$.name')
+                                FROM revenue_audit_events a
+                                WHERE a.aggregate_uid=s.uid AND a.action=?
+                                ORDER BY a.id DESC LIMIT 1),
+                               json_extract(s.canonical_json,'$.version_name'),'') AS name
+                 FROM revenue_rule_snapshots s WHERE s.source_rule_uid=? ORDER BY s.id DESC""",
+            (RENAME,self.layout_source),
         )]
         active=active_template_uid(self.connection,formal=self.formal,entity_id=self.entity_id,simulation=self.simulation)
         uid=selected or (rows[0]["uid"] if rows else "")
@@ -304,7 +320,8 @@ class CommissionInvoiceTemplates:
         return {"layout":layout,"versions":rows,"active_uid":active,"selected_uid":uid,
                 "published":published,"samples":samples,"profile":profile,"profile_uid":profile_uid or "","formal":self.formal}
 
-    def save(self, layout, key, *, base_uid="", logo=None, remove_logo=False):
+    def save(self, layout, key, *, base_uid="", logo=None, remove_logo=False, name=""):
+        name = self._version_name(name)
         base=_version(self.connection,base_uid,self.layout_source)["value"] if base_uid else default_layout()
         stored=base.get("logo")
         if stored is None and base.get("preset")!="invoice_1762" and isinstance(layout,dict) and layout.get("preset")=="invoice_1762":
@@ -312,15 +329,40 @@ class CommissionInvoiceTemplates:
         approved_logo=logo_data(logo) if logo is not None else None if remove_logo else stored
         normalized=validate_layout(layout,approved_logo)
 
+        snapshot = {"kind":self.layout_source,"value":normalized}
+        if name:
+            snapshot["version_name"] = name
+
         def operation():
-            return self.service._rule_snapshot("commission",self.layout_source,
-                   {"kind":self.layout_source,"value":normalized},self.actor)
+            return self.service._rule_snapshot("commission",self.layout_source,snapshot,self.actor)
 
         return self.repository.command(
             idempotency_key=key,command_type=("school_commission_formal_template_saved" if self.formal
                                              else "commission_invoice_template_saved"),
             aggregate_type="invoice_template",
-            payload=normalized,actor_user_id=self.actor,operation=operation,
+            payload=snapshot if name else normalized,actor_user_id=self.actor,operation=operation,
+        )
+
+    @staticmethod
+    def _version_name(value):
+        name = _text(value, VERSION_NAME_LIMIT)
+        if any(char in value for char in ("\r", "\n")):
+            raise ValueError("模板版本名称须填写在一行内。")
+        return name
+
+    def rename(self, uid, name, key):
+        name = self._version_name(name)
+        if not name:
+            raise ValueError("请输入模板版本名称。")
+
+        _version(self.connection,uid,self.layout_source)
+
+        def operation():
+            return {"uid":uid,"name":name}
+
+        return self.repository.command(
+            idempotency_key=key,command_type=RENAME,aggregate_type="invoice_template",
+            payload={"uid":uid,"name":name},actor_user_id=self.actor,operation=operation,
         )
 
     def save_profile(self, values, key, *, expected_uid, approved=False):
@@ -366,7 +408,7 @@ class CommissionInvoiceTemplates:
             payload={"template_uid":uid,"expected_active":expected_active},actor_user_id=self.actor,operation=operation,
         )
 
-    def preview_sample(self, template_uid):
+    def preview_sample(self, template_uid, *, authority_name=None):
         if not self.formal:
             raise ValueError("请选择正式发票模板。")
         layout = (_version(self.connection,template_uid,self.layout_source)["value"]
@@ -381,9 +423,12 @@ class CommissionInvoiceTemplates:
             {"description":"DEMO-STUDENT-B | DEMO-CLAIM-B | first-year international tuition commission (17%)",
              "net_cents":170000,"gst_cents":17000,"gross_cents":187000},
         ]
+        if authority_name:
+            lines = [{**line, "description": f"DEMO-STUDENT-{i} | Commission sample"}
+                     for i, line in enumerate(lines, 1)]
         amounts = {key:sum(line[key] for line in lines) for key in ("net_cents","gst_cents","gross_cents")}
         sample = {**profile,**amounts,"document_number":"DRAFT","issue_date":"2026-11-07","test_only":True,
-                  "bill_to":"Toorak College (synthetic)","claim_number":"DEMO-CLAIM-A\nDEMO-CLAIM-B",
+                  "bill_to":f"{authority_name or 'Toorak College'} (synthetic)","claim_number":"DEMO-CLAIM-A\nDEMO-CLAIM-B",
                   "student_id":"DEMO-STUDENT-A\nDEMO-STUDENT-B","lines":lines}
         return render_configured_commission_invoice(sample,layout)
 

@@ -28,6 +28,15 @@ class PilotPolicy:
     contract_intake: bool = False
     education_authorities: tuple[str, ...] = ()
 
+    @property
+    def toorak_draft_release(self):
+        return self.enabled and not self.simulation and not self.self_service and self.stage == "preview"
+
+    @property
+    def toorak_claim_drafts(self):
+        return (self.enabled and not self.simulation and not self.self_service
+                and self.stage in ("preview", "invoicing", "settlement"))
+
     def allows(self, user, stage):
         if not user or user["role_name"] != "Admin" or user["id"] not in self.admin_ids:
             return False
@@ -193,6 +202,19 @@ def list_school_pilot_scopes(connection, base):
     ) if (scope := school_pilot_scope(connection,base,school_id=school_id)) is not None]
 
 
+def has_active_school_commission_rule(connection, scope):
+    return bool(connection.execute(
+        """SELECT 1 FROM revenue_commission_rule_versions r
+           JOIN revenue_contract_versions v ON v.id=r.contract_version_id
+           JOIN revenue_contract_groups g ON g.id=v.contract_group_id
+           JOIN revenue_documents d ON d.id=v.document_id
+           JOIN revenue_rule_snapshots s ON s.id=r.rule_snapshot_id
+           WHERE g.revenue_entity_id=? AND g.contract_kind='direct_commission'
+             AND v.status='active' AND r.status='active' AND d.document_kind=?
+             AND json_extract(s.canonical_json,'$.school_id')=?
+             AND json_extract(s.canonical_json,'$.pilot_simulation')=?""",
+        (scope.entity_id, FORMAL_CONTRACT, scope.school_id, scope.simulation),
+    ).fetchone())
 
 
 def set_school_pilot_stage(repository, base, school_id, stage, actor, key):

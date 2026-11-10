@@ -2,6 +2,17 @@
   "use strict";
   const form = document.querySelector("[data-invoice-template]");
   if (!form) return;
+  const back = document.querySelector("[data-template-back]");
+  if (back && document.referrer) {
+    const previous = new URL(document.referrer);
+    const revenuePage = previous.pathname === "/revenue" ||
+      (previous.pathname.startsWith("/revenue/") &&
+       !previous.pathname.startsWith("/revenue/commission-invoice-templates"));
+    if (previous.origin === window.location.origin && revenuePage) {
+      back.href = previous.href;
+    }
+  }
+
   const list = form.querySelector("[data-block-list]");
   const preset = form.querySelector("[data-preset]");
   const referenceOrder = ["issuer","invoice","bill_to","items","totals","footer","payment"];
@@ -105,9 +116,9 @@
         label: field.querySelector("[data-label]").value
       }))
     }));
-    const style = Object.fromEntries(Array.from(form.querySelectorAll("[data-style]")).map(input => [
-      input.dataset.style, input.type === "number" ? Number(input.value) : input.value
-    ]));
+    const style = Object.fromEntries(Array.from(form.querySelectorAll("[data-style]"))
+      .filter(input => input.value !== "")
+      .map(input => [input.dataset.style, input.type === "number" ? Number(input.value) : input.value]));
     form.querySelector("[data-layout]").value = JSON.stringify({
       blocks, style, preset: preset.value, footer: form.querySelector("[data-footer]").value
     });

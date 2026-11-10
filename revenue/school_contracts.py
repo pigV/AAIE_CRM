@@ -20,7 +20,7 @@ PROVIDER_REGISTRATION_ACTION = "school_commission_provider_registered"
 
 class SchoolCommissionContracts:
     def __init__(self, service, actor_user_id, actor_role, *, formal=False, school_id=None, entity_id=None,
-                 simulation=True, contract_intake=False, education_authorities=()):
+                 simulation=True, toorak_draft_release=False, contract_intake=False, education_authorities=()):
         self.service = service
         self.repository = service.repository
         self.connection = service.connection
@@ -30,6 +30,7 @@ class SchoolCommissionContracts:
         self.school_id = school_id
         self.entity_id = entity_id
         self.simulation = simulation
+        self.toorak_draft_release = toorak_draft_release
         self.contract_intake = contract_intake
         self.education_authorities = education_authorities
 
@@ -393,16 +394,36 @@ class SchoolCommissionContracts:
             raise ValueError("请选择 Toorak College。")
         return school
 
-    def upload_toorak_draft(self, school_id, staged, key, *, signed_confirmed=False):
+    def upload_toorak_draft(self, school_id, staged, key, *, signed_confirmed=False, analysis_required=False):
         self._require_admin()
         if self.formal and not signed_confirmed:
             raise ValueError("请核对并确认上传的是已签署合同。")
         payload = {"school_id": school_id, "sha256": staged.sha256}
         if self.formal:
             payload.update(signed_confirmed=True,pilot_entity_id=self.entity_id,pilot_simulation=self.simulation)
+        if analysis_required:
+            payload["analysis_required"] = True
 
         def operation():
             self._toorak_school(school_id)
+            if analysis_required:
+                prior = self.connection.execute(
+                    """SELECT d.id, r.uid FROM revenue_documents d
+                       LEFT JOIN revenue_rule_snapshots r ON r.source_rule_uid=d.uid
+                          AND json_extract(r.canonical_json,'$.toorak_draft')=1
+                          AND json_extract(r.canonical_json,'$.school_commission_configurable') IS NULL
+                          AND json_extract(r.canonical_json,'$.school_id')=?
+                          AND json_extract(r.canonical_json,'$.pilot_entity_id')=?
+                          AND json_extract(r.canonical_json,'$.pilot_simulation')=?
+                          AND NOT EXISTS (SELECT 1 FROM revenue_contract_versions v WHERE v.document_id=d.id)
+                       WHERE d.document_kind=? AND d.storage_path=?
+                       ORDER BY r.id DESC LIMIT 1""",
+                    (school_id, self.entity_id, self.simulation, self.contract_kind, str(staged.path)),
+                ).fetchone()
+                if prior:
+                    if not prior["uid"]:
+                        raise ValueError("这份 PDF 已登记。请在原合同记录中查看。")
+                    return self.repository.require_by_uid("revenue_rule_snapshots", prior["uid"])
             document = self.service.register_document(
                 self.contract_kind, str(staged.path), staged.sha256, staged.mime_type,
                 staged.size_bytes, "upload", self.actor_user_id, f"{key}:document",
@@ -427,6 +448,8 @@ class SchoolCommissionContracts:
             }
             if self.formal:
                 configuration.update(signed_confirmed=True,pilot_entity_id=self.entity_id,pilot_simulation=self.simulation)
+            if analysis_required:
+                configuration["analysis_required"] = True
             return self.service._rule_snapshot("commission", document["uid"], configuration, self.actor_user_id)
 
         return self.repository.command(
@@ -456,9 +479,26 @@ class SchoolCommissionContracts:
         gst_mode = inputs["gst_mode"] or None
         if gst_mode not in (None, "none", "exclusive", "inclusive"):
             raise ValueError("请选择有效的 GST 处理方式。")
+        from revenue.school_contract_review import review_state
+        state = review_state(self.connection, draft_uid) if self.formal else {}
+        review = state.get("review")
+        analysis = state.get("analysis")
+        analyzed = bool(analysis or configuration.get("analysis_required"))
+        if analyzed and (not analysis or not review or review["run"] != analysis["run"]
+                         or not all(review["fields"][f"{side}_rate"]["value"] for side in ("local", "international"))):
+            raise ValueError("请先确认并保存两档佣金比例。")
+        if analyzed:
+            fields = review["fields"]
+            start, end, gst_mode = (fields[name]["value"] or None for name in ("start", "end", "gst"))
         rows = []
         for tier in configuration["tiers"]:
             kind = tier["tuition_kind"]
+            if review:
+                confirmed = review["fields"][f"{kind}_rate"]
+                source = "、".join(f'第 {proof["page"]} 页 {proof["clause"]}' for proof in confirmed["sources"])
+                if confirmed["decision"] == "edit" or not source:
+                    source = "管理员修订" + (f" · {source}" if source else "")
+                tier = {**tier, "rate_basis_points": self._hundredths(confirmed["value"]), "source": source}
             tuition = self._hundredths(inputs[f"{kind}_tuition"])
             if tuition <= 0:
                 raise ValueError("首年学费样本须大于零。")
@@ -482,7 +522,8 @@ class SchoolCommissionContracts:
             "configuration": configuration, "rows": rows, "digest": digest, "formal":self.formal,
             "school_name": school["school_name"], "document_uid": document["uid"],
             "effective_from": start, "effective_to": end, "gst_mode": gst_mode,
-            "can_activate": bool(start and end and start <= date.today().isoformat() <= end
+            "analysis_preview": analyzed,
+            "can_activate": bool(not analyzed and start and end and start <= date.today().isoformat() <= end
                                  and gst_mode and all(row["commission_cents"] is not None for row in rows)),
         }
 
@@ -559,8 +600,8 @@ class SchoolCommissionContracts:
         if not self._registered_school(school_id) or self._active_binding(school_id):
             raise ValueError("请选择已登记且尚未绑定付款主体的学校。")
 
-    def upload_configurable_draft(self, school_id, staged, key, *, signed_confirmed=False):
-        self._configurable_school(school_id)
+    def upload_configurable_draft(self, school_id, staged, key, *, signed_confirmed=False, analyze_pdf=False):
+        school = self._configurable_school(school_id)
         if signed_confirmed is not True or staged.mime_type != "application/pdf":
             raise ValueError("请核对并上传已签署的 PDF 合同。")
         configuration = {
@@ -571,12 +612,18 @@ class SchoolCommissionContracts:
             "pilot_simulation": self.simulation,
             "signed_confirmed": True,
         }
+        if analyze_pdf:
+            if not self.simulation:
+                if not self.toorak_draft_release:
+                    raise ValueError("学校合同自动提取尚未开放。")
+                self._toorak_school(school_id)
+            configuration["analysis_profile"] = "toorak" if school["school_name"].strip().casefold() == "toorak college" else "single"
 
         def validate():
             if self.entity_id == 0:
                 if self.contract_intake:
                     self.check_intake_school(school_id)
-                else:
+                elif not analyze_pdf or self._active_binding(school_id):
                     raise ValueError("学校配置已变更，请刷新后重新选择。")
             elif not self.connection.execute(
                 """SELECT 1 FROM revenue_entity_provider_links l
@@ -655,7 +702,7 @@ class SchoolCommissionContracts:
         draft = self.repository.require_by_uid("revenue_rule_snapshots",draft_uid)
         original = json.loads(draft["canonical_json"])
         if (draft["rule_kind"]!="commission" or original.get("toorak_draft") is not True
-                or original.get("school_commission_configurable") is not True
+                or (original.get("school_commission_configurable") is not True and not self.toorak_draft_release)
                 or original.get("signed_confirmed") is not True
                 or original.get("pilot_entity_id")!=self.entity_id
                 or original.get("pilot_simulation") is not self.simulation):
@@ -664,13 +711,36 @@ class SchoolCommissionContracts:
         document = self.repository.require_by_uid("revenue_documents",draft["source_rule_uid"])
         if document["document_kind"]!=FORMAL_CONTRACT:
             raise ValueError("合同草稿缺少已签署 PDF。")
+        profile = original.get("analysis_profile")
+        if self.toorak_draft_release:
+            self._toorak_school(school["id"])
+            profile = "toorak"
+        confirmed = None
+        if profile:
+            from revenue.school_contract_review import confirmed_rule_inputs, review_state
+
+            state = review_state(self.connection, draft_uid)
+            confirmed = state["review"]
+            if ((not self.simulation and not self.toorak_draft_release) or not confirmed or not state["analysis"]
+                    or confirmed["run"] != state["analysis"]["run"]
+                    or state["analysis"]["sha256"] != document["sha256"]):
+                raise ValueError("请先确认并保存当前 PDF 的条款。")
+            inputs = {**inputs, **confirmed_rule_inputs(profile, confirmed["fields"])}
         start,end = (date.fromisoformat(str(inputs.get(field,""))).isoformat()
                      for field in ("effective_from","effective_to"))
         if start > end or end < date.today().isoformat():
             raise ValueError("请核对合同生效日及到期日。")
-        entity = self._entity(school["id"],start)
-        if entity["id"]!=self.entity_id:
-            raise ValueError("该合同有效期内的付款主体已变更。")
+        if self.entity_id == 0:
+            if not confirmed or self._bindings(school["id"], start):
+                raise ValueError("学校付款主体已变更，请刷新后重新核对。")
+            payer_name = str(inputs.get("school_name") or inputs.get("payer_name") or "").strip()
+            if not 1 <= len(payer_name) <= 200:
+                raise ValueError("请输入合同上的签约及付款主体名称。")
+        else:
+            entity = self._entity(school["id"],start)
+            if entity["id"] != self.entity_id:
+                raise ValueError("该合同有效期内的付款主体已变更。")
+            payer_name = entity["legal_name"]
         gst_mode = inputs.get("gst_mode")
         clause = str(inputs.get("clause_reference") or "").strip()
         tuition = self._hundredths(str(inputs.get("sample_tuition","")))
@@ -698,6 +768,24 @@ class SchoolCommissionContracts:
             },
             "source":{"clause_reference":clause},
         }
+        if confirmed:
+            configuration.update(confirmed_pdf_review=confirmed, analysis_profile=profile)
+            configuration.update({key: inputs[key] for key in ("invoice_email", "tuition_period") if key in inputs})
+        if profile == "toorak":
+            approved = confirmed["fields"]
+            visa_categories = (["subclass_188", "other_resident_confirmed"], ["full_student"])
+            for tier, categories, side in zip(tiers, visa_categories, ("local", "international")):
+                evidence = approved[side + "_rate"]["sources"]
+                if not evidence:
+                    raise ValueError("两档佣金均须关联 PDF 原文。")
+                tier["visa_categories"] = categories
+                tier["source"] = "、".join(f'第 {p["page"]} 页 {p["clause"]}' for p in evidence)
+            configuration["school_commission_configurable"] = False
+            configuration["claim"].update(
+                conditions=["agent_recruited", "agent_named_application", "enrolled",
+                            "course_fee_paid_to_school", "commenced", "approved_invoice"],
+                direct_applications_excluded=True,
+            )
         rows = []
         for tier in tiers:
             amount = apply_basis_points(tuition,tier["rate_basis_points"])
@@ -712,11 +800,11 @@ class SchoolCommissionContracts:
                          "net_cents":net,"gst_cents":tax,"total_cents":total})
         digest = hashlib.sha256(canonical_json({
             "draft_uid":draft_uid,"configuration":configuration,"sample_tuition_cents":tuition,
-            "document_sha256":document["sha256"],"payer_name":entity["legal_name"],
+            "document_sha256":document["sha256"],"payer_name":payer_name,
         }).encode()).hexdigest()
         return {
             "configuration":configuration,"rows":rows,"digest":digest,"formal":True,
-            "school_name":school["school_name"],"legal_name":entity["legal_name"],"document_uid":document["uid"],
+            "school_name":school["school_name"],"legal_name":payer_name,"document_uid":document["uid"],
             "effective_from":start,"effective_to":end,"gst_mode":gst_mode,"can_activate":True,
         }
 
@@ -731,7 +819,11 @@ class SchoolCommissionContracts:
             configuration = dict(preview["configuration"])
             configuration.pop("toorak_draft")
             start,end = preview["effective_from"],preview["effective_to"]
-            entity = self._entity(configuration["school_id"],start)
+            if self.entity_id == 0:
+                entity = self.bind(configuration["school_id"], preview["legal_name"], start, f"{key}:bind")
+                configuration["pilot_entity_id"] = entity["id"]
+            else:
+                entity = self._entity(configuration["school_id"], start)
             if self.connection.execute(
                 """SELECT 1 FROM revenue_contract_versions v
                      JOIN revenue_contract_groups g ON g.id=v.contract_group_id
@@ -749,11 +841,16 @@ class SchoolCommissionContracts:
             )
             uid = contract["uid"]
             clause = configuration["source"]["clause_reference"]
-            suggestions = [
-                ContractSuggestion(f"tier_{index}_commission_rate_basis_points",str(tier["rate_basis_points"]),
-                                   None,clause,"已核对签署合同中的首年学费佣金条款",None)
-                for index,tier in enumerate(configuration["tiers"],1)
-            ]
+            review = configuration.get("confirmed_pdf_review")
+            source_fields = ("local_rate", "international_rate") if configuration.get("analysis_profile") == "toorak" else ("rate",)
+            suggestions = []
+            for index, tier in enumerate(configuration["tiers"], 1):
+                proof = review["fields"][source_fields[index-1]]["sources"][0] if review else None
+                suggestions.append(ContractSuggestion(
+                    f"tier_{index}_commission_rate_basis_points", str(tier["rate_basis_points"]),
+                    proof["page"] if proof else None, proof["clause"] if proof else clause,
+                    proof["text"] if proof else "已核对签署合同中的首年学费佣金条款", None,
+                ))
             extractions = self.service.create_parse_run(
                 uid,ManualContractSuggestionProvider(suggestions),*args,f"{key}:manual",
             )["extractions"]

@@ -45,6 +45,10 @@ def render_invoice_1762(snapshot, layout, canvas_class):
     normal=ParagraphStyle("ReferenceNormal",fontName=font,fontSize=size,leading=size+4,
                           textColor=dark,alignment=align)
     left=ParagraphStyle("ReferenceLeft",parent=normal,alignment=TA_LEFT)
+    issuer_name_size=style.get("issuer_name_size",size)
+    issuer_text_size=style.get("issuer_text_size",size)
+    issuer_name=ParagraphStyle("ReferenceIssuerName",parent=left,fontSize=issuer_name_size,leading=issuer_name_size+4)
+    issuer_text=ParagraphStyle("ReferenceIssuerText",parent=left,fontSize=issuer_text_size,leading=issuer_text_size+4)
     heading=ParagraphStyle("ReferenceTitle",parent=left,fontSize=size+7,leading=size+10,textColor=blue)
     right_style=ParagraphStyle("ReferenceRight",parent=normal,alignment=TA_RIGHT)
     small=ParagraphStyle("ReferenceFooter",parent=left,fontSize=max(8,size-2),leading=max(10,size+1))
@@ -80,12 +84,13 @@ def render_invoice_1762(snapshot, layout, canvas_class):
     def label(key,fields):
         return next((f["label"] for f in fields if f["key"]==key),"")
 
-    def show_fields(fields,x,top,w,fmt,bold_first=False):
+    def show_fields(fields,x,top,w,fmt,bold_first=False,name_style=None):
         for index,f in enumerate(fields):
             key=f["key"]
             prefix=plain(f["label"])+": " if f["label"] else ""
             text=prefix+plain(values.get(key) or "—")
-            top=p(f"<b>{text}</b>" if bold_first and index==0 else text,x,top,w,fmt)
+            field_style = name_style if name_style is not None and key=="issuer_name" else fmt
+            top=p(f"<b>{text}</b>" if bold_first and index==0 else text,x,top,w,field_style)
         return top
 
     if mark:
@@ -99,7 +104,8 @@ def render_invoice_1762(snapshot, layout, canvas_class):
         top_issuer=p(plain(issuer["heading"]),margin+6,top,area*.28,left)
     else:
         top_issuer=top
-    issuer_end=show_fields(issuer["fields"],margin+6,top_issuer,area*.28,left,bold_first=True)
+    issuer_end=show_fields(issuer["fields"],margin+6,top_issuer,area*.28,issuer_text,
+                           bold_first=True,name_style=issuer_name)
     invoice=block["invoice"]
     headline_keys={"invoice_title","document_number"}
     cards={"issue_date","please_pay","due_date"}

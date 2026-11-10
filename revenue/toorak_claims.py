@@ -13,6 +13,7 @@ from revenue.invoice_templates import (
     financial_profile, invoice_origin_predicate, render_with_active_template,
     school_test_billing_address,
 )
+from revenue.money import apply_basis_points, commission_gst_amounts
 from revenue.repository import canonical_json, new_uid
 from revenue.secure_storage import StorageUnavailable, read_secure, write_immutable
 from revenue.data_invoice_storage import configured_invoice_store
@@ -176,7 +177,31 @@ class ToorakClaims:
         return {"student_document_id": document_id, "kind": kind, "label": label,
                 "sha256": digest, "size_bytes": len(content), "filename": row["original_name"]}, content
 
-    def _review(self, case_uid, line_uid, evidence_ids, recruited, reviewed):
+    def check_commencement(self, forecast):
+        if forecast.get("school_commission_configurable") is True:
+            elapsed = (date.fromisoformat(_today()) -
+                       date.fromisoformat(forecast["commencement"]["actual_commencement_date"])).days
+            minimum = forecast["claim"]["commencement_days"]
+            if elapsed < minimum:
+                raise ValueError(f"须开学满 {minimum} 天方可申领。")
+
+    def check_formal_payment_terms(self, contract_uid, rule_id):
+        contract = self.connection.execute(
+            """SELECT d.sha256,s.canonical_json FROM revenue_contract_versions v
+                 JOIN revenue_documents d ON d.id=v.document_id
+                 JOIN revenue_commission_rule_versions r ON r.contract_version_id=v.id
+                 JOIN revenue_rule_snapshots s ON s.id=r.rule_snapshot_id
+                WHERE v.uid=? AND r.id=? AND d.document_kind='school_commission_signed_contract'""",
+            (contract_uid, rule_id),
+        ).fetchone()
+        if contract is None:
+            raise ValueError("正式 Claim 须关联已审核的学校签署合同。")
+        terms = json.loads(contract["canonical_json"]).get("claim", {}).get("payment_days_from_valid_invoice")
+        if type(terms) is not int or terms not in (0, 7, 15, 30):
+            raise ValueError("正式 Claim 须关联已确认的付款期限。")
+        return contract["sha256"], terms
+
+    def _review(self, case_uid, line_uid, evidence_ids, recruited, reviewed, *, gst_mode=None):
         line = self.repository.require_by_uid("revenue_commission_lines", line_uid)
         snapshot = self.connection.execute(
             "SELECT canonical_json FROM revenue_rule_snapshots WHERE id=?", (line["rule_snapshot_id"],)
@@ -191,11 +216,7 @@ class ToorakClaims:
         if configurable:
             if not reviewed or recruited not in {"agent_named","configured_rule"}:
                 raise ValueError("须核对该学校合同及学生申领资料。")
-            elapsed = (date.fromisoformat(_today())-
-                       date.fromisoformat(configuration["commencement"]["actual_commencement_date"])).days
-            minimum = configuration["claim"]["commencement_days"]
-            if elapsed < minimum:
-                raise ValueError(f"须开学满 {minimum} 天方可申领。")
+            self.check_commencement(configuration)
         elif recruited != "agent_named" or not reviewed:
             raise ValueError("须确认由代理招募、代理提交且申请载有代理名称，并核实资料属于本入学项目。")
         current = self.forecast.preview(case_uid, configuration["component_uid"],
@@ -221,6 +242,11 @@ class ToorakClaims:
             "evidence": [info for info,_ in evidence],
             "net_cents": line["net_cents"], "gst_cents": line["gst_cents"], "gross_cents": line["gross_cents"],
         }
+        if gst_mode is not None:
+            if not self.formal or current["school"].strip().casefold() != "toorak college":
+                raise ValueError("本张发票的 GST 选择仅开放给 Toorak 佣金草稿。")
+            commission = apply_basis_points(current["tuition"]["tuition_cents"], current["tier"]["rate_basis_points"])
+            facts.update(commission_gst_amounts(commission, gst_mode), gst_mode=gst_mode)
         if configurable:
             facts.update(school_commission_configurable=True,
                          commencement_days=configuration["claim"]["commencement_days"],
@@ -229,25 +255,15 @@ class ToorakClaims:
             facts.update(agent_recruited=True,agent_named_application=True,enrolled=True,
                          course_fee_paid_to_school=True)
         if self.formal:
-            contract = self.connection.execute(
-                """SELECT d.sha256,s.canonical_json FROM revenue_contract_versions v
-                     JOIN revenue_documents d ON d.id=v.document_id
-                     JOIN revenue_commission_rule_versions r ON r.contract_version_id=v.id
-                     JOIN revenue_rule_snapshots s ON s.id=r.rule_snapshot_id
-                    WHERE v.uid=? AND r.id=? AND d.document_kind='school_commission_signed_contract'""",
-                (facts["contract_uid"],line["commission_rule_version_id"]),
-            ).fetchone()
-            if contract is None:
-                raise ValueError("正式 Claim 须关联已审核的学校签署合同。")
-            terms = json.loads(contract["canonical_json"]).get("claim",{}).get("payment_days_from_valid_invoice")
-            if type(terms) is not int or terms not in (0,7,15,30):
-                raise ValueError("正式 Claim 须关联已确认的付款期限。")
+            contract_hash, terms = self.check_formal_payment_terms(
+                facts["contract_uid"], line["commission_rule_version_id"]
+            )
             facts.update(school_commission_formal=True,school_commission_simulation=self.simulation,
-                         contract_sha256=contract["sha256"],payment_days=terms)
+                         contract_sha256=contract_hash,payment_days=terms)
         return line, facts, evidence
 
-    def preview(self, case_uid, line_uid, evidence_ids, recruited, reviewed):
-        _, facts, _ = self._review(case_uid, line_uid, evidence_ids, recruited, reviewed)
+    def preview(self, case_uid, line_uid, evidence_ids, recruited, reviewed, *, gst_mode=None):
+        _, facts, _ = self._review(case_uid, line_uid, evidence_ids, recruited, reviewed, gst_mode=gst_mode)
         return {**facts, "digest": hashlib.sha256(canonical_json(facts).encode()).hexdigest()}
 
     def _link_evidence(self, line, claim, evidence, now):
@@ -292,34 +308,40 @@ class ToorakClaims:
                  student_document_id,source_kind,source_reference,self.actor,now,now),
             )
 
-    def issue_claim(self, case_uid, line_uid, evidence_ids, recruited, reviewed, digest):
+    def claimable_instalment(self, line):
+        instalments = self.connection.execute(
+            "SELECT * FROM revenue_commission_instalments WHERE commission_line_id=?", (line["id"],)
+        ).fetchall()
+        if (line["status"] != "forecast" or len(instalments) != 1
+                or instalments[0]["status"] != "forecast" or instalments[0]["claimed_cents"]
+                or instalments[0]["eligible_cents"] or instalments[0]["gross_cents"] != line["gross_cents"]
+                or line["gross_cents"] <= 0):
+            raise ValueError("预计佣金已有申领或期次状态不适用。")
+        instalment = instalments[0]
+        if self.connection.execute(
+            "SELECT 1 FROM revenue_claim_allocations WHERE commission_instalment_id=?", (instalment["id"],)
+        ).fetchone():
+            raise ValueError("该期次已生成 Claim。")
+        return instalment
+
+    def issue_claim(self, case_uid, line_uid, evidence_ids, recruited, reviewed, digest, *, gst_mode=None):
         payload = dict(case_uid=case_uid,line_uid=line_uid,evidence_ids=evidence_ids,
                        recruited=recruited,reviewed=reviewed,digest=digest)
+        if gst_mode is not None:
+            payload["gst_mode"] = gst_mode
 
         def operation():
-            line, facts, evidence = self._review(case_uid,line_uid,evidence_ids,recruited,reviewed)
+            line, facts, evidence = self._review(case_uid,line_uid,evidence_ids,recruited,reviewed,gst_mode=gst_mode)
             facts_json = canonical_json(facts)
             fingerprint = hashlib.sha256(facts_json.encode()).hexdigest()
             if fingerprint != digest:
                 raise ValueError("证据或业务来源已变更，请重新核对。")
-            instalments = self.connection.execute(
-                "SELECT * FROM revenue_commission_instalments WHERE commission_line_id=?", (line["id"],)
-            ).fetchall()
-            if (line["status"] != "forecast" or len(instalments) != 1
-                    or instalments[0]["status"] != "forecast" or instalments[0]["claimed_cents"]
-                    or instalments[0]["eligible_cents"] or instalments[0]["gross_cents"] != line["gross_cents"]
-                    or line["gross_cents"] <= 0):
-                raise ValueError("预计佣金已有申领或期次状态不适用。")
-            instalment = instalments[0]
-            if self.connection.execute(
-                "SELECT 1 FROM revenue_claim_allocations WHERE commission_instalment_id=?", (instalment["id"],)
-            ).fetchone():
-                raise ValueError("该期次已生成 Claim。")
+            instalment = self.claimable_instalment(line)
             uid = new_uid("claim")
             now, today = self.repository.now(), _today()
             kind,prefix = ("school_commission_claim","SCLM") if self.formal else ("toorak_internal_claim","TCLM")
             number = self.service._next_number(kind,prefix,int(today[:4]))
-            amounts = line["net_cents"], line["gst_cents"], line["gross_cents"]
+            amounts = facts["net_cents"], facts["gst_cents"], facts["gross_cents"]
             self.connection.execute(
                 """INSERT INTO revenue_claims(uid,claim_number,claim_kind,revenue_entity_id,claim_date,
                     net_cents,gst_cents,gross_cents,status,issued_by,issued_at,created_at)
@@ -330,13 +352,17 @@ class ToorakClaims:
             self.connection.execute(
                 """INSERT INTO revenue_claim_allocations
                     (uid,claim_id,commission_instalment_id,claimed_cents,created_at) VALUES(?,?,?,?,?)""",
-                (new_uid("claim-allocation"),claim["id"],instalment["id"],line["gross_cents"],now),
+                (new_uid("claim-allocation"),claim["id"],instalment["id"],facts["gross_cents"],now),
             )
             self.connection.execute(
-                "UPDATE revenue_commission_instalments SET eligible_cents=?,claimed_cents=?,status='claimed' WHERE id=?",
-                (line["gross_cents"],line["gross_cents"],instalment["id"]),
+                """UPDATE revenue_commission_instalments
+                   SET net_cents=?,gst_cents=?,gross_cents=?,eligible_cents=?,claimed_cents=?,status='claimed' WHERE id=?""",
+                (*amounts,facts["gross_cents"],facts["gross_cents"],instalment["id"]),
             )
-            self.connection.execute("UPDATE revenue_commission_lines SET status='claimed' WHERE id=?", (line["id"],))
+            self.connection.execute(
+                """UPDATE revenue_commission_lines SET net_cents=?,gst_cents=?,gross_cents=?,status='claimed' WHERE id=?""",
+                (*amounts,line["id"]),
+            )
             self.connection.execute(
                 """INSERT INTO revenue_claim_eligibility_evaluations(uid,claim_id,commission_line_id,
                       rule_snapshot_id,evaluation_version,result_code,eligible,evaluator_source,
@@ -533,8 +559,12 @@ class ToorakClaims:
                     )
         invoice = self.repository.require_by_uid("revenue_invoices",uid)
         if self.formal and (self.simulation or self.mail_release):
-            enqueue_mail(self.repository,invoice,document,invoice["revenue_entity_id"],self.actor,
-                         release=self.mail_release,claim_uids=[line["claim_uid"] for line in data["lines"]])
+            if self.mail_release == "payer" or self.simulation:
+                enqueue_mail(self.repository, invoice, document, invoice["revenue_entity_id"],
+                             self.actor, payer_routing=True, simulation=self.simulation)
+            if self.mail_release != "payer":
+                enqueue_mail(self.repository, invoice, document, invoice["revenue_entity_id"], self.actor,
+                             release=self.mail_release, claim_uids=[line["claim_uid"] for line in data["lines"]])
         return {**invoice,"document_uid":document["uid"],
                 "template_uid":template_uid,"finance_profile_uid":profile_uid,
                 **({"simulation":self.simulation} if self.formal else {})}

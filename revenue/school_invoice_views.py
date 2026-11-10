@@ -1,6 +1,8 @@
 """Screens for the isolated school-level commission invoice workflow."""
 
+from datetime import datetime, timezone
 from html import escape
+from zoneinfo import ZoneInfo
 from urllib.parse import quote, urlencode
 
 from revenue.views import _aud_money, _hidden_security, _toorak_settlement_controls
@@ -85,13 +87,14 @@ def render_school_invoice_preview(data, csrf, token, *, simulation=True, allow_i
     ))
     mode = "TEST ONLY · " if simulation else ""
     issue = '<button type="submit" class="primary">确认签发佣金发票</button>' if allow_issue else ""
+    action = "issue" if allow_issue else "pdf"
     return f"""<section class="revenue-panel">
       <h1>学校佣金发票预览</h1>
       <p>{mode}{escape(data["bill_to"])} · 预览阶段尚未分配 COM 编号。</p>
       {_claim_table(data["lines"])}
       <p>未税 {_aud_money(data["net_cents"])} · GST {_aud_money(data["gst_cents"])}
       · 合计 <strong>{_aud_money(data["gross_cents"])}</strong></p>
-      <form method="post" action="{URL}/issue">
+      <form method="post" action="{URL}/{action}">
       {_hidden_security(csrf,token,"toorak-school-issue")}{hidden}
       <button type="submit" formaction="{URL}/pdf" formtarget="_blank">查看 PDF 草稿</button>
       {issue}</form>
@@ -203,7 +206,25 @@ def render_school_mail_settings(entity_id, settings, csrf, token, smtp_recipient
       <button type="submit">保存发信设置</button></form>"""
 
 
-def render_school_mail_status(invoice_uid, mail, csrf, token, allow_retry):
+def _mail_time(value):
+    if not value:
+        return "—"
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        return "—"
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(ZoneInfo("Australia/Melbourne")).strftime("%d/%m/%Y %H:%M:%S %Z")
+
+
+MAIL_STATUS_LABELS = {
+    "pending": "待发送", "sending": "发送中", "sent": "发送成功",
+    "failed": "发送失败", "cancelled": "发送已取消", "needs_review": "发送结果待核对",
+}
+
+
+def render_school_mail_status(invoice_uid, mail, csrf, token, allow_retry, *, attachment_href=None):
     if not mail:
         return "<p>发票邮件 · 未安排自动发送。签发时需已启用本校自动发信并核对财务邮箱。</p>"
     labels = {"pending":"待模拟发送","sent":"已写入模拟邮箱","failed":"模拟发送失败","cancelled":"学校邮箱设置已变更，发送已取消","needs_review":"模拟邮箱记录待核对"}
@@ -211,7 +232,9 @@ def render_school_mail_status(invoice_uid, mail, csrf, token, allow_retry):
         labels.update(pending="待发送",sending="发送中",sent="网易已接受",failed="发信失败",
                       cancelled="发送已取消",needs_review="发送结果待核对")
     history = "".join(
-        f'<li>{escape(record["occurred_at"])} · {labels[record["result"]]} · {escape(record["recipient"])}'
+        f'<li>{_mail_time(record["occurred_at"])} · 第 {int(record["attempt"])} 次 · '
+        f'{labels.get(record["result"], "待核对")} · {escape(record["recipient"])}'
+        f'{f" · {escape(record['error'])}" if record.get("error") else ""}'
         f' · {escape(record.get("message_id") or "")} · {escape(record.get("pdf_sha256") or "")}</li>'
         for record in mail["attempts"]
     )
@@ -222,10 +245,22 @@ def render_school_mail_status(invoice_uid, mail, csrf, token, allow_retry):
           {_hidden("attempt_count",mail["attempt_count"])}
           <button type="submit">重试发票邮件</button></form>"""
     title = "发票邮件" if mail.get("transport") == "production" else "发票邮件 · TEST ONLY"
-    return f"""<section><h2>{title}</h2>
-      <p>{labels[mail["status"]]} · {escape(mail["recipient"])} · 尝试 {mail["attempt_count"]} 次</p>
-      <p>入队时间 {escape(mail["queued_at"])}</p>
-      {f'<ul>{history}</ul>' if history else ""}{retry}</section>"""
+    copy_line = f'<p>抄送 {escape(mail["cc"])}</p>' if mail.get("cc") else ""
+    archived = mail.get("message")
+    content = "<p>邮件主题和正文未存档。</p>"
+    if archived:
+        state = "邮件内容存档" if mail["sent_at"] else "入队时保存的邮件内容"
+        content = f"""<details open><summary>{state}</summary>
+          <p>发件人 {escape(archived["sender"])}</p><p>主题 {escape(archived["subject"])}</p>
+          <pre class="revenue-mail-body">{escape(archived["body"])}</pre></details>"""
+    document_uid = quote(mail["document_uid"], safe="")
+    attachment_name = archived["attachment_name"] if archived else f'{mail["invoice_number"]}.pdf'
+    return f"""<section id="invoice-mail-history"><h2>{title}</h2>
+      <p>{labels[mail["status"]]} · 收件人 {escape(mail["recipient"])} · 尝试 {mail["attempt_count"]} 次</p>
+      {copy_line}<p>入队时间 {_mail_time(mail["queued_at"])} · 发送时间 {_mail_time(mail["sent_at"])}</p>
+      <p>附件 <a href="{escape(attachment_href or f'/revenue/documents/{document_uid}/download', quote=True)}">{escape(attachment_name)}</a></p>
+      {content}<h3>发送尝试</h3>{f'<ul>{history}</ul>' if history else '<p>尚无发送尝试。</p>'}
+      {retry}</section>"""
 
 
 def render_school_mail_release(entity_id, settings, csrf, token, claims, simulation):

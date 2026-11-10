@@ -4,6 +4,7 @@ from email import policy
 from email.message import EmailMessage
 from email.utils import format_datetime
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import hashlib
 import json
 from os.path import lexists
@@ -13,7 +14,7 @@ from time import sleep
 from revenue.invoice_templates import FORMAL_INVOICE_KIND
 from revenue.repository import canonical_json, new_uid
 from revenue.school_invoice_reminders import EMAIL
-from revenue.school_invoice_release import release_values
+from revenue.school_invoice_release import FINANCE_COPY_ADDRESS, SENDER, payer_mail_addresses, release_values
 from revenue.secure_storage import StorageUnavailable, read_secure, write_immutable
 from revenue.storage_locations import resolve_location
 from revenue.data_invoice_storage import SUFFIX, read_invoice_pdf
@@ -23,6 +24,7 @@ SETTINGS = "school_invoice_test_mail_settings"
 QUEUED = "school_invoice_test_mail_queued"
 ATTEMPTED = "school_invoice_test_mail_attempted"
 RETRY = "school_invoice_test_mail_retry"
+ISSUE_ACTIONS = ("school_commission_invoice_issued", "authority_commission_invoice_issued")
 
 
 def mail_settings(connection, entity_id):
@@ -34,22 +36,28 @@ def mail_settings(connection, entity_id):
     return json.loads(row[0]) if row else {"enabled": False, "recipient": "", "verified": False, "revision": ""}
 
 
-def save_mail_settings(repository, entity_id, actor, key, recipient, enabled, verified, expected_revision, *, smtp_recipient=None):
+def save_mail_settings(repository, entity_id, actor, key, recipient, enabled, verified, expected_revision, *, smtp_recipient=None, payer_routing=False, simulation=True):
     recipient = str(recipient or "").strip()
-    if recipient and (len(recipient) > 254 or not EMAIL.fullmatch(recipient)
-                      or (recipient != smtp_recipient if smtp_recipient else not recipient.lower().endswith(".test"))):
+    if recipient and payer_routing:
+        recipient = ", ".join(payer_mail_addresses(recipient, simulation=simulation))
+    elif recipient and (len(recipient) > 254 or not EMAIL.fullmatch(recipient)
+                        or (recipient != smtp_recipient if smtp_recipient else
+                            not recipient.casefold().endswith(".test"))):
         raise ValueError("收件地址不符合当前隔离发信配置。")
     if enabled and (not recipient or not verified):
         raise ValueError("请核对学校财务邮箱后再启用自动发送。")
     payload = dict(uid=str(entity_id), enabled=bool(enabled), recipient=recipient,
                    verified=bool(recipient and verified), expected_revision=expected_revision,
-                   transport="smtp" if smtp_recipient else "mock")
+                   transport="smtp" if smtp_recipient else ("mock" if simulation else "production"))
+    if payer_routing:
+        payload["routing"] = "payer"
     def operation():
         current = mail_settings(repository.connection, entity_id)
         if current["revision"] != expected_revision:
             raise ValueError("学校发信设置已变更，请刷新后核对。")
         unchanged = (all(current[field] == payload[field] for field in ("enabled", "recipient", "verified"))
-                     and current.get("transport", "mock") == payload["transport"])
+                     and current.get("transport", "mock") == payload["transport"]
+                     and current.get("routing") == payload.get("routing"))
         return {**payload, "revision": current["revision"] if unchanged else new_uid("mail-settings")}
 
     return repository.command(
@@ -97,12 +105,23 @@ def save_mail_release(repository, entity_id, actor, key, revision, stage, recipi
     )
 
 
-def enqueue_mail(repository, invoice, document, entity_id, actor, *, release=None, claim_uids=()):
+def enqueue_mail(repository, invoice, document, entity_id, actor, *, release=None, claim_uids=(),
+                 payer_routing=False, simulation=True, authority_draft=None):
     settings = mail_settings(repository.connection, entity_id)
     if not (settings["enabled"] and settings["verified"]):
         return
     mode = settings.get("transport","mock")
-    if release:
+    if payer_routing:
+        if settings.get("routing") != "payer" or mode != ("mock" if simulation else "production"):
+            return
+        payer = repository.connection.execute(
+            "SELECT legal_name FROM revenue_entities WHERE id=? AND status='active'", (entity_id,),
+        ).fetchone()
+        if not payer or invoice["revenue_entity_id"] != entity_id:
+            raise ValueError("发票与付款主体不一致。")
+    elif settings.get("routing") == "payer":
+        return
+    elif release:
         if mode!=release or list(sorted(claim_uids))!=settings.get("claims"):
             return
     elif mode not in {"mock","smtp"}:
@@ -112,6 +131,14 @@ def enqueue_mail(repository, invoice, document, entity_id, actor, *, release=Non
                    settings_revision=settings["revision"], invoice_number=invoice["invoice_number"],
                    gross_cents=invoice["gross_cents"], actor=actor, document_uid=document["uid"],
                    transport=mode)
+    if mode in {"mock", "production"}:
+        payload["cc"] = FINANCE_COPY_ADDRESS
+    if payer_routing:
+        payload.update(routing="payer", payer_name=" ".join(payer[0].split()))
+        if authority_draft:
+            payload["authority_draft"] = authority_draft
+    payload["message"] = _message_fields(payload, SENDER if mode != "mock" or payer_routing else None)
+    payload["attachment_sha256"] = document["sha256"]
     if release:
         payload.update(finance_recipient=settings["recipient"], evidence=settings["evidence"],
                        approval=settings["approval"])
@@ -135,6 +162,7 @@ def mail_status(connection, invoice_uid):
                WHERE action=? AND aggregate_uid=? ORDER BY id""", (ATTEMPTED, invoice_uid),
         )
     ]
+    event = json.loads(row["payload_json"])
     if row["dispatched_at"]:
         status = "sent"
     elif row["last_error_code"] == "smtp_inflight":
@@ -144,11 +172,13 @@ def mail_status(connection, invoice_uid):
         status = "cancelled"
     elif row["last_error_code"] in {"simulation_mailbox_needs_review","smtp_uncertain"}:
         status = "needs_review"
+    elif event.get("transport", "mock") == "mock" and not _settings_match(connection, event):
+        status = "cancelled"
     elif row["last_error_code"]:
         status = "failed"
     else:
         status = "pending"
-    return {**json.loads(row["payload_json"]), "status": status, "attempt_count": row["attempt_count"],
+    return {**event, "status": status, "attempt_count": row["attempt_count"],
             "queued_at": row["created_at"], "sent_at": row["dispatched_at"], "attempts": attempts}
 
 
@@ -158,7 +188,7 @@ def retry_mail(repository, invoice_uid, entity_id, actor, key, attempt_count):
     def operation():
         event = mail_status(repository.connection, invoice_uid)
         if (not event or event["entity_id"] != entity_id or event["status"] != "failed"
-                or event["attempt_count"] != attempt_count):
+                or event["attempt_count"] != attempt_count or not _settings_match(repository.connection, event)):
             raise ValueError("邮件状态已变更，请刷新后再重试。")
         repository.connection.execute(
             """UPDATE revenue_outbox_events SET last_error_code=NULL
@@ -172,29 +202,44 @@ def retry_mail(repository, invoice_uid, entity_id, actor, key, attempt_count):
     )
 
 
-def _message(event, created_at, pdf, sender=None):
-    message = EmailMessage(policy=policy.SMTP)
+def _message_fields(event, sender=None):
     number = event["invoice_number"]
-    message["From"] = sender or "AAIE Accounts Receivable <invoices@aaie.example.test>"
-    message["To"] = event["recipient"]
     amount = f"{event['gross_cents'] // 100:,}.{event['gross_cents'] % 100:02d}"
     production = event.get("transport") == "production"
+    payer_name = event.get("payer_name")
     if production:
-        message["Subject"] = f"Commission invoice {number} | Toorak College"
+        subject = f"Commission invoice {number} | {payer_name or 'Toorak College'}"
+    elif payer_name:
+        subject = f"TEST ONLY | Commission invoice {number} | {payer_name}"
     elif sender:
-        message["Subject"] = f"TEST ONLY | CRM Queue | Toorak | AUD {amount} | {number}"
+        subject = f"TEST ONLY | CRM Queue | Toorak | AUD {amount} | {number}"
     else:
-        message["Subject"] = f"TEST ONLY | Commission invoice {number}"
-    message["Date"] = format_datetime(datetime.fromisoformat(created_at))
-    message["Message-ID"] = _message_id(event, sender)
+        subject = f"TEST ONLY | Commission invoice {number}"
     notice = "" if production else "TEST ONLY - simulated school commission invoice.\n\n"
-    message.set_content(
+    body = (
         notice + "Dear Accounts Payable team,\n\n"
         f"Please find attached commission invoice {number} for AUD {amount}.\n"
         "Please acknowledge receipt and quote the invoice number in your remittance advice.\n\n"
         "Kind regards,\nAAIE Accounts Receivable\n"
     )
-    message.add_attachment(pdf, maintype="application", subtype="pdf", filename=f"{number}.pdf")
+    return {
+        "sender": sender or "AAIE Accounts Receivable <invoices@aaie.example.test>",
+        "subject": subject, "body": body, "attachment_name": f"{number}.pdf",
+    }
+
+
+def _message(event, created_at, pdf, sender=None):
+    fields = event.get("message") or _message_fields(event, sender)
+    message = EmailMessage(policy=policy.SMTP)
+    message["From"] = fields["sender"]
+    message["To"] = event["recipient"]
+    if event.get("transport") in {"mock", "production"} and event.get("cc"):
+        message["Cc"] = event["cc"]
+    message["Subject"] = fields["subject"]
+    message["Date"] = format_datetime(datetime.fromisoformat(created_at))
+    message["Message-ID"] = _message_id(event, sender)
+    message.set_content(fields["body"])
+    message.add_attachment(pdf, maintype="application", subtype="pdf", filename=fields["attachment_name"])
     message.set_boundary(f"aaie-invoice-{event['uid']}")
     return message.as_bytes()
 
@@ -212,7 +257,7 @@ def _verified_pdf(connection, root, event):
              AND d.uid=? AND d.document_kind=?""",
         (event["uid"], event["entity_id"], event["document_uid"], FORMAL_INVOICE_KIND),
     ).fetchone()
-    if not document:
+    if not document or event.get("attachment_sha256", document["sha256"]) != document["sha256"]:
         raise StorageUnavailable()
     def query_all(sql, params=()):
         return connection.execute(sql, params).fetchall()
@@ -225,39 +270,41 @@ def _verified_pdf(connection, root, event):
     return read_secure(root, path, document["sha256"], document["size_bytes"])
 
 
-def _verified_content(connection, root, row, event):
-    return _message(event, row["created_at"], _verified_pdf(connection, root, event))
-
-
-def _deliver(connection, root, row, event, authorized):
+def _deliver(connection, root, row, event, authorized, *, mock_writable_mount=None):
     if root is None:
-        return ("failed", "simulation_mailbox_unavailable") if authorized else (
-            "needs_review", "simulation_mailbox_needs_review"
+        return ("failed", "simulation_mailbox_unavailable", None) if authorized else (
+            "needs_review", "simulation_mailbox_needs_review", None
         )
     mailbox = root / "school-invoice-test-mailbox"
     filename = event["uid"] + ".eml"
     if not authorized and not lexists(mailbox / filename):
-        return "cancelled", "settings_changed"
+        return "cancelled", "settings_changed", None
+    digest = None
     try:
-        content = _verified_content(connection, root, row, event)
+        pdf = _verified_pdf(connection, root, event)
+        digest = hashlib.sha256(pdf).hexdigest()
+        content = _message(event, row["created_at"], pdf)
+        storage = {"writable_mount":mock_writable_mount} if mock_writable_mount else {}
         if authorized:
-            write_immutable(mailbox, filename, content)
+            write_immutable(mailbox, filename, content, **storage)
         else:
             # Recover a prior durable local write before applying a setting change.
             read_secure(root, mailbox / filename, hashlib.sha256(content).hexdigest(),
-                        len(content), max_bytes=len(content))
+                        len(content), max_bytes=len(content), **storage)
     except (OSError, StorageUnavailable):
-        return ("failed", "simulation_mailbox_unavailable") if authorized else (
-            "needs_review", "simulation_mailbox_needs_review"
-        )
-    return "sent", None
+        if not authorized or lexists(mailbox / filename):
+            return "needs_review", "simulation_mailbox_needs_review", digest
+        return "failed", "simulation_mailbox_unavailable", digest
+    return "sent", None, digest
 
 
-def _dispatch(repository, root, row, event):
+def _dispatch(repository, root, row, event, *, mock_writable_mount=None):
     connection = repository.connection
-    settings = mail_settings(connection, event["entity_id"])
-    authorized = settings["enabled"] and settings["verified"] and settings["revision"] == event["settings_revision"]
-    result, error = _deliver(connection, root, row, event, authorized)
+    authorized = _settings_match(connection, event)
+    if event.get("routing") == "payer":
+        authorized = authorized and payer_invoice_approved(connection, event, True)
+    storage = {"mock_writable_mount":mock_writable_mount} if mock_writable_mount else {}
+    result, error, pdf_digest = _deliver(connection, root, row, event, authorized, **storage)
     attempt = row["attempt_count"] + int(authorized or result == "sent")
     now = repository.now()
     connection.execute(
@@ -265,6 +312,7 @@ def _dispatch(repository, root, row, event):
         (now if result == "sent" else None, attempt, error, row["id"]),
     )
     detail = dict(result=result, attempt=attempt, error=error, recipient=event["recipient"],
+                  cc=event.get("cc"), message_id=_message_id(event, None), pdf_sha256=pdf_digest,
                   document_uid=event["document_uid"], simulation=True)
     connection.execute(
         """INSERT INTO revenue_audit_events(uid,action,aggregate_type,aggregate_uid,after_json,actor_user_id,occurred_at)
@@ -279,7 +327,9 @@ def _settings_match(connection, event):
     return (settings["enabled"] and settings["verified"]
             and settings["revision"] == event["settings_revision"]
             and settings.get("delivery_recipient",settings["recipient"]) == event["recipient"]
-            and settings.get("transport", "mock") == event.get("transport", "mock"))
+            and settings.get("transport", "mock") == event.get("transport", "mock")
+            and settings.get("routing") == event.get("routing")
+            and (event.get("transport") != "production" or event.get("cc") == FINANCE_COPY_ADDRESS))
 
 
 def _smtp_audit(repository, event, attempt, result, **detail):
@@ -287,14 +337,62 @@ def _smtp_audit(repository, event, attempt, result, **detail):
         """INSERT INTO revenue_audit_events(uid,action,aggregate_type,aggregate_uid,after_json,actor_user_id,occurred_at)
            VALUES(?,?,'invoice',?,?,?,?)""",
         (new_uid("audit"), ATTEMPTED, event["uid"], canonical_json({
-            "result": result, "attempt": attempt, "recipient": event["recipient"],
+            "result": result, "attempt": attempt, "recipient": event["recipient"], "cc": event.get("cc"),
             "document_uid": event["document_uid"], "transport": event.get("transport","smtp"),
             "settings_revision":event["settings_revision"], **detail,
         }), event["actor"], repository.now()),
     )
 
 
+def payer_invoice_approved(connection, event, simulation):
+    """Require the immutable issuance audit and the current payer binding."""
+    if event.get("routing") != "payer" or event.get("cc") != FINANCE_COPY_ADDRESS:
+        return False
+    row = connection.execute(
+        """SELECT i.id,i.revenue_entity_id,a.action
+             FROM revenue_invoices i JOIN revenue_documents d ON d.id=i.document_id
+             JOIN revenue_entities e ON e.id=i.revenue_entity_id
+             JOIN revenue_audit_events a ON a.aggregate_uid=i.uid
+            WHERE i.uid=? AND i.revenue_entity_id=? AND i.status='issued' AND e.status='active'
+              AND d.uid=? AND d.document_kind=? AND d.sha256=?
+              AND a.action IN (?,?) AND json_extract(a.after_json,'$.simulation')=?""",
+        (event["uid"], event["entity_id"], event["document_uid"], FORMAL_INVOICE_KIND,
+         event["attachment_sha256"], *ISSUE_ACTIONS, int(simulation)),
+    ).fetchone()
+    if not row:
+        return False
+    try:
+        payer_mail_addresses(event["recipient"], simulation=simulation)
+    except ValueError:
+        return False
+    if row["action"] == ISSUE_ACTIONS[1]:
+        return bool(connection.execute(
+            """SELECT 1 FROM revenue_authority_invoices a JOIN revenue_authority_payers p
+                   ON p.state_code=a.state_code AND p.revenue_entity_id=?
+                WHERE a.invoice_id=? AND NOT EXISTS (
+                    SELECT 1 FROM revenue_audit_events t
+                    WHERE t.action='institution_commission_terms_confirmed'
+                      AND t.aggregate_uid=a.contract_draft_uid
+                      AND json_extract(t.after_json,'$.payment_mode')='rcti_quarterly'
+                )""", (event["entity_id"], row["id"]),
+        ).fetchone())
+    return bool(connection.execute(
+        """SELECT 1 FROM revenue_invoice_lines l JOIN revenue_claims c ON c.uid=l.source_uid
+            WHERE l.invoice_id=? AND l.source_kind='claim' AND c.status='issued'
+              AND c.revenue_entity_id=?
+              AND NOT EXISTS (SELECT 1 FROM revenue_invoice_lines bad
+                  LEFT JOIN revenue_claims bc ON bc.uid=bad.source_uid
+                  WHERE bad.invoice_id=l.invoice_id AND (bad.source_kind!='claim'
+                    OR bc.id IS NULL OR bc.revenue_entity_id!=c.revenue_entity_id OR bc.status!='issued'))""",
+        (row["id"], event["entity_id"]),
+    ).fetchone())
+
+
 def _smtp_invoice_approved(connection, event, transport):
+    if transport.recipient is None:
+        return payer_invoice_approved(connection, event, transport.simulation)
+    if event.get("routing") == "payer":
+        return False
     lines = connection.execute(
         """SELECT l.source_uid FROM revenue_invoices i JOIN revenue_invoice_lines l ON l.invoice_id=i.id
            JOIN revenue_documents d ON d.id=i.document_id
@@ -322,11 +420,12 @@ def _claim_smtp(repository, row, event, transport):
         (event["uid"],ATTEMPTED,transport.mode,transport.mode,event["settings_revision"]),
     ).fetchone()
     error = None
-    if not _settings_match(connection, event) or event["recipient"] != transport.recipient:
+    if (not _settings_match(connection, event)
+            or (transport.recipient is not None and event["recipient"] != transport.recipient)):
         error = "settings_changed"
     elif not _smtp_invoice_approved(connection,event,transport):
         error = "smtp_invoice_not_approved"
-    elif prior[0] >= transport.limit and not prior[1]:
+    elif transport.limit is not None and prior[0] >= transport.limit and not prior[1]:
         error = "smtp_limit"
     attempt = row["attempt_count"] + int(error is None)
     connection.execute("UPDATE revenue_outbox_events SET last_error_code=?,attempt_count=? WHERE id=?",
@@ -352,6 +451,7 @@ def _submit_smtp(repository, root, row, event, transport, eligible):
                     and _smtp_invoice_approved(connection,event,transport))
 
         result,error,code = transport.submit(event["recipient"],content,allowed)
+    accepted_at = repository.now() if result == "sent" else None
     attempt = row["attempt_count"]+1
     for retry in range(5):
         try:
@@ -359,7 +459,7 @@ def _submit_smtp(repository, root, row, event, transport, eligible):
                 update = connection.execute(
                     """UPDATE revenue_outbox_events SET last_error_code=?,dispatched_at=?
                        WHERE id=? AND attempt_count=? AND last_error_code='smtp_inflight'""",
-                    (error,repository.now() if result=="sent" else None,row["id"],attempt),
+                    (error,accepted_at,row["id"],attempt),
                 )
                 if update.rowcount != 1:
                     raise ValueError("SMTP queue reservation changed")
@@ -374,7 +474,7 @@ def _submit_smtp(repository, root, row, event, transport, eligible):
     return {"result":result,"error":error}
 
 
-def dispatch_next(repository, root, eligible, *, smtp=None):
+def dispatch_next(repository, root, eligible, *, smtp=None, mock_writable_mount=None):
     """Process one eligible message under the SQLite writer lock.
 
     Mailbox publication uses a stable filename and deterministic bytes, so an
@@ -392,7 +492,8 @@ def dispatch_next(repository, root, eligible, *, smtp=None):
             if not eligible(event) or event.get("transport","mock") != (smtp.mode if smtp else "mock"):
                 continue
             if smtp is None:
-                result = _dispatch(repository, root, row, event)
+                storage = {"mock_writable_mount":mock_writable_mount} if mock_writable_mount else {}
+                result = _dispatch(repository, root, row, event, **storage)
                 connection.commit()
                 return result
             claimed = _claim_smtp(repository,row,event,smtp)

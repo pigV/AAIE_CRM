@@ -606,9 +606,12 @@ class RevenueReadModels:
                   AND NOT EXISTS (SELECT 1 FROM revenue_contract_versions v WHERE v.document_id=d.id)
                 ORDER BY snap.id DESC""", (kind,school_id,school_id,entity_id,entity_id,pilot.simulation if pilot else True)
         )]
+        draft = next((row for row in drafts if row["uid"] == contract_uid), None)
+        if draft and pilot:
+            from revenue.school_contract_review import review_state
+            draft.update(review_state(self.connection, draft["uid"]))
         return {"formal":bool(pilot), "simulation":pilot.simulation if pilot else True, "schools": schools, "bindings": bindings, "contract": contract,
-                "toorak_schools": toorak_schools, "toorak_drafts": drafts,
-                "toorak_draft": next((row for row in drafts if row["uid"] == contract_uid), None)}
+                "toorak_schools": toorak_schools, "toorak_drafts": drafts, "toorak_draft": draft}
 
     def _workspace_action(
         self, name: str, *, selected: str = "", case_uid: str = ""
@@ -1579,6 +1582,8 @@ class RevenueReadModels:
 
     def school_claim_components(self, school_id, component_uids=None, *, authority_school_ids=None):
         """Use the accepted school and the same current Student visibility as Revenue."""
+        if not {"school_id", "student_id", "acceptance_status"} <= self._columns("cycle_final_acceptances"):
+            return []
         if authority_school_ids is not None and not authority_school_ids:
             return []
         params = [school_id] if authority_school_ids is None else list(authority_school_ids)
@@ -1608,6 +1613,54 @@ class RevenueReadModels:
         )
         return [{**dict(row), "student_name": self._student_display_name(row["student_id"]),
                  "href": case_url(row["case_uid"], self.case_surface)} for row in rows]
+
+    def school_commission_student_history(self, school_id, entity_id, current_rows):
+        """List linked CRM students and saved claims separately from eligibility."""
+        linked = ["""SELECT student_id, CASE WHEN acceptance_status='active' THEN 2 ELSE 1 END AS accepted
+                     FROM cycle_final_acceptances WHERE school_id=?"""]
+        enrolments = self._columns("student_school_enrolments")
+        if {"student_id", "school_id", "status", "enrolment_role"}.issubset(enrolments):
+            linked.append("""SELECT student_id,
+                CASE WHEN status='active' AND enrolment_role='current' THEN 2
+                     WHEN status='active' AND enrolment_role='upcoming' THEN -1
+                     ELSE 1 END AS accepted
+                FROM student_school_enrolments WHERE school_id=?""")
+        for table in ("offers", "offer_received_events"):
+            if {"school_id", "student_id"}.issubset(self._columns(table)):
+                linked.append(f"SELECT student_id, 0 AS accepted FROM {table} WHERE school_id=?")
+        visible = self.visibility.student_predicate("s")
+        students = self.connection.execute(
+            f"""WITH linked AS ({" UNION ALL ".join(linked)})
+                SELECT s.student_id,MAX(linked.accepted) AS accepted
+                FROM linked JOIN students s ON s.student_id=linked.student_id
+                WHERE {visible} GROUP BY s.student_id ORDER BY s.student_id""",
+            [school_id] * len(linked),
+        )
+        current_students = {row["student_id"] for row in current_rows}
+        history = [
+            {**dict(row), "student_name": self._student_display_name(row["student_id"])}
+            for row in students if row["student_id"] not in current_students
+        ]
+        claims = self.connection.execute(
+            f"""SELECT DISTINCT s.student_id,q.claim_number,q.claim_date,q.status
+                  FROM revenue_claims q
+                  JOIN revenue_claim_allocations allocation ON allocation.claim_id=q.id
+                  JOIN revenue_commission_instalments instalment ON instalment.id=allocation.commission_instalment_id
+                  JOIN revenue_commission_lines line ON line.id=instalment.commission_line_id
+                  JOIN revenue_enrolment_components ec ON ec.id=line.enrolment_component_id
+                  JOIN revenue_commercial_cases c ON c.id=ec.commercial_case_id
+                  JOIN cycle_final_acceptances a ON a.id=ec.final_acceptance_id
+                     AND a.application_cycle_id=c.application_cycle_id AND a.student_id=c.student_id
+                  JOIN students s ON s.student_id=c.student_id
+                 WHERE a.school_id=? AND q.revenue_entity_id=? AND line.revenue_entity_id=q.revenue_entity_id
+                   AND ec.component_kind='school' AND {visible}
+                 ORDER BY q.claim_date DESC,q.claim_number,s.student_id""",
+            (school_id, entity_id),
+        )
+        claim_history = [
+            {**dict(row), "student_name": self._student_display_name(row["student_id"])} for row in claims
+        ]
+        return history, claim_history
 
     def _student_display_name(self, student_id: str) -> str:
         if student_id in self._student_name_cache:

@@ -161,7 +161,7 @@ def _read_at(directory_fd, name, max_bytes, *, legacy=False):
         os.close(fd)
 
 
-def write_immutable(root, filename, payload):
+def write_immutable(root, filename, payload, *, writable_mount=None):
     """Publish a new immutable object, or validate exact secure existing bytes.
 
 After publication callers must NOT delete on DB rollback: another concurrent
@@ -170,7 +170,7 @@ future collection requires an independently authorized reference-safe policy.
 """
     name = _name(filename)
     if not isinstance(payload, bytes) or not payload: raise StorageUnavailable()
-    with _open_directory(root, create=True) as (path, directory_fd):
+    with _open_directory(root, create=True, writable_mount=writable_mount) as (path, directory_fd):
         try:
             existing = _read_at(directory_fd, name, len(payload))
         except FileNotFoundError:
@@ -216,7 +216,7 @@ future collection requires an independently authorized reference-safe policy.
         return path / name, created
 
 
-def read_secure(root, target, expected_sha256, expected_size, *, max_bytes=20 * 1024 * 1024):
+def read_secure(root, target, expected_sha256, expected_size, *, max_bytes=20 * 1024 * 1024, writable_mount=None):
     root, target = _path(root), _path(target)
     try:
         relative = target.relative_to(root)
@@ -225,9 +225,9 @@ def read_secure(root, target, expected_sha256, expected_size, *, max_bytes=20 * 
     if not relative.parts or type(expected_size) is not int or not 0 < expected_size <= max_bytes:
         raise StorageUnavailable()
     # Verify configured authority even when reading a nested document directory.
-    with _open_directory(root):
+    with _open_directory(root, writable_mount=writable_mount):
         pass
-    with _open_directory(target.parent) as (_, fd):
+    with _open_directory(target.parent, writable_mount=writable_mount) as (_, fd):
         data = _read_at(fd, _name(target.name), max_bytes)
     if len(data) != expected_size or hashlib.sha256(data).hexdigest() != expected_sha256:
         raise StorageUnavailable()

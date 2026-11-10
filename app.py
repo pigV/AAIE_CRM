@@ -244,19 +244,22 @@ from revenue.invoice_templates import CommissionInvoiceTemplates, PROFILE_DEFAUL
 from revenue.invoice_template_views import render_commission_invoice_templates
 from revenue.school_commission_pilot import (
     FORMAL_CONTRACT, FORMAL_DOCUMENTS, list_school_pilot_scopes, payer_matches, read_pilot_policy,
-    school_pilot_scope, set_school_pilot_stage,
+    has_active_school_commission_rule, school_pilot_scope, set_school_pilot_stage,
 )
-from revenue.multischool_views import school_configuration_data, render_configurable_preview
 from revenue.institution_commission_draft import InstitutionCommissionDraft
+from revenue.multischool_views import provider_commission_intake_data, school_configuration_data, render_configurable_preview
 from revenue.school_contract_pages import (
     CONFIRMED_ROOT, CONFIRMED_TITLE, DRAFT_ROOT, TARGET_FIELDS, UPLOAD_ROOT, UPLOAD_TITLE,
-    active_bound_school_contract, available_contract_targets, confirmed_contracts, confirmed_url,
-    pending_contracts, render_confirmed_contracts, render_contract_upload, uploaded_contract_targets,
+    confirmed_contracts, confirmed_url, render_confirmed_contracts, render_contract_upload,
+    pending_contracts, reviewed_school_terms, uploaded_contract_targets,
 )
-from revenue.state_school_commission import STATE_AUTHORITIES, authority_contracts, discarded_contract_upload
+from revenue.state_school_commission import STATE_AUTHORITIES, authority_contracts, discarded_contract_upload, school_commission_assignment
 from revenue.school_invoice_smtp import RehearsalSMTP
 from revenue.school_invoice_release import SENDER
-from revenue.school_invoice_mail import dispatch_next, mail_settings, mail_status, retry_mail, save_mail_release, save_mail_settings
+from revenue.school_invoice_mail import (
+    dispatch_next, mail_settings, mail_status,
+    retry_mail, save_mail_release, save_mail_settings,
+)
 from revenue.school_invoice_reminders import draft_reminder, invoice_overviews, record_reminder, reminder_history
 from revenue.school_invoice_views import (
     URL as SCHOOL_INVOICE_URL, render_school_invoice_detail, render_school_invoice_list,
@@ -2326,6 +2329,16 @@ def school_invoice_mail_rehearsal():
             and not SAFE_PRODUCTION_ACTIVE)
 
 
+def school_invoice_payer_mail_mode():
+    return "mock" if school_invoice_mock_enabled() else None
+
+
+def school_invoice_mock_enabled():
+    return (school_invoice_mail_rehearsal()
+            and os.environ.get("AAIE_SCHOOL_INVOICE_SMTP_TEST") != "1"
+            and not school_invoice_release_mode())
+
+
 def school_invoice_smtp_transport():
     if not school_invoice_mail_rehearsal() or os.environ.get("AAIE_SCHOOL_INVOICE_SMTP_TEST") != "1":
         return None
@@ -2392,9 +2405,11 @@ def school_commission_authority(user, stage, *, school_id=None, entity_id=None, 
         return False
     override = os.environ.get("AAIE_SCHOOL_COMMISSION_REHEARSAL_POLICY") if rehearsal else None
     pilot = read_pilot_policy(STAGING.root,"rehearsal" if rehearsal else "production",override)
+    if stage == "contract-intake" and pilot.self_service and school_invoice_payer_mail_mode():
+        pilot = replace(pilot, self_service=False)
     if not pilot.allows(user,stage):
         return False
-    if stage in {"setup", "contract-intake"}:
+    if stage in {"setup","contract-intake"}:
         return pilot
     connection = db.connect()
     try:
@@ -27230,14 +27245,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/mobile$", self.mobile_dashboard),
                 (r"^/revenue$", self.revenue_workspace),
                 (r"^/revenue/initialization$", self.revenue_initialization),
-                (r"^/revenue/(contracts/upload|contracts/manual-extraction|contracts/extraction/review|contracts/activate|contracts/school/(?:bind|upload|preview|activate|toorak-draft|toorak-preview|toorak-activate|configurable-draft|configurable-preview|configurable-activate|stage)|master-agent/import|master-agent/match/confirm|master-agent/invoice|master-agent/payment|direct-commission/claim|direct-commission/invoice|direct-commission/payment|billing/payment|billing/receipt|cases/tuition|cases/commencement)$", self.revenue_action),
+                (r"^/revenue/(contracts/upload|contracts/manual-extraction|contracts/extraction/review|contracts/activate|contracts/school/(?:bind|register|mail-recipient|upload|preview|activate|toorak-draft|toorak-preview|toorak-activate|toorak-analyze|toorak-review|configurable-draft|configurable-analyze|configurable-review|configurable-preview|configurable-activate|stage)|master-agent/import|master-agent/match/confirm|master-agent/invoice|master-agent/payment|direct-commission/claim|direct-commission/invoice|direct-commission/payment|billing/payment|billing/receipt|cases/tuition|cases/commencement)$", self.revenue_action),
                 (r"^/revenue/contracts/upload-school$", self.revenue_school_contract_upload),
                 (r"^/revenue/institution-commission-drafts/([^/]+)$", self.revenue_institution_commission_draft),
                 (r"^/revenue/vic-rcti/([a-z0-9-]+)(?:/([a-z0-9-]+))?$", self.revenue_vic_rcti),
                 (r"^/revenue/documents/([^/]+)/(view|download)$", self.revenue_document),
+                (r"^/revenue/school-commission-candidates(?:/(review|confirm))?$",
+                 self.revenue_school_claim_candidates),
                 (r"^/revenue/school-commission-invoices(?:/(preview|pdf|issue|delivery|payment|reconcile|reminder|reminder-sent|mail-settings|mail-retry))?$",
                  self.revenue_school_commission_invoices),
-                (r"^/revenue/commission-invoice-templates(?:/(save|publish|rollback|profile|preview))?$", self.revenue_commission_invoice_templates),
+                (r"^/revenue/commission-invoice-templates(?:/(save|rename|publish|rollback|profile|preview))?$", self.revenue_commission_invoice_templates),
                 (r"^/revenue/cases/([^/]+)/toorak-settlement/(delivery|payment|reconcile)$", self.revenue_case_toorak_settlement),
                 (r"^/revenue/cases/([^/]+)/toorak-claim/(evidence|preview|issue|invoice)$", self.revenue_case_toorak_claim),
                 (r"^/revenue/cases/([^/]+)/toorak-forecast/(preview|save)$", self.revenue_case_toorak_forecast),
@@ -28308,6 +28325,32 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return -1
 
     def _school_contract_authority(self, action):
+        form = getattr(self, "form", {})
+        if "education_authority" in form:
+            if (action != "configurable-draft" or "institution" not in form
+                    or form.get("education_authority") not in STATE_AUTHORITIES
+                    or "school_id" in form or "higher_education_provider_id" in form):
+                return False, "contract-intake"
+            intake = school_commission_authority(self.user, "contract-intake")
+            allowed = intake and form["education_authority"] in intake.education_authorities
+            return (intake if allowed else False), "contract-intake"
+        if "higher_education_provider_id" in form:
+            if "school_id" in form or action not in {"register","configurable-draft"}:
+                return False, "contract-intake"
+            return school_commission_authority(self.user,"contract-intake") or False, "contract-intake"
+        if action == "mail-recipient":
+            school_id = self._school_commission_scope_id("school_id")
+            if school_id and school_id > 0 and school_invoice_payer_mail_mode():
+                scope = school_commission_authority(self.user, "contracts", school_id=school_id)
+                if scope:
+                    return scope, "contracts"
+            return False, "contracts"
+        if action == "register":
+            intake = school_commission_authority(self.user, "contract-intake")
+            if intake:
+                return intake, "contract-intake"
+            setup = school_commission_authority(self.user, "setup")
+            return (setup if setup and setup.simulation else False), "setup"
         if action in {"bind","stage"}:
             setup = school_commission_authority(self.user,"setup")
             if setup:
@@ -28316,10 +28359,29 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return (None,"contracts") if legacy is None and action=="bind" else (False,"setup")
         if action.startswith("configurable-"):
             school_id = self._school_commission_scope_id("school_id")
+            if form.get("onboarding") == "1":
+                if action == "configurable-draft" and school_id and school_id > 0:
+                    intake = school_commission_authority(self.user, "contract-intake")
+                    if intake and school_id != intake.school_id:
+                        return replace(intake, school_id=school_id, entity_id=0), "contract-intake"
+                setup = school_commission_authority(self.user, "setup")
+                if setup and setup.simulation and school_id and school_id > 0:
+                    return replace(setup, school_id=school_id, entity_id=0), "setup"
+                return False, "setup"
             scope = school_commission_authority(self.user,"contracts",school_id=school_id)
-            return (scope,"contracts") if school_id and scope and scope.self_service else (False,"contracts")
+            allowed = bool(school_id and scope and (scope.self_service or scope.toorak_draft_release))
+            if action in {"configurable-analyze", "configurable-review"}:
+                allowed = allowed and (scope.toorak_draft_release or bool(
+                    STAGING and getattr(STAGING, "mode", "staging") == "staging" and scope.simulation
+                ))
+            return (scope, "contracts") if allowed else (False, "contracts")
         scope = school_commission_authority(self.user,"contracts")
-        if scope and action not in {"toorak-draft","toorak-preview","toorak-activate"}:
+        if scope and scope.toorak_draft_release and action in {"toorak-draft", "toorak-preview", "toorak-activate"}:
+            return False, "contracts"
+        if (action in {"toorak-analyze", "toorak-review"} and (not scope or not STAGING or not scope.simulation)) or (
+            scope and action not in {"toorak-draft", "toorak-preview", "toorak-activate",
+                                     "toorak-analyze", "toorak-review"}
+        ):
             return False,"contracts"
         return scope,"contracts"
 
@@ -28333,14 +28395,26 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 setup = school_commission_authority(self.user,"setup")
                 requested_school = self._school_commission_scope_id("school_id")
                 pilot = school_commission_authority(self.user,"contracts")
-                if setup:
+                intake = school_commission_authority(self.user,"contract-intake")
+                configuration_scope = setup or intake or (pilot if pilot and pilot.toorak_draft_release else None)
+                if configuration_scope:
                     data["multischool_commission"] = school_configuration_data(
-                        connection,setup,requested_school,model._selection(self.query),
+                        connection,configuration_scope,requested_school,model._selection(self.query),
+                        add_school=bool((setup or intake) and self.query.get("add_school") == ["1"]),
+                        school_search=(self.query.get("school_search") or [""])[0],
+                        mock_mail=school_invoice_mock_enabled(),
                     )
+                    provider_id = self._school_commission_scope_id("higher_education_provider_id")
+                    if intake and (provider_id or self.query.get("provider_catalog") == ["1"]):
+                        data["multischool_commission"]["provider_intake"] = provider_commission_intake_data(
+                            connection,intake.simulation,provider_id,model._selection(self.query),
+                            (self.query.get("provider_search") or [""])[0],
+                        )
                 if pilot is not False and (not requested_school or not setup or requested_school==setup.school_id):
                     data["school_commission"] = model.school_commission_configuration(
                         model._selection(self.query),pilot=pilot,
                     )
+                    data["school_commission"]["allow_contract_analysis"] = bool(STAGING and pilot and pilot.simulation)
                     data["school_commission"]["allow_invoicing"] = (
                         school_commission_authority(self.user,"invoicing") is not False
                     )
@@ -28382,10 +28456,26 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if method != "GET":
             return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
         data = self._revenue_dashboard_data()
-        if school_commission_authority(self.user, "contract-intake"):
-            data["workspace_links"] = [
-                link for link in data["workspace_links"] if link["href"] != CONFIRMED_ROOT
-            ] + [{"href": CONFIRMED_ROOT, "label": CONFIRMED_TITLE}, {"href": UPLOAD_ROOT, "label": UPLOAD_TITLE}]
+        contract_scope = school_commission_authority(self.user, "setup") or school_commission_authority(
+            self.user, "contracts"
+        )
+        intake = school_commission_authority(self.user, "contract-intake")
+        authority_open = bool(intake and intake.education_authorities)
+        if authority_open:
+            data["school_contract_links"] = ((CONFIRMED_TITLE, CONFIRMED_ROOT), (UPLOAD_TITLE, UPLOAD_ROOT))
+            data["workspace_links"] = [link for link in data["workspace_links"] if link["key"] != "contracts"]
+            data["quick_actions"] = [action for action in data["quick_actions"] if action["key"] != "register_contract"]
+        elif contract_scope and (contract_scope.self_service or contract_scope.toorak_draft_release):
+            data["school_contract_href"] = (
+                f"/revenue/contracts?school_id={contract_scope.school_id}#school-commission-contracts"
+            )
+        template_pilot, _ = self._commission_invoice_template_scope()
+        if template_pilot is not False:
+            data["commission_invoice_template_href"] = "/revenue/commission-invoice-templates"
+        if not authority_open and self._school_claim_candidates_base():
+            data["workspace_links"] = [*data["workspace_links"], {
+                "label": "学校佣金申领清单", "href": "/revenue/school-commission-candidates",
+            }]
         body = render_revenue_workspace(data, csrf=self.csrf, mobile=False)
         return self.send_html(
             page("收入与佣金", body, self.user, self.csrf,
@@ -28398,17 +28488,19 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if method != "GET":
             return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
         if workspace_name == "contracts":
-            pilot = school_commission_authority(self.user, "contract-intake")
-            if pilot and not (self.query.get("filter") or self.query.get("contract")):
-                target = next(((kind, self.query[field][0] if kind == "authority"
-                                else self._school_commission_scope_id(field))
-                               for kind, field in TARGET_FIELDS.items() if self.query.get(field)), None)
-                if target and target[0] == "authority" and target[1] not in pilot.education_authorities:
-                    return self.error_page("州／领地教育局尚未开放。", HTTPStatus.FORBIDDEN)
-                if self._revenue_confirmed_school_contracts(pilot, target):
-                    return
-                if target and target[0] != "school":
-                    return self.error_page("该机构暂无已确认的佣金合同。", HTTPStatus.NOT_FOUND)
+            intake = school_commission_authority(self.user, "contract-intake")
+            state = (self.query.get("education_authority") or [""])[0]
+            if state and (not intake or state not in intake.education_authorities):
+                return self.error_page("州／领地教育局尚未开放。", HTTPStatus.FORBIDDEN)
+            if intake and intake.education_authorities:
+                if self.query.get("add_school") == ["1"] or self.query.get("provider_catalog") == ["1"]:
+                    return self.redirect(UPLOAD_ROOT)
+                if "school_id" in self.query and "contract" in self.query:
+                    return self.redirect(UPLOAD_ROOT + "?" + urlencode(self.query, doseq=True))
+                if not (self.query.get("filter") or self.query.get("contract")) or any(
+                    key in self.query for key in TARGET_FIELDS.values()
+                ):
+                    return self._revenue_school_contract_page(intake, upload=False)
         explicit_case_surface = workspace_name == "cases"
         data = self._revenue_workspace_data(workspace_name)
         body = render_revenue_workspace_page(
@@ -28436,60 +28528,41 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.send_html(document, presentation_surface="desktop")
         return self.send_html(document)
 
-    def revenue_school_contract_upload(self, method):
-        if method not in {"GET", "POST"}:
-            return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
+    def _upload_school_contract_post(self):
         pilot = school_commission_authority(self.user, "contract-intake")
-        if not pilot or (method == "POST" and self.request_view_mode() == MOBILE_MODE):
+        if not pilot or self.request_view_mode() == MOBILE_MODE:
             return self.error_page("当前账号无权登记佣金合同。", HTTPStatus.FORBIDDEN)
         connection = db.connect()
         try:
-            if method == "POST":
-                self._begin_school_commission_write(connection, pilot, "contract-intake")
-                kind, sep, value = str(self.form.get("institution") or "").partition(":")
-                if not sep or kind not in TARGET_FIELDS:
-                    raise ValueError("请选择学校或教育局。")
-                target = (kind, value if kind == "authority" else int(value))
-                renewal = self.form.get("renewal") == "1"
-                if renewal and kind != "authority":
-                    raise ValueError("请从已确认的教育局合同发起续约。")
-                if not renewal and target in uploaded_contract_targets(connection, pilot.simulation):
-                    raise ValueError("该机构已上传佣金合同，请打开原合同。")
-                upload = next((item for item in self.files if item.field_name == "contract_file" and item.filename), None)
-                if upload is None:
-                    raise ValueError("请选择签署合同 PDF。")
-                actions = RevenueUIActions(connection, None, int(self.user["id"]), self.user["role_name"],
-                                           school_pilot=replace(pilot, school_id=target[1], entity_id=0)
-                                           if kind == "school" else pilot)
-                form = {TARGET_FIELDS[kind]: str(target[1]), "signed_confirmed": "1",
-                        "idempotency_key": self.form.get("idempotency_key"), "renewal": self.form.get("renewal")}
-                if kind == "authority":
-                    draft = actions.upload_authority_commission_draft(form, upload)
-                elif kind == "provider":
-                    draft = actions.upload_provider_commission_draft(form, upload, register=True)
-                else:
-                    draft = actions.upload_configurable_school_draft(form, upload, register=True)
-                connection.commit()
-                return self.flash_redirect(
-                    f"{DRAFT_ROOT}/{quote(draft['uid'], safe='')}?contract_only=1",
-                    "合同已上传，请核对佣金条款。", "success",
-                )
-            state = (self.query.get("education_authority") or [""])[0]
-            pending = pending_contracts(connection, pilot, int(self.user["id"]))
-            if state:
-                if state not in pilot.education_authorities:
-                    return self.error_page("州／领地教育局尚未开放。", HTTPStatus.FORBIDDEN)
-                versions = authority_contracts(connection, state, pilot.simulation)
-                if not any(terms for _, terms in versions):
-                    return self.error_page("找不到可续约的教育局合同。", HTTPStatus.NOT_FOUND)
-                if uid := next((uid for uid, terms in versions if not terms), None):
-                    return self.redirect(f"{DRAFT_ROOT}/{quote(uid, safe='')}?contract_only=1")
-                schools, providers, authorities = (), (), [(state, STATE_AUTHORITIES[state])]
+            self._begin_school_commission_write(connection, pilot, "contract-intake")
+            kind, sep, value = str(self.form.get("institution") or "").partition(":")
+            if not sep or kind not in TARGET_FIELDS:
+                raise ValueError("请选择学校或教育局。")
+            target = (kind, value if kind == "authority" else int(value))
+            renewal = self.form.get("renewal") == "1"
+            if renewal and kind != "authority":
+                raise ValueError("请从已确认的教育局合同发起续约。")
+            if not renewal and target in uploaded_contract_targets(connection, pilot.simulation):
+                raise ValueError("该机构已上传佣金合同，请打开原合同。")
+            upload = next((item for item in self.files if item.field_name == "contract_file" and item.filename), None)
+            if upload is None:
+                raise ValueError("请选择签署合同 PDF。")
+            actions = RevenueUIActions(connection, None, int(self.user["id"]), self.user["role_name"],
+                                       school_pilot=replace(pilot, school_id=target[1], entity_id=0)
+                                       if kind == "school" else pilot)
+            form = {TARGET_FIELDS[kind]: str(target[1]), "signed_confirmed": "1",
+                    "idempotency_key": self.form.get("idempotency_key"), "renewal": self.form.get("renewal")}
+            if kind == "authority":
+                draft = actions.upload_authority_commission_draft(form, upload)
+            elif kind == "provider":
+                draft = actions.upload_provider_commission_draft(form, upload, register=True)
             else:
-                schools, providers, authorities = available_contract_targets(connection, pilot)
-            body = render_contract_upload(schools, providers, self.csrf, new_token(), authorities=authorities,
-                                          renewal=bool(state), pending=pending)
-            return self._send_school_contract_page(UPLOAD_TITLE, body)
+                draft = actions.upload_configurable_school_draft(form, upload, register=True)
+            connection.commit()
+            return self.flash_redirect(
+                f"{DRAFT_ROOT}/{quote(draft['uid'], safe='')}?contract_only=1",
+                "合同已上传，请核对佣金条款。", "success",
+            )
         except StorageUnavailable:
             connection.rollback()
             return self.error_page(StorageUnavailable.message, HTTPStatus.SERVICE_UNAVAILABLE)
@@ -28504,111 +28577,145 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         finally:
             db._release_connection(connection)
 
-    def _revenue_confirmed_school_contracts(self, pilot, target):
-        connection = db.connect()
-        try:
-            bound_scope = school_commission_authority(self.user, "contracts")
-            bound = active_bound_school_contract(connection, bound_scope) if bound_scope else {}
-            schools = confirmed_contracts(connection, pilot, int(self.user["id"]), active_schools=bound)
-            if target and target not in schools:
-                return False
-            rcti_uid = None
-            if target == ("authority", "VIC"):
-                from revenue.vic_rcti import PAYMENT
-                from revenue.vic_rcti_reconciliation import ready
-
-                latest = next(((uid, json.loads(payload)) for uid, payload in authority_contracts(connection, "VIC", pilot.simulation)
-                               if payload), None)
-                if latest and latest[1].get("payment_mode") == PAYMENT and ready(connection):
-                    rcti_uid = latest[0]
-            self._send_school_contract_page(CONFIRMED_TITLE, render_confirmed_contracts(schools, target, rcti_uid=rcti_uid))
-            return True
-        finally:
-            db._release_connection(connection)
-
-    def _send_school_contract_page(self, title, body, status=HTTPStatus.OK):
-        message, kind = self.message()
-        return self.send_html(page(title, body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status(),
-                                   message=message, message_kind=kind),
-                              status, headers=[("Cache-Control", "private, no-store")],
-                              presentation_surface="desktop")
-
-    def revenue_institution_commission_draft(self, method, draft_uid):
-        if method not in {"GET", "POST"}:
+    def revenue_school_contract_upload(self, method):
+        if method == "POST":
+            return self._upload_school_contract_post()
+        if method != "GET":
             return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
-        pilot = school_commission_authority(self.user, "contract-intake")
-        if not pilot or (method == "POST" and self.request_view_mode() == MOBILE_MODE):
-            return self.error_page("当前账号无权使用佣金草稿。", HTTPStatus.FORBIDDEN)
-        operation = self.form.get("operation") if method == "POST" else None
-        if (method == "POST" and operation not in {"terms", "discard", "evidence"}) or any(key in self.query for key in ("invoice", "pdf")):
-            return self.error_page("请选择有效的合同操作。", HTTPStatus.BAD_REQUEST)
+        intake = school_commission_authority(self.user, "contract-intake")
+        if not intake or not intake.education_authorities:
+            return self.error_page("州／领地教育局合同入口尚未开放。", HTTPStatus.FORBIDDEN)
+        return self._revenue_school_contract_page(intake, upload=True)
 
-        from document_ocr import extract_pdf_pages
-        from revenue.institution_commission_draft_views import render_vic_estimates, render_workflow
-        from revenue.vic_rcti import PAYMENT
-        from revenue.vic_rcti_reconciliation import VicReconciliation, ready as vic_rcti_ready
+    def _revenue_school_contract_page(self, intake, *, upload):
+        from html import escape
+        from revenue.views import render_contract_analysis
 
-        def ocr(pdf, indexes):
-            return extract_pdf_pages(pdf, indexes, data_root=STAGING.root, source_root=SOURCE_DIR,
-                                     staging=pilot.simulation, diagnostics={})
-
+        pilot = school_commission_authority(self.user, "contracts")
         connection = db.connect()
         try:
-            if method == "POST":
-                self._begin_school_commission_write(connection, pilot, "contract-intake")
-            workflow = InstitutionCommissionDraft(RevenueRepository(connection), pilot, draft_uid, int(self.user["id"]))
-            terms = workflow.terms()
-            vic_terms = (workflow.target == ("authority", "VIC") and terms
-                         and terms.get("payment_mode") == PAYMENT and vic_rcti_ready(connection))
-            contract_only = self.query.get("contract_only") == ["1"]
-            if method == "POST":
-                key = str(self.form.get("idempotency_key") or "")
-                if operation == "evidence":
-                    if not vic_terms or contract_only or self.form.get("terms_revision") != terms["revision"]:
-                        raise ValueError("请刷新并核对当前维州 RCTI 合同版本。")
-                    reconciliation = VicReconciliation(workflow)
-                    reconciliation.remember_differences()
-                    workflow.confirm_student_evidence(self.form, terms, key)
-                    reconciliation.remember_differences()
-                    connection.commit()
-                    return self.redirect(f"{DRAFT_ROOT}/{quote(workflow.uid, safe='')}")
-                if operation == "discard":
-                    workflow.discard(key)
-                    connection.commit()
-                    return self.flash_redirect(UPLOAD_ROOT, "已删除本次上传，请选择学校并上传正确的合同。", "success")
-                if terms:
-                    raise ValueError("合同确认版本已更新，请刷新页面。")
-                analysis = workflow.analyse(ocr)
-                try:
-                    workflow.confirm(self.form, analysis, key)
-                except ValueError as problem:
-                    connection.rollback()
-                    detail = str(problem)
-                    body = render_workflow(workflow, self.csrf, new_token(), analysis=analysis, form=self.form,
-                                           error=detail if re.search(r"[\u4e00-\u9fff]", detail) else "无法保存，请核对合同条款。")
-                    return self._send_school_contract_page("核对佣金合同", body, HTTPStatus.BAD_REQUEST)
-                connection.commit()
-                return self.redirect(confirmed_url(workflow.target))
-            if terms:
-                if vic_terms and not contract_only:
-                    body = render_vic_estimates(workflow, terms, self.csrf, new_token())
-                    return self._send_school_contract_page("维州预计佣金", body)
-                return self.redirect(confirmed_url(workflow.target))
-            body = render_workflow(workflow, self.csrf, new_token(), analysis=workflow.analyse(ocr))
-            return self._send_school_contract_page("核对佣金合同", body)
-        except LookupError:
-            connection.rollback()
-            return self.error_page("找不到该合同草稿，或该上传已删除。", HTTPStatus.NOT_FOUND)
-        except PermissionError:
-            connection.rollback()
-            return self.error_page("当前账号无权使用此佣金草稿。", HTTPStatus.FORBIDDEN)
-        except (ValueError, sqlite3.Error) as problem:
-            connection.rollback()
-            detail = str(problem) if isinstance(problem, ValueError) else ""
-            return self.error_page(detail if re.search(r"[\u4e00-\u9fff]", detail) else "无法保存，请核对合同状态。",
-                                   HTTPStatus.BAD_REQUEST)
+            bound = {}
+            if pilot:
+                for key, _ in school_configuration_data(connection, pilot, None, "")["schools"]:
+                    info = school_configuration_data(connection, pilot, key, "")
+                    if info["scope"]:
+                        bound[key] = info
+            if upload:
+                renewal = (self.query.get("education_authority") or [""])[0]
+                if renewal:
+                    if renewal not in intake.education_authorities:
+                        return self.error_page("州／领地教育局尚未开放。", HTTPStatus.FORBIDDEN)
+                    versions = authority_contracts(connection, renewal, intake.simulation)
+                    if not any(payload for _, payload in versions):
+                        return self.error_page("找不到可续约的教育局合同。", HTTPStatus.NOT_FOUND)
+                    if pending := next((uid for uid, payload in versions if not payload), None):
+                        return self.redirect(f"{DRAFT_ROOT}/{quote(pending, safe='')}?contract_only=1")
+                catalog = school_configuration_data(connection, intake, None, "", add_school=True)
+                schools = dict(catalog["available_schools"])
+                schools.update((key, name) for key, name in catalog["schools"] if key != intake.school_id)
+                schools.update((key, info["school_name"]) for key, info in bound.items()
+                               if info["scope"].enabled and (info["scope"].toorak_draft_release
+                                   or (info["scope"].self_service and info["scope"].simulation)))
+                providers = provider_commission_intake_data(connection, intake.simulation, None, "", "")
+                provider_choices = {key: name for key, name, _ in providers["available"]}
+                provider_choices.update((row["id"], row["provider_name"]) for row in providers["registered"] if not row["bound"])
+                selected = self._school_commission_scope_id("school_id")
+                draft_uid = (self.query.get("contract") or [""])[0]
+                token = new_token()
+                title = UPLOAD_TITLE
+                if selected and draft_uid:
+                    info = bound.get(selected)
+                    draft = school_configuration_data(connection, pilot, selected, draft_uid) if info else {}
+                    if not draft.get("review_state"):
+                        return self.error_page("找不到该学校的合同条款。", HTTPStatus.NOT_FOUND)
+                    uid, document, _ = draft["draft"]
+                    review = (f'<h2>{escape(info["school_name"])} · 核对佣金条款</h2>'
+                              f'<p><a href="/revenue/documents/{quote(document, safe="")}/view">查看原合同 PDF</a></p>'
+                              + render_contract_analysis({"uid": uid, "document_uid": document, **draft["review_state"]},
+                                                         self.csrf, token, school_id=selected, compact=True))
+                    body = f'<main class="revenue-workspace"><section class="revenue-panel">{review}</section></main>'
+                else:
+                    uploaded = uploaded_contract_targets(connection, intake.simulation)
+                    public_schools = {key for key, (sector, state) in school_commission_assignment(connection).items()
+                                      if sector == "public" and state in intake.education_authorities}
+                    authority_choices = ((renewal, STATE_AUTHORITIES[renewal]),) if renewal else (
+                        (key, STATE_AUTHORITIES[key]) for key in intake.education_authorities
+                        if ("authority", key) not in uploaded
+                    )
+                    pending = pending_contracts(connection, intake, int(self.user["id"]))
+                    body = render_contract_upload(
+                        () if renewal else ((key, name) for key, name in schools.items()
+                                            if key not in public_schools and ("school", key) not in uploaded),
+                        () if renewal else ((key, name) for key, name in provider_choices.items()
+                                            if ("provider", key) not in uploaded),
+                        self.csrf, token, authorities=authority_choices, renewal=bool(renewal),
+                        pending=pending,
+                    )
+            else:
+                target = next(((kind, self.query[key][0] if kind == "authority"
+                                else self._school_commission_scope_id(key))
+                               for kind, key in TARGET_FIELDS.items() if key in self.query), None)
+                schools = confirmed_contracts(connection, intake, int(self.user["id"]), active_schools=bound)
+                if target is not None and target not in schools:
+                    return self.error_page("该学校暂无已确认的佣金合同。", HTTPStatus.NOT_FOUND)
+                title = CONFIRMED_TITLE
+                mail_form = ""
+                authority_finance = ""
+                if target and target[0] == "authority":
+                    from revenue.authority_formal import authority_payer, authority_schema_ready
+                    from revenue.school_contract_pages import render_authority_finance
+
+                    terms = self._confirmed_authority_terms(connection, intake, target[1])
+                    from revenue import vic_rcti
+                    if terms and terms.get("payment_mode") == vic_rcti.PAYMENT:
+                        from revenue.vic_rcti_reconciliation import URL, ready
+                        authority_finance = "<p>" + vic_rcti.BLOCK_INVOICE + "</p>"
+                        if ready(connection):
+                            href = URL + "/" + quote(terms["uid"], safe="")
+                            authority_finance += (f'<p><a class="button-link primary" href="{href}">RCTI 对账</a></p>'
+                                                  '<p>上传单据后可核对差额并登记到账。</p>')
+                    elif terms and authority_schema_ready(connection):
+                        authority_finance = render_authority_finance(
+                            target[1], terms, authority_payer(connection, target[1]), self.csrf, new_token(),
+                        )
+                if target and school_invoice_payer_mail_mode():
+                    from revenue.authority_formal import authority_payer
+                    from revenue.school_contract_pages import DRAFT_ROOT, render_payer_mail_settings
+
+                    payer_id = None
+                    if target[0] == "school":
+                        scope = school_commission_authority(self.user, "contracts", school_id=target[1])
+                        if scope:
+                            payer_id = scope.entity_id
+                            action = "/revenue/contracts/school/mail-recipient"
+                            fields = {"school_id": target[1]}
+                    elif target[0] == "authority" and not (
+                        terms and terms.get("payment_mode") == vic_rcti.PAYMENT
+                    ):
+                        payer = authority_payer(connection, target[1])
+                        work = next((row[2] for row in schools[target]["confirmed"] if row[2]), None)
+                        if payer and work:
+                            payer_id = payer["id"]
+                            action = DRAFT_ROOT + "/" + quote(work, safe="")
+                            fields = {"operation": "payer-mail-settings"}
+                    if payer_id is not None:
+                        mail_form = render_payer_mail_settings(
+                            action, fields, mail_settings(connection, payer_id), self.csrf, new_token(),
+                            simulation=intake.simulation,
+                        )
+                claim_href = ""
+                if target and target[0] == "school":
+                    scope = school_commission_authority(self.user, "preview", school_id=target[1])
+                    if scope and scope.toorak_claim_drafts:
+                        claim_href = f"/revenue/school-commission-candidates?school_id={scope.school_id}"
+                body = render_confirmed_contracts(schools, target, mail_form=mail_form,
+                                                  authority_finance=authority_finance, claim_href=claim_href)
         finally:
             db._release_connection(connection)
+        message, message_kind = self.message()
+        return self.send_html(page(title, body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status(),
+                                   message=message, message_kind=message_kind),
+                              headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop")
 
     def revenue_initialization(self, method):
         if not is_revenue_admin(self.user):
@@ -28707,31 +28814,78 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def _begin_school_commission_write(self, connection, pilot, stage):
         connection.execute("BEGIN IMMEDIATE")
-        scope_args = {"school_id":pilot.school_id,"entity_id":pilot.entity_id} if pilot and stage!="setup" else {}
-        if pilot and school_commission_authority(self.user,stage,**scope_args)!=pilot:
+        setup_stage = stage in {"setup","contract-intake"}
+        scope_args = {"school_id":pilot.school_id,"entity_id":pilot.entity_id} if pilot and not setup_stage else {}
+        current = school_commission_authority(self.user, stage, **scope_args) if pilot else None
+        if current and setup_stage and pilot.entity_id == 0:
+            current = replace(current, school_id=pilot.school_id, entity_id=0)
+        if pilot and current != pilot:
             raise ValueError("试点配置已变更，请刷新后重试。")
 
-    def revenue_commission_invoice_templates(self, method, operation):
-        pilot = school_commission_authority(self.user,"invoicing",entity_id=self._school_commission_scope_id("entity_id"))
+    def _confirmed_authority_terms(self, connection, intake, state):
+        if not intake or state not in intake.education_authorities:
+            return None
+        return next((json.loads(value) for _, value in authority_contracts(connection, state, intake.simulation)
+                     if value), None)
+
+    def _commission_invoice_template_scope(self, entity_id=None):
+        stage = "invoicing"
+        pilot = school_commission_authority(self.user, stage, entity_id=entity_id)
         if pilot is False:
-            return self.error_page("学校佣金开票阶段未开放或无权限。",HTTPStatus.FORBIDDEN)
+            preview = school_commission_authority(self.user, "preview", entity_id=entity_id)
+            if preview and (preview.toorak_draft_release or (preview.simulation and preview.stage == "preview")):
+                check = db.connect()
+                try:
+                    if school_invoice_smtp_payer(check, preview):
+                        pilot, stage = preview, "preview"
+                finally:
+                    db._release_connection(check)
+        return pilot, stage
+
+    def revenue_commission_invoice_templates(self, method, operation):
+        entity_id = self._school_commission_scope_id("entity_id")
+        state = (self.query.get("education_authority") or [""])[0]
+        if "education_authority" in self.query:
+            pilot, stage = school_commission_authority(self.user, "contract-intake"), "contract-intake"
+            if entity_id is not None or not pilot or state not in pilot.education_authorities:
+                return self.error_page("无权配置该教育局发票。", HTTPStatus.FORBIDDEN)
+        else:
+            pilot, stage = self._commission_invoice_template_scope(entity_id)
+            if pilot is False:
+                return self.error_page("学校佣金开票阶段未开放或无权限。",HTTPStatus.FORBIDDEN)
         if method != ("GET" if operation in (None, "preview") else "POST"):
             return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
         route = "/revenue/commission-invoice-templates"
         connection = db.connect()
         try:
+            if pilot and method == "POST":
+                self._begin_school_commission_write(connection, pilot, stage)
+            payer = None
+            if state:
+                from revenue.authority_formal import authority_payer, authority_schema_ready
+
+                terms = self._confirmed_authority_terms(connection, pilot, state)
+                payer = authority_payer(connection, state) if terms and authority_schema_ready(connection) else None
+                if not payer or payer["legal_name"] != terms["payer"]:
+                    return self.error_page("请先确认教育局合同并登记对应付款主体。", HTTPStatus.FORBIDDEN)
             actions = RevenueUIActions(connection, None, int(self.user["id"]), self.user["role_name"])
-            options = {"formal":True,"simulation":pilot.simulation,"entity_id":pilot.entity_id} if pilot else {}
+            options = {"formal":True,"simulation":pilot.simulation,
+                       "entity_id":payer["id"] if payer else pilot.entity_id} if pilot else {}
             editor = CommissionInvoiceTemplates(actions.service,int(self.user["id"]),self.user["role_name"],**options)
             selected = (self.query.get("version") or [""])[0]
+            preview_version = (self.query.get("preview_version") or [""])[0]
             if operation is None:
                 body = render_commission_invoice_templates(editor.state(selected),self.csrf,new_token(),
-                                                           entity_id=pilot.entity_id if pilot and pilot.self_service else None)
+                                                           entity_id=pilot.entity_id if pilot and (pilot.self_service or stage == "preview") else None,
+                                                           open_finance=stage == "preview" or bool(payer),
+                                                           preview_version=preview_version,
+                                                           authority_state=state or None,
+                                                           authority_name=payer["legal_name"] if payer else None)
                 return self.send_html(page("佣金发票模板",body,self.user,self.csrf,REVENUE_MODULE_KEY,nas.status()),
                                       headers=[("Cache-Control","no-store")],presentation_surface="desktop")
             if operation == "preview":
                 if pilot and (self.query.get("sample") or [""])[0]=="1":
-                    payload = editor.preview_sample(selected)
+                    payload = editor.preview_sample(selected, authority_name=payer["legal_name"]) if payer else editor.preview_sample(selected)
                 else:
                     payload = editor.preview((self.query.get("invoice") or [""])[0],selected)
                 self.send_response(HTTPStatus.OK)
@@ -28743,8 +28897,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(payload)
                 return
-            if pilot:
-                self._begin_school_commission_write(connection,pilot,"invoicing")
             key = str(self.form.get("idempotency_key") or "")
             if operation == "save":
                 raw = str(self.form.get("layout_json") or "")
@@ -28752,8 +28904,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     raise ValueError("模板字段过长。")
                 upload = next((f for f in self.files if f.field_name=="template_logo" and f.filename),None)
                 version = editor.save(json.loads(raw),key,base_uid=str(self.form.get("base_uid") or ""),
-                                      logo=upload.data if upload else None,remove_logo=self.form.get("remove_logo")=="1")
+                                      logo=upload.data if upload else None,remove_logo=self.form.get("remove_logo")=="1",
+                                      name=self.form.get("version_name",""))
                 selected = version["uid"]
+            elif operation == "rename":
+                selected = str(self.form.get("version_uid") or "")
+                editor.rename(selected,self.form.get("version_name",""),key)
             elif operation == "profile":
                 profile_fields = editor.profile_fields if pilot else PROFILE_DEFAULT
                 approval = {"approved":self.form.get("approved")=="1"} if pilot else {}
@@ -28763,6 +28919,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             else:
                 selected = str(self.form.get("version_uid") or "")
                 editor.publish(selected,str(self.form.get("expected_active") or ""),key,rollback=operation=="rollback")
+                preview_version = selected
+                selected = str(self.form.get("return_version", selected))
             connection.commit()
         except (ValueError,TypeError,sqlite3.Error) as error:
             connection.rollback()
@@ -28772,9 +28930,111 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         finally:
             db._release_connection(connection)
         params = {"version":selected} if selected else {}
-        if pilot and pilot.self_service:
+        if state:
+            params["education_authority"] = state
+        elif pilot and (pilot.self_service or stage == "preview"):
             params["entity_id"] = pilot.entity_id
-        return self.redirect(route+("?"+urlencode(params) if params else ""))
+        if preview_version:
+            params["preview_version"] = preview_version
+        anchor = "#invoice-template-preview" if operation in {"publish", "rollback"} else ""
+        return self.redirect(route+("?" + urlencode(params) if params else "")+anchor)
+
+    def _school_claim_candidates_base(self):
+        if (not STAGING or self.request_view_mode() == MOBILE_MODE
+                or not can_perform_revenue_action(self.user, "school-claim-candidates")):
+            return None
+        pilot = school_commission_authority(self.user, "setup") or school_commission_authority(self.user, "contracts")
+        return pilot if pilot and (pilot.simulation or pilot.toorak_claim_drafts) else None
+
+    def revenue_school_claim_candidates(self, method, operation):
+        from revenue.school_claim_candidates import SchoolClaimCandidates
+        from revenue.views import render_school_claim_candidates, render_school_claim_draft
+
+        base = self._school_claim_candidates_base()
+        if not base:
+            return self.error_page("学校佣金申领清单仅开放给隔离测试管理员。", HTTPStatus.FORBIDDEN)
+        if method != ("GET" if operation is None else "POST"):
+            return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
+        school_id = self._school_commission_scope_id("school_id")
+        scope = school_commission_authority(self.user, "contracts", school_id=school_id) if school_id else None
+        can_generate = bool(scope and (scope.toorak_claim_drafts or (scope.simulation and scope.stage == "preview")))
+        connection = db.connect()
+        generated = draft = None
+        finance_entity_id = None
+        try:
+            if operation == "confirm" and can_generate:
+                self._begin_school_commission_write(connection, scope, "preview")
+            else:
+                connection.execute("BEGIN")
+            schools = {
+                scope.school_id: connection.execute("SELECT school_name FROM schools WHERE id=?", (scope.school_id,)).fetchone()[0]
+                for scope in list_school_pilot_scopes(connection, base)
+                if scope.allows(self.user, "contracts") and payer_matches(scope, connection)
+                and (scope.school_id == base.school_id or has_active_school_commission_rule(connection, scope))
+            }
+            if (school_id is not None or operation) and school_id not in schools:
+                return self.error_page("请选择试点范围内的学校。", HTTPStatus.FORBIDDEN)
+            rows, selection = [], None
+            student_history, claim_history = [], []
+            if school_id:
+                if not scope or not (scope.simulation or scope.toorak_claim_drafts):
+                    return self.error_page("学校佣金试点阶段未开放或无权限。", HTTPStatus.FORBIDDEN)
+                actions = RevenueUIActions(connection, None, int(self.user["id"]), self.user["role_name"],
+                                           legacy_document_root=Path(db.path).parent / "revenue_documents",
+                                           school_pilot=scope)
+                issuer = actions._toorak_claims()
+                candidates = SchoolClaimCandidates(issuer, toorak_draft_release=scope.toorak_claim_drafts)
+                if can_generate and school_invoice_smtp_payer(connection, scope):
+                    finance_entity_id = scope.entity_id
+                gst_mode = str(self.form.get("gst_mode") or "") if finance_entity_id and operation else None
+                if operation is None:
+                    rows = candidates.list()
+                    student_history, claim_history = candidates.model.school_commission_student_history(
+                        scope.school_id, scope.entity_id, rows,
+                    )
+                else:
+                    selected = self.form.get("components") or []
+                    if isinstance(selected, str):
+                        selected = [selected]
+                    if operation == "review":
+                        selection = candidates.review(selected, gst_mode=gst_mode)
+                    else:
+                        digest = str(self.form.get("preview_digest") or "")
+                        reviewed = self.form.get("reviewed") == "1"
+                        row_digests = {uid: self.form.get("revision_" + uid) for uid in selected}
+                        if can_generate:
+                            if scope.toorak_claim_drafts:
+                                from revenue.invoice_templates import current_invoice_template_revisions
+                                if not all(current_invoice_template_revisions(
+                                    connection, formal=True, entity_id=scope.entity_id, simulation=False,
+                                )):
+                                    raise ValueError("请先发布正式发票模板并批准财务资料。")
+                            if finance_entity_id and not gst_mode:
+                                raise ValueError("请选择本张发票的 GST 方式并重新复核。")
+                            generated = candidates.generate(selected, digest, reviewed=reviewed,
+                                                            row_digests=row_digests, gst_mode=gst_mode)
+                            draft = issuer.invoice_preview(scope.entity_id, [row["uid"] for row in generated["claims"]])
+                            connection.commit()
+                        else:
+                            selection = candidates.confirm(selected, digest, reviewed=reviewed, row_digests=row_digests)
+        except (ValueError, sqlite3.Error) as error:
+            return self.error_page(SchoolClaimCandidates._message(error), HTTPStatus.CONFLICT)
+        finally:
+            connection.rollback()
+            db._release_connection(connection)
+        if generated:
+            body = render_school_claim_draft(
+                generated, draft, self.csrf, new_token(), simulation=base.simulation,
+                allow_issue=scope.allows(self.user, "invoicing"),
+            )
+        else:
+            body = render_school_claim_candidates(
+                schools, school_id, rows, self.csrf, selection=selection, confirmed=operation == "confirm",
+                can_generate=can_generate, simulation=base.simulation, finance_entity_id=finance_entity_id,
+                student_history=student_history, claim_history=claim_history,
+            )
+        return self.send_html(page("学校佣金申领清单", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                              headers=[("Cache-Control", "no-store")], presentation_surface="desktop")
 
     def revenue_school_commission_invoices(self, method, operation):
         settlement_operation = operation in {"delivery","payment","reconcile"}
@@ -28796,7 +29056,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         connection = db.connect()
         try:
             mail_release = school_invoice_release_for(connection,pilot)
-            if operation in {"mail-settings","mail-retry"} and not (mail_enabled or mail_release):
+            payer_mail = bool(pilot and school_invoice_payer_mail_mode() == "mock")
+            if operation in {"mail-settings","mail-retry"} and not (mail_enabled or mail_release or payer_mail):
                 return self.error_page("发票邮件阶段未开放。",HTTPStatus.FORBIDDEN)
             actions = RevenueUIActions(connection,None,int(self.user["id"]),self.user["role_name"],
                                        legacy_document_root=Path(db.path).parent/"revenue_documents",school_pilot=pilot,
@@ -28810,6 +29071,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 if selected_entity != pilot.entity_id:
                     raise ValueError("请先选择学校付款主体。")
                 self._begin_school_commission_write(connection,pilot,"invoicing")
+                if payer_mail or mail_settings(connection, pilot.entity_id).get("routing") == "payer":
+                    raise ValueError("请在已确认学校佣金合同页核对收票邮箱。")
                 if mail_release:
                     release_stage = self.form.get("mail_stage")
                     recipient = str(self.form.get("recipient") or "").strip()
@@ -28858,9 +29121,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     body = render_school_invoice_detail(details,self.csrf,new_token(),allow_settlement=allow_settlement,
                                                         simulation=simulation,
                                                         reminder_records=reminder_history(connection,invoice_uid),
-                                                        auto_mail=mail_status(connection,invoice_uid) if mail_enabled or not simulation else None,
-                                                        show_mail=mail_enabled or not simulation,
-                                                        allow_mail_retry=(mail_enabled or mail_release) and
+                                                        auto_mail=mail_status(connection,invoice_uid) if pilot else None,
+                                                        show_mail=bool(pilot),
+                                                        allow_mail_retry=(mail_enabled or mail_release or payer_mail) and
                                                         school_commission_authority(self.user,"invoicing",invoice_uid=invoice_uid) is not False)
                 else:
                     entity_id = int((self.query.get("entity_id") or ["0"])[0])
@@ -28884,7 +29147,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                                       allow_invoicing=allow_invoicing,simulation=simulation,
                                                       overdue_only=overdue_only,
                                                       auto_mail_settings=mail_settings(connection,entity_id)
-                                                      if entity_id and allow_invoicing and (mail_enabled or mail_release) else None,
+                                                      if entity_id and allow_invoicing and (mail_enabled or mail_release)
+                                                      and mail_settings(connection, entity_id).get("routing") != "payer" else None,
                                                       smtp_recipient=smtp_recipient,allow_preview=allow_preview,
                                                       mail_release=mail_release)
             else:
@@ -29071,7 +29335,19 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if not can_perform_revenue_action(self.user, action_name):
             return self.error_page("无权限执行该操作。", HTTPStatus.FORBIDDEN)
         if action_name == "contracts/school/configurable-draft" and "institution" in self.form:
-            return self.revenue_school_contract_upload(method)
+            intake = school_commission_authority(self.user, "contract-intake")
+            if not intake or not intake.education_authorities:
+                return self.error_page("州／领地教育局合同入口尚未开放。", HTTPStatus.FORBIDDEN)
+            kind, _, key = str(self.form.get("institution") or "").partition(":")
+            valid_target = (key in STATE_AUTHORITIES if kind == "authority"
+                            else kind in {"school", "provider"} and re.fullmatch(r"[1-9][0-9]{0,17}", key))
+            if not valid_target or any(field in self.form for field in (*TARGET_FIELDS.values(), "onboarding")):
+                return self.error_page("请选择有效的学校或教育局。", HTTPStatus.BAD_REQUEST)
+            self.form[TARGET_FIELDS[kind]] = key
+            # This intake form asks for a signed PDF. Terms are confirmed separately after analysis.
+            self.form["signed_confirmed"] = "1"
+            if kind == "school" and not school_commission_authority(self.user, "contracts", school_id=int(key)):
+                self.form["onboarding"] = "1"
         if action_name.startswith("contracts/school/"):
             pilot,_ = self._school_contract_authority(action_name.rsplit("/",1)[-1])
             if pilot is False:
@@ -29194,12 +29470,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     raise LookupError("Revenue action does not belong to this case")
             message_kind = "success"
             pilot = None
+            analysis_uid = None
             if action_name.startswith("contracts/school/"):
                 action = action_name.rsplit("/",1)[-1]
                 pilot,stage = self._school_contract_authority(action)
                 if pilot is False:
                     raise ValueError("学校佣金试点阶段未开放或无权限。")
-                if pilot and not action.endswith("preview"):
+                if pilot and not action.endswith(("preview", "analyze")):
                     self._begin_school_commission_write(connection,pilot,stage)
             actions = RevenueUIActions(
                 connection,
@@ -29209,7 +29486,28 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 actor_has_revenue_access=can_access_revenue(self.user),
                 legacy_document_root=Path(db.path).parent / "revenue_documents",school_pilot=pilot,
             )
-            if action_name == "contracts/school/bind":
+            if action_name == "contracts/school/register":
+                if "higher_education_provider_id" in self.form:
+                    provider_id = actions.register_provider_for_commission(self.form)["higher_education_provider_id"]
+                    destination = f"/revenue/contracts?higher_education_provider_id={provider_id}#school-commission-contracts"
+                    message = "高等教育机构已登记。"
+                else:
+                    school_id = actions.register_school_for_commission(self.form)["school_id"]
+                    destination = f"/revenue/contracts?school_id={school_id}#school-commission-contracts"
+                    message = "学校已登记到佣金学校表。"
+            elif action_name == "contracts/school/mail-recipient":
+                if not school_invoice_payer_mail_mode():
+                    raise ValueError("当前发信配置不可用，请刷新后重试。")
+                save_mail_settings(
+                    actions.repository, pilot.entity_id, actions.actor_user_id,
+                    self.form.get("idempotency_key"), self.form.get("recipient"),
+                    self.form.get("enabled") == "1", self.form.get("verified") == "1",
+                    str(self.form.get("settings_revision") or ""),
+                    payer_routing=True, simulation=pilot.simulation,
+                )
+                destination = f"/revenue/contracts?school_id={pilot.school_id}#school-invoice-mail-recipient"
+                message = "学校发票收件邮箱设置已保存。"
+            elif action_name == "contracts/school/bind":
                 actions.bind_school_commission_entity(self.form)
                 destination, message = "/revenue/contracts", "学校佣金主体已绑定。"
                 if pilot:
@@ -29223,15 +29521,55 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 if target_stage in {"contracts","preview","paused"} and old_scope:
                     new_scope = school_pilot_scope(connection,pilot,school_id=school_id)
                     settings = mail_settings(connection,old_scope.entity_id)
+                    if (new_scope.revision != old_scope.revision and old_scope.simulation
+                            and settings.get("transport") == "mock" and settings["enabled"]):
+                        save_mail_settings(
+                            actions.repository, old_scope.entity_id, actions.actor_user_id, stage_key + ":pause-mock",
+                            settings["recipient"], False, settings["verified"], settings["revision"],
+                        )
                     if (new_scope.revision!=old_scope.revision and settings.get("transport") in {"candidate","production"}
                             and settings.get("stage")!="off"):
                         save_mail_release(actions.repository,old_scope.entity_id,int(self.user["id"]),stage_key+":pause",
                                           settings["revision"],"off","","","",(),old_scope.simulation)
                 destination, message = f"/revenue/contracts?school_id={school_id}", "该学校的佣金阶段已更新。"
             elif action_name == "contracts/school/configurable-draft":
-                draft = actions.upload_configurable_school_draft(self.form,upload)
-                destination = f"/revenue/contracts?school_id={pilot.school_id}&contract="+quote(draft["uid"],safe="")
-                message = "已登记签署合同草稿。"
+                analyze_pdf = stage != "contract-intake" and (pilot.toorak_draft_release or bool(
+                    STAGING and getattr(STAGING, "mode", "staging") == "staging" and pilot.simulation
+                ))
+                combined = "institution" in self.form
+                authority = self.form.get("education_authority")
+                if combined and not authority:
+                    kind, key = self.form["institution"].split(":", 1)
+                    key = int(key)
+                    if (kind, key) in uploaded_contract_targets(connection, pilot.simulation):
+                        raise ValueError("该学校已上传佣金合同，请打开原合同流程。")
+                if authority:
+                    draft = actions.upload_authority_commission_draft(self.form, upload)
+                    destination = CONFIRMED_ROOT
+                elif "higher_education_provider_id" in self.form:
+                    draft = actions.upload_provider_commission_draft(self.form, upload, register=combined)
+                    provider_id = self._school_commission_scope_id("higher_education_provider_id")
+                    destination = f"/revenue/contracts?higher_education_provider_id={provider_id}"
+                else:
+                    draft = actions.upload_configurable_school_draft(
+                        self.form, upload, analyze_pdf=analyze_pdf, register=combined,
+                    )
+                    destination = f"{UPLOAD_ROOT if combined else CONFIRMED_ROOT}?school_id={pilot.school_id}"
+                destination += "&contract="+quote(draft["uid"],safe="")
+                if stage == "contract-intake":
+                    destination = f"{DRAFT_ROOT}/{quote(draft['uid'], safe='')}"
+                    if combined:
+                        destination += "?contract_only=1"
+                message = "合同已上传，请核对佣金条款。" if combined else "已登记签署合同草稿。"
+                if analyze_pdf:
+                    from revenue.school_contract_review import review_state
+                    if not review_state(connection, draft["uid"])["analysis"]:
+                        analysis_uid = draft["uid"]
+            elif action_name == "contracts/school/configurable-analyze":
+                analysis_uid = actions._required(self.form, "draft_uid")
+                root = UPLOAD_ROOT if school_commission_authority(self.user, "contract-intake") else CONFIRMED_ROOT
+                destination = f"{root}?school_id={pilot.school_id}&contract=" + quote(analysis_uid, safe="")
+                message = "合同分析已完成，请逐项核对。"
             elif action_name == "contracts/school/configurable-preview":
                 preview = actions.preview_configurable_school_rule(self.form)
                 body = render_configurable_preview(preview,self.csrf,new_token())
@@ -29241,9 +29579,47 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 actions.activate_configurable_school_rule(self.form)
                 destination, message = f"/revenue/contracts?school_id={pilot.school_id}", "该学校的佣金规则已启用。"
             elif action_name == "contracts/school/toorak-draft":
-                draft = actions.upload_toorak_draft(self.form, upload)
+                draft = actions.upload_toorak_draft(self.form, upload, analysis_required=bool(pilot and STAGING and pilot.simulation))
                 destination = "/revenue/contracts?contract=" + quote(draft["uid"], safe="")
                 message = "Toorak College 合同草稿已登记。"
+                if pilot and STAGING and pilot.simulation:
+                    from revenue.school_contract_review import review_state
+                    if not review_state(connection, draft["uid"])["analysis"]:
+                        analysis_uid = draft["uid"]
+            elif action_name == "contracts/school/toorak-analyze":
+                analysis_uid = actions._required(self.form, "draft_uid")
+                destination = "/revenue/contracts?contract=" + quote(analysis_uid, safe="")
+                message = "合同分析已完成，请逐项核对。"
+            elif action_name in {"contracts/school/toorak-review", "contracts/school/configurable-review"}:
+                from revenue.school_contract_extract import FIELD_LABELS
+                from revenue.school_contract_review import save_review
+                draft_uid = actions._required(self.form, "draft_uid")
+                decisions = {name: (actions._value(self.form, "decision_" + name) or "",
+                                    actions._value(self.form, "value_" + name) or "") for name in FIELD_LABELS}
+                review = save_review(actions.repository, pilot, draft_uid, actions._required(self.form, "analysis_run"),
+                                     decisions, actions.actor_user_id, actions._required(self.form, "idempotency_key"))
+                destination = "/revenue/contracts?contract=" + quote(draft_uid, safe="")
+                if action_name.endswith("configurable-review"):
+                    if pilot.entity_id and school_commission_authority(self.user, "contract-intake"):
+                        destination = f"{UPLOAD_ROOT}?contract=" + quote(draft_uid, safe="")
+                    destination += f"&school_id={pilot.school_id}"
+                message = "逐项确认结果已保存到待确认草稿。"
+                if (destination.startswith(UPLOAD_ROOT) and review
+                        and reviewed_school_terms(connection, draft_uid, "toorak")):
+                    destination = confirmed_url(("school", pilot.school_id))
+                    message = "已确认并保存学校佣金条款。"
+                if pilot.entity_id == 0 and self.form.get("decision_school_name") == "input":
+                    connection.commit()
+                    try:
+                        preview = actions.preview_configurable_school_rule(
+                            {"draft_uid": draft_uid, "school_id": pilot.school_id, "sample_tuition": "10000"},
+                        )
+                    except ValueError:
+                        pass  # The saved draft shows which terms still need review.
+                    else:
+                        body = render_configurable_preview(preview, self.csrf, new_token())
+                        return self.send_html(page("学校佣金规则预览", body, self.user, self.csrf,
+                                                   REVENUE_MODULE_KEY, nas.status()))
             elif action_name == "contracts/school/toorak-preview":
                 preview = actions.preview_toorak_rule(self.form)
                 body = render_toorak_commission_preview(preview, self.csrf, new_token())
@@ -29354,6 +29730,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             else:
                 raise ValueError("unknown Revenue action")
             connection.commit()
+            if analysis_uid:
+                from document_ocr import extract_pdf_pages
+                from revenue.school_contract_review import analyze_draft, save_analysis
+
+                def local_ocr(pdf, indexes):
+                    if not pilot.simulation:
+                        return {}
+                    return extract_pdf_pages(pdf, indexes, data_root=STAGING.root,
+                                             source_root=SOURCE_DIR, staging=True, diagnostics={})
+
+                result = analyze_draft(actions.repository, pilot, analysis_uid, ocr=local_ocr,
+                                       runtime_root=STAGING.root)
+                self._begin_school_commission_write(connection, pilot, stage)
+                save_analysis(actions.repository, pilot, analysis_uid, result, actions.actor_user_id,
+                              actions._required(self.form, "idempotency_key") + ":analyze")
+                connection.commit()
+                message = ("合同分析已完成，请逐项核对。" if result["status"] != "unreadable"
+                           else "合同草稿已保留，暂无法读取 PDF。可以重试或手填。")
         except Exception:
             connection.rollback()
             raise
@@ -29371,6 +29765,270 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 "redirect": destination,
             })
         return self.flash_redirect(destination, message, message_kind)
+
+    def revenue_institution_commission_draft(self, method, draft_uid):
+        from document_ocr import extract_pdf_pages
+        from revenue.institution_commission_draft import InstitutionCommissionDraft
+        from revenue.institution_commission_draft_views import ROOT, render_workflow
+
+        if method not in {"GET", "POST"}:
+            return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
+        pilot = school_commission_authority(self.user, "contract-intake")
+        if not pilot or not can_perform_revenue_action(self.user, "contracts/school/register"):
+            return self.error_page("当前账号无权使用佣金草稿。", HTTPStatus.FORBIDDEN)
+        connection = db.connect()
+        try:
+            return self._institution_commission_response(connection, pilot, draft_uid, method, ROOT,
+                                                         InstitutionCommissionDraft, render_workflow,
+                                                         extract_pdf_pages)
+        finally:
+            db._release_connection(connection)
+
+    def _institution_commission_response(self, connection, pilot, draft_uid, method, root,
+                                         workflow_class, render_workflow, extract_pdf_pages):
+        from revenue import vic_rcti
+        from revenue.authority_formal import AuthorityInvoice, authority_payer, register_authority_payer
+        from revenue.data_invoice_storage import configured_invoice_store
+        from revenue.authority_settlement import AuthoritySettlement
+        from revenue.money import aud_cents
+        from revenue.repository import IdempotencyConflict
+        from revenue.school_contract_storage import configured_contract_store
+        from revenue.secure_storage import StorageUnavailable
+        from revenue.uploads import stage_revenue_upload
+
+        analysis = None
+        workflow = None
+        terms = None
+        invoice = None
+        error = ""
+        operation = None
+        settlement = None
+        formal_authority = None
+        requested = (self.query.get("invoice") or [""])[0]
+        rehearsal = bool(getattr(STAGING, "mode", None) == "staging" and pilot.simulation
+                         and os.environ.get("AAIE_SCHOOL_COMMISSION_FORMAL_REHEARSAL") == "1")
+        payer_mail_mode = school_invoice_payer_mail_mode()
+        production_preview = (getattr(STAGING, "mode", None) == "production" and not pilot.simulation
+                              and pilot.enabled and pilot.stage in {"preview", "invoicing", "settlement"})
+        formal_production = production_preview and pilot.stage in {"invoicing", "settlement"}
+        url = f"{root}/{quote(draft_uid, safe='')}"
+        contract_only = self.query.get("contract_only") == ["1"]
+
+        def ocr(pdf, indexes):
+            return extract_pdf_pages(pdf, indexes, data_root=STAGING.root, source_root=SOURCE_DIR,
+                                     staging=pilot.simulation, diagnostics={})
+
+        try:
+            repository = RevenueRepository(connection)
+            workflow = workflow_class(repository, pilot, draft_uid, int(self.user["id"]))
+            terms = workflow.terms()
+            operation = self.form.get("operation") if method == "POST" else None
+            if (terms or {}).get("payment_mode") == vic_rcti.PAYMENT and (
+                requested or operation in {"invoice", "payer-mail-settings"} or
+                (isinstance(operation, str) and operation.startswith("authority-formal-"))
+            ):
+                return self.error_page(vic_rcti.BLOCK_INVOICE, HTTPStatus.FORBIDDEN)
+            if requested and not contract_only:
+                invoice = workflow.invoice(requested)
+                if not invoice:
+                    return self.error_page("找不到该合同的发票草稿。", HTTPStatus.NOT_FOUND)
+                if invoice["target"][0] == "authority":
+                    if rehearsal:
+                        settlement = AuthoritySettlement(repository, invoice, int(self.user["id"]), rehearsal=True)
+                    if (rehearsal or production_preview) and authority_payer(connection, invoice["target"][1]):
+                        formal_authority = AuthorityInvoice(
+                            workflow, invoice, rehearsal=rehearsal, production=production_preview,
+                            payer_mail=payer_mail_mode == "mock",
+                        )
+            if operation == "discard":
+                self._begin_school_commission_write(connection, pilot, "contract-intake")
+                workflow.discard(str(self.form.get("idempotency_key") or ""))
+                connection.commit()
+                return self.flash_redirect(UPLOAD_ROOT, "已删除本次上传，请选择学校并上传正确的合同。", "success")
+            if not terms:
+                analysis = workflow.analyse(ocr)
+            if method == "POST" and operation == "authority-formal-dispatch":
+                if not rehearsal or not formal_authority or not formal_authority.issued_uid():
+                    raise PermissionError("请选择已签发的隔离发票。")
+                if school_commission_authority(self.user, "contract-intake") != pilot:
+                    raise PermissionError("当前州教育局的权限已变更。")
+                formal_authority.dispatch_mock_mail(formal_authority.issued_uid(), STAGING.root)
+                return self.redirect(url + "?invoice=" + quote(invoice["uid"], safe=""))
+            if method == "POST":
+                self._begin_school_commission_write(connection, pilot, "contract-intake")
+                workflow = workflow_class(repository, pilot, draft_uid, int(self.user["id"]))
+                terms = workflow.terms()
+                if (terms or {}).get("payment_mode") == vic_rcti.PAYMENT and operation in {"invoice", "payer-mail-settings"}:
+                    return self.error_page(vic_rcti.BLOCK_INVOICE, HTTPStatus.FORBIDDEN)
+                key = str(self.form.get("idempotency_key") or "")
+                if operation == "authority-payer":
+                    if (not terms or requested or workflow.target[0] != "authority"
+                            or self.form.get("reviewed") != "1"
+                            or terms != self._confirmed_authority_terms(connection, pilot, workflow.target[1])):
+                        raise PermissionError("请核对最新已确认的教育局合同和法定付款主体。")
+                    register_authority_payer(repository, workflow.target[1], terms["payer"], int(self.user["id"]),
+                                             rehearsal=pilot.simulation, confirmed_terms=terms)
+                    connection.commit()
+                    return self.redirect(confirmed_url(workflow.target))
+                if operation == "payer-mail-settings":
+                    if not payer_mail_mode or not terms or requested or workflow.target[0] != "authority":
+                        raise PermissionError("请从已确认教育局佣金合同核对邮箱。")
+                    payer = authority_payer(connection, workflow.target[1])
+                    if not payer:
+                        raise ValueError("请先登记该州教育局的法定付款主体。")
+                    save_mail_settings(
+                        repository, payer["id"], int(self.user["id"]), key, self.form.get("recipient"),
+                        self.form.get("enabled") == "1", self.form.get("verified") == "1",
+                        str(self.form.get("settings_revision") or ""),
+                        payer_routing=True, simulation=pilot.simulation,
+                    )
+                    connection.commit()
+                    return self.redirect(confirmed_url(workflow.target) + "#school-invoice-mail-recipient")
+                if isinstance(operation, str) and operation.startswith("authority-formal-"):
+                    if not formal_authority or not (rehearsal or formal_production):
+                        raise PermissionError("当前环境未开放教育局正式单据验收。")
+                    action = operation.removeprefix("authority-formal-")
+                    issued = formal_authority.issued_uid()
+                    if action == "issue" and self.form.get("reviewed") == "1":
+                        formal_authority.issue(self.form.get("preview_token"))
+                    elif not issued:
+                        raise ValueError("请先核对并签发隔离测试发票。")
+                    elif action == "retry" and payer_mail_mode:
+                        formal_authority.retry_mock_mail(issued, int(self.form.get("attempt_count", "-1")))
+                    elif action == "reconcile" and (rehearsal or pilot.stage == "settlement"):
+                        formal_authority.reconcile(None, issued, self.form.get("reviewed") == "1")
+                    elif action in {"delivery", "payment"} and (rehearsal or pilot.stage == "settlement"):
+                        proof = next((file for file in self.files if file.field_name == "bank_proof" and file.filename), None)
+                        if proof is None:
+                            raise ValueError("请上传隔离测试 PDF 凭证。")
+                        store = configured_invoice_store()
+                        if store is None:
+                            raise StorageUnavailable()
+                        staged = stage_revenue_upload(None, proof, {".pdf"}, encrypted_store=store)
+                        day = str(self.form.get("received_on") or "")
+                        detail = formal_authority.detail(issued)
+                        if action == "delivery":
+                            formal_authority.delivery(None, issued, day, staged, detail["payment_days"])
+                        else:
+                            amount = aud_cents(self.form.get("received_amount"))
+                            allocations = None
+                            if len(detail["lines"]) > 1:
+                                allocations = {}
+                                for index, line in enumerate(detail["lines"]):
+                                    raw = self.form.get(f"allocation_{index}", "")
+                                    cents = aud_cents(raw) if raw != "" else 0
+                                    if cents:
+                                        allocations[line["invoice_line_uid"]] = cents
+                            formal_authority.record_payment(
+                                issued, self.form.get("payer_state"), amount, day,
+                                str(self.form.get("bank_reference") or ""), staged, allocations,
+                            )
+                    else:
+                        raise ValueError("请选择有效的教育局发票操作。")
+                elif operation in {"authority-payment", "authority-reconcile"}:
+                    if not settlement or formal_authority or self.query.get("pdf") == ["1"]:
+                        raise PermissionError("当前发票无法使用到账演练。")
+                    if operation == "authority-reconcile":
+                        settlement.reconcile(self.form.get("reviewed") == "1")
+                    else:
+                        amount = aud_cents(self.form.get("received_amount"))
+                        allocations = {invoice["lines"][0]["uid"]: amount}
+                        if len(invoice["lines"]) > 1:
+                            allocations = {}
+                            for index, line in enumerate(invoice["lines"]):
+                                value = self.form.get(f"allocation_{index}", "")
+                                if value != "":
+                                    cents = aud_cents(value)
+                                    if cents:
+                                        allocations[line["uid"]] = cents
+                        proof = next((file for file in self.files
+                                      if file.field_name == "bank_proof" and file.filename), None)
+                        if proof is None:
+                            raise ValueError("请上传模拟银行流水 PDF 凭证。")
+                        staged = stage_revenue_upload(None, proof, {".pdf"},
+                                                      encrypted_store=configured_contract_store())
+                        settlement.record(
+                            self.form.get("payer_state"), str(self.form.get("bank_reference") or ""),
+                            str(self.form.get("received_on") or ""), amount, allocations, staged,
+                        )
+                elif requested:
+                    raise ValueError("请选择发票草稿支持的操作。")
+                elif operation == "terms" and not terms and analysis:
+                    workflow.confirm(self.form, analysis, key)
+                elif not contract_only and terms and self.form.get("terms_revision") == terms["revision"]:
+                    if operation == "evidence":
+                        from revenue.vic_rcti_reconciliation import VicReconciliation, ready as vic_rcti_ready
+
+                        reconciliation = (VicReconciliation(workflow)
+                                          if terms.get("payment_mode") == vic_rcti.PAYMENT and vic_rcti_ready(connection)
+                                          else None)
+                        if reconciliation:
+                            reconciliation.remember_differences()
+                        workflow.confirm_student_evidence(self.form, terms, key)
+                        if reconciliation:
+                            reconciliation.remember_differences()
+                    elif operation == "invoice":
+                        invoice = workflow.create_invoice_draft(
+                            self.form.get("selection"), self.form.get("selection_revision"), terms, key,
+                        )
+                    else:
+                        raise ValueError("请选择有效的佣金草稿操作。")
+                else:
+                    raise ValueError("合同确认版本已更新，请刷新页面。")
+                connection.commit()
+                if contract_only or operation == "terms":
+                    return self.redirect(confirmed_url(workflow.target))
+                return self.redirect(url + ("?invoice=" + quote(invoice["uid"], safe="") if invoice else ""))
+            if contract_only and terms:
+                return self.redirect(confirmed_url(workflow.target))
+            pdf_requested = (self.query.get("pdf") or [""])[0]
+            if invoice and pdf_requested in {"1","formal","formal-preview"}:
+                filename = "commission-invoice-draft.pdf"
+                if pdf_requested == "formal":
+                    if not formal_authority or not formal_authority.issued_uid():
+                        raise PermissionError("找不到已签发的隔离发票。")
+                    payload = formal_authority.pdf(formal_authority.issued_uid())
+                    filename = formal_authority.detail(formal_authority.issued_uid())["invoice_number"] + ".pdf"
+                elif pdf_requested == "formal-preview":
+                    if not formal_authority:
+                        raise PermissionError("当前环境未开放正式版式预览。")
+                    payload = formal_authority.preview_pdf()
+                else:
+                    payload = workflow.render_pdf(invoice)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/pdf")
+                self.send_header("Content-Disposition", f'inline; filename="{filename}"')
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "private, no-store")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+        except LookupError:
+            connection.rollback()
+            return self.error_page("找不到该合同记录。", HTTPStatus.NOT_FOUND)
+        except PermissionError:
+            connection.rollback()
+            return self.error_page("没有权限查看此佣金草稿。", HTTPStatus.FORBIDDEN)
+        except StorageUnavailable:
+            connection.rollback()
+            return self.error_page(StorageUnavailable.message, HTTPStatus.SERVICE_UNAVAILABLE)
+        except (ValueError, TypeError, sqlite3.Error) as problem:
+            connection.rollback()
+            detail = "银行流水号已存在，请核对付款方、发票及金额。" if isinstance(problem, IdempotencyConflict) and operation in {"authority-payment", "authority-formal-payment"} else str(problem)
+            error = detail if isinstance(problem, ValueError) and re.search(r"[\u4e00-\u9fff]", detail) else "无法保存，请检查已填写的字段后重试。"
+            if workflow is None or (terms is None and analysis is None):
+                return self.error_page(error, HTTPStatus.BAD_REQUEST)
+        form = self.form if error and operation == "terms" and not terms else None
+        body = render_workflow(workflow, self.csrf, new_token(), analysis=analysis, terms=terms,
+                               invoice=invoice, error=error, form=form, contract_only=contract_only,
+                               settlement=settlement.summary() if settlement and not formal_authority else None,
+                               formal_authority=({**formal_authority.view(),
+                                                  "can_issue": rehearsal or formal_production,
+                                                  "can_settle": rehearsal or (formal_production and pilot.stage == "settlement")}
+                                                 if formal_authority else None))
+        return self.send_html(page("机构佣金草稿", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                              HTTPStatus.BAD_REQUEST if error else HTTPStatus.OK,
+                              headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop")
 
     def revenue_vic_rcti(self, method, contract_uid, uid=None):
         from revenue.institution_commission_draft import InstitutionCommissionDraft
@@ -29541,7 +30199,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 connection.rollback()
             db._release_connection(connection)
 
-
     def revenue_document(self, method, document_uid, disposition):
         """Serve immutable Revenue evidence without exposing its filesystem path."""
         if not can_access_revenue(self.user):
@@ -29563,27 +30220,81 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             pilot = school_commission_authority(self.user,"read")
             connection = db.connect()
             try:
-                owned = pilot and any(scope.owns_document(connection, document)
-                                      for scope in list_school_pilot_scopes(connection, pilot))
-                if document["document_kind"] == FORMAL_CONTRACT:
+                if document["document_kind"] == "school_commission_signed_contract":
+                    from revenue.state_school_commission import DISCARDED_CONTRACT_UPLOAD
+
+                    if connection.execute(
+                        """SELECT 1 FROM revenue_rule_snapshots s JOIN revenue_audit_events a
+                             ON a.aggregate_uid=s.uid AND a.action=?
+                            WHERE s.source_rule_uid=?""", (DISCARDED_CONTRACT_UPLOAD, document_uid),
+                    ).fetchone():
+                        return self.error_page("该合同上传已删除。", HTTPStatus.NOT_FOUND)
+                owned = pilot and any(scope.owns_document(connection,document)
+                                      for scope in list_school_pilot_scopes(connection,pilot))
+                if not owned and document["document_kind"] == "school_commission_signed_contract":
+                    setup = school_commission_authority(self.user, "setup")
+                    owned = setup and setup.simulation and connection.execute(
+                        """SELECT 1 FROM revenue_rule_snapshots draft JOIN schools s
+                           ON s.id=json_extract(draft.canonical_json,'$.school_id')
+                           WHERE draft.source_rule_uid=? AND draft.rule_kind='commission'
+                             AND json_extract(draft.canonical_json,'$.toorak_draft')=1
+                             AND json_extract(draft.canonical_json,'$.pilot_simulation')=1
+                             AND json_extract(draft.canonical_json,'$.pilot_entity_id')=0
+                             AND s.deleted_at IS NULL""", (document_uid,),
+                    ).fetchone()
+                intake = None
+                if not owned and document["document_kind"] == "school_commission_signed_contract":
                     intake = school_commission_authority(self.user, "contract-intake")
-                    if intake:
-                        drafts = connection.execute(
-                            "SELECT uid FROM revenue_rule_snapshots WHERE source_rule_uid=? AND rule_kind='commission'",
-                            (document_uid,),
-                        ).fetchall()
-                        if any(discarded_contract_upload(connection, uid) for (uid,) in drafts):
-                            return self.error_page("该合同上传已删除。", HTTPStatus.NOT_FOUND)
-                        if not owned:
-                            for (uid,) in drafts:
-                                try:
-                                    InstitutionCommissionDraft(RevenueRepository(connection), intake, uid, int(self.user["id"]))
-                                except (LookupError, PermissionError):
-                                    continue
-                                owned = True
-                                break
+                    owned = intake and connection.execute(
+                        """SELECT 1 FROM revenue_rule_snapshots draft
+                           JOIN schools s ON s.id=json_extract(draft.canonical_json,'$.school_id')
+                           JOIN revenue_audit_events registration
+                             ON registration.aggregate_uid=(? || ':' || s.id)
+                            AND registration.action='school_commission_school_registered'
+                            AND registration.aggregate_type='school_commission_school'
+                           WHERE draft.source_rule_uid=? AND draft.rule_kind='commission'
+                             AND json_extract(draft.canonical_json,'$.toorak_draft')=1
+                             AND json_extract(draft.canonical_json,'$.school_commission_configurable')=1
+                             AND json_extract(draft.canonical_json,'$.pilot_simulation')=?
+                             AND json_extract(draft.canonical_json,'$.pilot_entity_id')=0
+                             AND s.deleted_at IS NULL""",
+                        (int(intake.simulation),document_uid,intake.simulation),
+                    ).fetchone()
+                if not owned and document["document_kind"] == "school_commission_signed_contract" and intake:
+                    owned = connection.execute(
+                        """SELECT 1 FROM revenue_rule_snapshots draft
+                            JOIN higher_education_providers p
+                              ON p.id=json_extract(draft.canonical_json,'$.higher_education_provider_id')
+                            JOIN revenue_audit_events a
+                              ON a.aggregate_uid=(? || ':' || p.id)
+                             AND a.action='school_commission_provider_registered'
+                             AND a.aggregate_type='school_commission_provider'
+                           WHERE draft.source_rule_uid=? AND draft.rule_kind='commission'
+                             AND json_extract(draft.canonical_json,'$.pilot_simulation')=?
+                             AND json_extract(draft.canonical_json,'$.pilot_entity_id')=0
+                             AND p.active_status='Active' AND p.review_status IN ('Pending','Approved')""",
+                        (int(intake.simulation),document_uid,int(intake.simulation)),
+                    ).fetchone()
+                if not owned and document["document_kind"] == "school_commission_signed_contract" and intake:
+                    from revenue.institution_commission_draft import InstitutionCommissionDraft
+
+                    snapshot = connection.execute(
+                        """SELECT uid FROM revenue_rule_snapshots
+                            WHERE source_rule_uid=? AND rule_kind='commission'
+                              AND json_extract(canonical_json,'$.education_authority') IS NOT NULL
+                              AND json_extract(canonical_json,'$.pilot_simulation')=?""",
+                        (document_uid, int(intake.simulation)),
+                    ).fetchone()
+                    if snapshot:
+                        try:
+                            workflow = InstitutionCommissionDraft(
+                                RevenueRepository(connection), intake, snapshot[0], int(self.user["id"]),
+                            )
+                            owned = workflow.target[0] == "authority"
+                        except (LookupError, PermissionError):
+                            pass
                 if not owned:
-                    return self.error_page("无权限访问该文件。", HTTPStatus.FORBIDDEN)
+                    return self.error_page("无权限访问该文件。",HTTPStatus.FORBIDDEN)
             finally:
                 db._release_connection(connection)
         allowed_mime_types = {"application/pdf", "image/png", "image/jpeg"}
@@ -29593,6 +30304,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         from revenue.secure_storage import read_reference, StorageUnavailable
         from revenue.storage_locations import resolve_location
         from revenue.data_invoice_storage import SUFFIX, read_invoice_pdf
+        from revenue.school_commission_pilot import FORMAL_CONTRACT
         from revenue.school_contract_storage import configured_contract_store
         try:
             storage_path = resolve_location(document,db.all)

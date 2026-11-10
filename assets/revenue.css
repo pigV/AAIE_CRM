@@ -37,6 +37,20 @@
 .revenue-primary-link, .revenue-back-link { align-items: center; background: var(--revenue-primary); border-radius: 10px; color: #fff !important; display: inline-flex; font-weight: 750; justify-content: center; min-height: 42px; padding: 10px 16px; text-decoration: none; white-space: nowrap; }
 .revenue-back-link { background: var(--revenue-primary-soft); color: var(--revenue-primary) !important; }
 .revenue-primary-link:hover { background: #244bd6; transform: translateY(-1px); }
+.revenue-dashboard-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+#school-commission-contracts, #invoice-mail-history { scroll-margin-top: 84px; }
+.revenue-mail-body { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }
+.revenue-student-status-key { display: flex; flex-wrap: wrap; gap: 8px; }
+.revenue-student-status { display: inline-block; border-radius: 6px; padding: 3px 8px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.revenue-student-status--historical { color: #374151; background: #e5e7eb; }
+.revenue-student-status--current { color: #17438b; background: #e0edff; }
+.revenue-student-status--eligible { color: #16543b; background: #dcf4e7; }
+.revenue-student-status--claimed { color: #5b337e; background: #f0e6fa; }
+.revenue-school-contract-summary { background: var(--revenue-primary-soft); border: 1px solid var(--revenue-line); border-radius: 12px; margin: 0 0 16px; padding: 16px; }
+.revenue-school-contract-summary h4 { margin: 0; }
+.revenue-school-contract-summary dl { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin: 12px 0; }
+.revenue-school-contract-summary dt { color: var(--revenue-muted); font-size: 12px; }
+.revenue-school-contract-summary dd { font-weight: 700; margin: 3px 0 0; }
 
 .revenue-metrics { display: grid; gap: 12px; grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .revenue-metric { background: var(--revenue-card); border: 1px solid var(--revenue-line); border-radius: 16px; box-shadow: 0 8px 24px rgb(32 42 60 / 5%); display: flex; flex-direction: column; min-height: 132px; min-width: 0; padding: 17px; text-decoration: none; }
@@ -190,6 +204,7 @@ a.revenue-coverage-card:hover { border-color: #cbd6ff; box-shadow: 0 7px 16px rg
   .revenue-dashboard-heading h1, .revenue-page-heading h1 { font-size: 28px; }
   .revenue-dashboard-heading p, .revenue-page-heading p { font-size: 13px; line-height: 1.5; }
   .revenue-primary-link, .revenue-back-link { justify-self: start; }
+  .revenue-dashboard-actions { justify-content: flex-start; }
   .revenue-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .revenue-metric { min-height: 116px; padding: 14px; }
   .revenue-metric span { min-height: 31px; }
@@ -214,6 +229,7 @@ a.revenue-coverage-card:hover { border-color: #cbd6ff; box-shadow: 0 7px 16px rg
   .revenue-workspace *, .revenue-workspace *::before, .revenue-workspace *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
 
+/* VIC RCTI record */
 .vic-rcti-record {
   max-width: 980px;
 }
