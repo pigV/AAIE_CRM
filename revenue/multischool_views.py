@@ -1,6 +1,7 @@
 """Desktop forms for setting up a school's commission contract and permissions."""
 
 from html import escape
+import json
 from urllib.parse import quote
 
 from revenue.school_commission_pilot import FORMAL_CONTRACT, STAGES, school_pilot_scope
@@ -168,3 +169,49 @@ def render_configurable_preview(preview, csrf, token):
       · 发票收件后 {claim["payment_days_from_valid_invoice"]} 天付款</p><ul>{rows}</ul>
       {_form("configurable-activate",csrf,token,school_id,fields,"确认并启用规则")}
       <a href="{ROOT}?school_id={school_id}&amp;contract={quote(values["draft_uid"],safe="")}">返回合同草稿</a></section>'''
+
+
+def _render_active_contract_rules(rows, *, include_claim_terms=False):
+    gst_labels = {"exclusive": "另加 10% GST", "inclusive": "已含 10% GST", "none": "不加 GST"}
+    tuition_labels = {"local": "本地档", "international": "国际档", "any": "统一比例"}
+    cards = []
+    for uid, version, start, end, raw in rows:
+        rule = json.loads(raw)
+        tiers = rule.get("tiers") or []
+        if tiers:
+            rates = " · ".join(
+                f'{tuition_labels.get(tier["tuition_kind"], "佣金")} {tier["rate_basis_points"] / 100:g}%'
+                for tier in tiers
+            )
+            period = "按首年学费一次性计佣"
+        else:
+            instalments = rule.get("instalments") or []
+            rates = " · ".join(f'{item["rate_basis_points"] / 100:g}%' for item in instalments)
+            single = len(instalments) == 1 and instalments[0].get("academic_period") == "single"
+            period = "按学费一次性计佣" if single else "按合同期次"
+        gst = gst_labels.get(rule.get("gst_mode"), "未单独设置")
+        email = rule.get("invoice_email")
+        recipient = f'<div><dt>合同收票邮箱建议</dt><dd>{escape(email)}</dd></div>' if email else ""
+        claim = rule.get("claim") or {}
+        claim_rows = ""
+        if include_claim_terms and claim:
+            days = claim.get("commencement_days")
+            conditions = f"开学后满 {days} 天" if days else "已实际开学"
+            if claim.get("registration_required"):
+                conditions += "，并提供注册凭证"
+            deadline = claim.get("payment_days_from_valid_invoice")
+            claim_rows = f'<div><dt>申领条件</dt><dd>{conditions}</dd></div>'
+            if deadline is not None:
+                claim_rows += f'<div><dt>有效发票收件后付款期限</dt><dd>{int(deadline)} 天</dd></div>'
+        cards.append(f"""<article class="revenue-school-contract-summary">
+          <h4>合同 V{int(version)} · 已启用</h4>
+          <dl>
+            <div><dt>佣金比例</dt><dd>{rates or "未配置"}</dd></div>
+            <div><dt>合同有效期</dt><dd>{escape(start)} 至 {escape(end or "未登记")}</dd></div>
+            <div><dt>计佣周期</dt><dd>{period}</dd></div>
+            <div><dt>默认 GST</dt><dd>{gst}</dd></div>{recipient}{claim_rows}
+          </dl>
+          <a href="/revenue/documents/{quote(uid, safe="")}/download">查看合同 PDF</a>
+        </article>""")
+    content = "".join(cards) or '<p class="revenue-empty">该校暂无已启用的佣金合同规则。</p>'
+    return f'<section aria-labelledby="active-school-contract-heading"><h3 id="active-school-contract-heading">已启用的学校佣金合同</h3>{content}</section>'

@@ -179,14 +179,49 @@ class RevenueUIActions:
             school_id,staged,key,signed_confirmed=self._optional(form,"signed_confirmed")=="1",
         )
 
-    def upload_configurable_school_draft(self, form, upload):
+    def upload_configurable_school_draft(self, form, upload, *, register=False):
         school_id = self._positive_integer(form,"school_id")
         key = self._required(form,"idempotency_key")
+        contracts = self._school_contracts()
+        if contracts.contract_intake and contracts.entity_id == 0:
+            if register:
+                contracts.register_school(school_id, allow_existing=True)
+            contracts.check_intake_school(school_id)
         staged = self._stage_signed_school_contract(upload)
         try:
-            return self._school_contracts().upload_configurable_draft(
+            return contracts.upload_configurable_draft(
                 school_id,staged,key,signed_confirmed=self._optional(form,"signed_confirmed")=="1",
             )
+        except Exception:
+            discard_unregistered_upload(staged)
+            raise
+
+    def upload_authority_commission_draft(self, form, upload):
+        state = self._required(form, "education_authority")
+        key = self._required(form, "idempotency_key")
+        if self._optional(form, "signed_confirmed") != "1":
+            raise ValueError("请核对并上传已签署的 PDF 合同。")
+        staged = self._stage_signed_school_contract(upload)
+        try:
+            return self._school_contracts().upload_authority_draft(
+                state, staged, key, renewal=form.get("renewal") == "1",
+            )
+        except Exception:
+            discard_unregistered_upload(staged)
+            raise
+
+    def upload_provider_commission_draft(self, form, upload, *, register=False):
+        provider_id = self._positive_integer(form, "higher_education_provider_id")
+        key = self._required(form, "idempotency_key")
+        contracts = self._school_contracts()
+        if register:
+            contracts.register_provider(provider_id, allow_existing=True)
+        contracts.check_intake_provider(provider_id)
+        if self._optional(form, "signed_confirmed") != "1":
+            raise ValueError("请核对并上传已签署的 PDF 合同。")
+        staged = self._stage_signed_school_contract(upload)
+        try:
+            return contracts.upload_provider_draft(provider_id, staged, key, signed_confirmed=True)
         except Exception:
             discard_unregistered_upload(staged)
             raise
@@ -344,7 +379,12 @@ class RevenueUIActions:
                 "simulation":pilot.simulation} if pilot else {}
 
     def _school_contracts(self):
-        return SchoolCommissionContracts(self.service,self.actor_user_id,self.actor_role,**self._school_scope())
+        return SchoolCommissionContracts(
+            self.service, self.actor_user_id, self.actor_role,
+            contract_intake=bool(self.school_pilot and self.school_pilot.contract_intake),
+            education_authorities=getattr(self.school_pilot, "education_authorities", ()),
+            **self._school_scope(),
+        )
 
     def import_master_agent_statement(self, form: dict, upload) -> dict:
         key = self._required(form, "idempotency_key")

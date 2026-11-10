@@ -1048,20 +1048,23 @@ class RevenueService:
     def register_document(
         self, document_kind: str, storage_path: str, sha256: str, mime_type: str,
         size_bytes: int, source_kind: str, actor_user_id: int, idempotency_key: str,
+        *, version_no: int = 1,
     ):
         payload = {"document_kind": document_kind, "storage_path": storage_path,
                    "sha256": sha256, "mime_type": mime_type,
                    "size_bytes": size_bytes, "source_kind": source_kind}
+        if version_no != 1:
+            payload["version_no"] = version_no
 
         def operation():
             uid = new_uid("document")
             self.connection.execute(
                 """INSERT INTO revenue_documents(
                      uid,document_kind,storage_path,sha256,mime_type,size_bytes,
-                     source_kind,created_by,created_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                     source_kind,created_by,created_at,version_no
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (uid, document_kind, storage_path, sha256, mime_type, size_bytes,
-                 source_kind, actor_user_id, self.repository.now()),
+                 source_kind, actor_user_id, self.repository.now(), version_no),
             )
             return self.repository.require_by_uid("revenue_documents", uid)
 

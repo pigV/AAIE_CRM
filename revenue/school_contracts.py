@@ -14,8 +14,13 @@ from revenue.rules import CommissionRuleEvaluator
 from revenue.school_commission_pilot import FORMAL_CONTRACT
 
 
+SCHOOL_REGISTRATION_ACTION = "school_commission_school_registered"
+PROVIDER_REGISTRATION_ACTION = "school_commission_provider_registered"
+
+
 class SchoolCommissionContracts:
-    def __init__(self, service, actor_user_id, actor_role, *, formal=False, school_id=None, entity_id=None, simulation=True):
+    def __init__(self, service, actor_user_id, actor_role, *, formal=False, school_id=None, entity_id=None,
+                 simulation=True, contract_intake=False, education_authorities=()):
         self.service = service
         self.repository = service.repository
         self.connection = service.connection
@@ -25,6 +30,8 @@ class SchoolCommissionContracts:
         self.school_id = school_id
         self.entity_id = entity_id
         self.simulation = simulation
+        self.contract_intake = contract_intake
+        self.education_authorities = education_authorities
 
     @property
     def contract_kind(self):
@@ -41,6 +48,126 @@ class SchoolCommissionContracts:
         if school is None or dict(school).get("deleted_at"):
             raise ValueError("请选择仍有效的学校。")
         return school
+
+    def _check_public_school_scope(self, school_id):
+        if not self.education_authorities:
+            return
+        from revenue.state_school_commission import school_commission_assignment
+
+        sector, state = school_commission_assignment(self.connection).get(school_id, ("", ""))
+        if sector == "public" and state in self.education_authorities:
+            raise ValueError("公校请选择其所在州／领地教育局上传统一佣金合同。")
+
+    def register_school(self, school_id, *, allow_existing=False):
+        self._require_admin()
+        self._school(school_id)
+        uid = f"{int(self.simulation)}:{school_id}"
+        payload = {"uid": uid, "school_id": school_id}
+        if self.contract_intake:
+            self._check_public_school_scope(school_id)
+            if (school_id == self.school_id and self.entity_id != 0) or self._active_binding(school_id):
+                raise ValueError("该学校已有佣金付款主体。")
+            if self._registered_school(school_id):
+                if allow_existing:
+                    return payload
+                raise ValueError("该学校已登记。")
+        return self.repository.command(
+            idempotency_key=f"{SCHOOL_REGISTRATION_ACTION}:{uid}",
+            command_type=SCHOOL_REGISTRATION_ACTION,
+            aggregate_type="school_commission_school",
+            payload=payload,
+            actor_user_id=self.actor_user_id,
+            operation=lambda: payload,
+        )
+
+    def _intake_provider(self, provider_id):
+        self._require_admin()
+        if not self.formal or not self.contract_intake:
+            raise ValueError("当前环境未开放高等教育机构佣金合同登记。")
+        provider = self.connection.execute(
+            """SELECT 1 FROM higher_education_providers p
+                WHERE p.id=? AND p.active_status='Active' AND p.review_status IN ('Pending','Approved')
+                  AND NOT EXISTS (SELECT 1 FROM revenue_entity_provider_links l
+                    WHERE l.higher_education_provider_id=p.id AND l.effective_to IS NULL)""",
+            (provider_id,),
+        ).fetchone()
+        if not provider:
+            raise ValueError("请选择有效且尚未绑定佣金付款主体的高等教育机构。")
+        uid = f"{int(self.simulation)}:{provider_id}"
+        registered = self.connection.execute(
+            """SELECT 1 FROM revenue_audit_events
+                WHERE action=? AND aggregate_type='school_commission_provider' AND aggregate_uid=?""",
+            (PROVIDER_REGISTRATION_ACTION, uid),
+        ).fetchone()
+        return uid, bool(registered)
+
+    def register_provider(self, provider_id, *, allow_existing=False):
+        uid, registered = self._intake_provider(provider_id)
+        payload = {"uid": uid, "higher_education_provider_id": provider_id}
+        if registered:
+            if allow_existing:
+                return payload
+            raise ValueError("该高等教育机构已登记。")
+        return self.repository.command(
+            idempotency_key=f"{PROVIDER_REGISTRATION_ACTION}:{uid}",
+            command_type=PROVIDER_REGISTRATION_ACTION, aggregate_type="school_commission_provider",
+            payload=payload, actor_user_id=self.actor_user_id, operation=lambda: payload,
+        )
+
+    def check_intake_provider(self, provider_id):
+        if not self._intake_provider(provider_id)[1]:
+            raise ValueError("请先登记该高等教育机构。")
+
+    def upload_authority_draft(self, state, staged, key, *, renewal=False):
+        from revenue.state_school_commission import STATE_AUTHORITIES, authority_contracts
+
+        self._require_admin()
+        if (not self.formal or not self.contract_intake or state not in STATE_AUTHORITIES
+                or state not in self.education_authorities):
+            raise PermissionError("州／领地教育局尚未开放。")
+
+        def validate():
+            versions = authority_contracts(self.connection, state, self.simulation)
+            if any(not payload for _, payload in versions):
+                raise ValueError("该教育局已有上传合同，请返回原分析页面确认。")
+            if bool(versions) != renewal:
+                raise ValueError("已有合同的教育局须从已确认合同页上传续约版本。")
+
+        if staged.mime_type != "application/pdf":
+            raise ValueError("请上传已签署的 PDF 合同。")
+        return self._save_signed_draft(
+            {"education_authority": state, "pilot_entity_id": 0,
+             "pilot_simulation": self.simulation, "signed_confirmed": True},
+            staged, key, validate, command_type="school_commission_authority_draft_created",
+        )
+
+    def upload_provider_draft(self, provider_id, staged, key, *, signed_confirmed=False):
+        self.check_intake_provider(provider_id)
+        if signed_confirmed is not True or staged.mime_type != "application/pdf":
+            raise ValueError("请核对并上传已签署的 PDF 合同。")
+        configuration = {
+            "higher_education_provider_id": provider_id,
+            "pilot_entity_id": 0,
+            "pilot_simulation": self.simulation,
+            "signed_confirmed": True,
+        }
+        return self._save_signed_draft(
+            configuration, staged, key, lambda: self.check_intake_provider(provider_id),
+            command_type="school_commission_provider_draft_created",
+        )
+
+    def _registered_school(self, school_id):
+        return self.connection.execute(
+            """SELECT 1 FROM revenue_audit_events WHERE action=?
+                 AND aggregate_type='school_commission_school' AND aggregate_uid=? LIMIT 1""",
+            (SCHOOL_REGISTRATION_ACTION,f"{int(self.simulation)}:{school_id}"),
+        ).fetchone()
+
+    def _active_binding(self, school_id):
+        return self.connection.execute(
+            "SELECT 1 FROM revenue_entity_provider_links WHERE school_id=? AND effective_to IS NULL",
+            (school_id,),
+        ).fetchone()
 
     def _bindings(self, school_id, effective_from):
         return self.connection.execute(
@@ -421,9 +548,16 @@ class SchoolCommissionContracts:
 
     def _configurable_school(self, school_id):
         self._require_admin()
-        if not self.formal or not self.entity_id or school_id != self.school_id:
+        if (not self.formal or (not self.entity_id and not (self.entity_id == 0 and (self.simulation or self.contract_intake)))
+                or school_id != self.school_id):
             raise ValueError("请选择授权范围内的学校及付款主体。")
         return self._school(school_id)
+
+    def check_intake_school(self, school_id):
+        self._configurable_school(school_id)
+        self._check_public_school_scope(school_id)
+        if not self._registered_school(school_id) or self._active_binding(school_id):
+            raise ValueError("请选择已登记且尚未绑定付款主体的学校。")
 
     def upload_configurable_draft(self, school_id, staged, key, *, signed_confirmed=False):
         self._configurable_school(school_id)
@@ -437,10 +571,14 @@ class SchoolCommissionContracts:
             "pilot_simulation": self.simulation,
             "signed_confirmed": True,
         }
-        payload = {**configuration, "sha256": staged.sha256}
 
-        def operation():
-            if not self.connection.execute(
+        def validate():
+            if self.entity_id == 0:
+                if self.contract_intake:
+                    self.check_intake_school(school_id)
+                else:
+                    raise ValueError("学校配置已变更，请刷新后重新选择。")
+            elif not self.connection.execute(
                 """SELECT 1 FROM revenue_entity_provider_links l
                      JOIN revenue_entities e ON e.id=l.revenue_entity_id
                     WHERE l.school_id=? AND e.id=? AND e.status='active'
@@ -448,21 +586,39 @@ class SchoolCommissionContracts:
                 (school_id,self.entity_id),
             ).fetchone():
                 raise ValueError("学校尚未绑定有效付款主体。")
-            if self.connection.execute(
-                "SELECT 1 FROM revenue_documents WHERE document_kind=? AND storage_path=?",
-                (FORMAL_CONTRACT,str(staged.path)),
-            ).fetchone():
+
+        return self._save_signed_draft(
+            configuration, staged, key, validate, command_type="school_commission_configurable_draft_created",
+        )
+
+    def _save_signed_draft(self, configuration, staged, key, validate, *, command_type):
+        payload = {**configuration, "sha256": staged.sha256}
+
+        def operation():
+            validate()
+            from revenue.state_school_commission import DISCARDED_CONTRACT_UPLOAD
+
+            prior = self.connection.execute(
+                """SELECT d.version_no, EXISTS (
+                       SELECT 1 FROM revenue_rule_snapshots s JOIN revenue_audit_events a
+                         ON a.aggregate_uid=s.uid AND a.action=? WHERE s.source_rule_uid=d.uid
+                   ) AS discarded FROM revenue_documents d
+                   WHERE d.document_kind=? AND d.storage_path=? ORDER BY d.version_no DESC""",
+                (DISCARDED_CONTRACT_UPLOAD, FORMAL_CONTRACT, str(staged.path)),
+            ).fetchall()
+            if any(not row["discarded"] for row in prior):
                 raise ValueError("这份签署合同已上传，请打开原有草稿或合同。")
             document = self.service.register_document(
                 FORMAL_CONTRACT,str(staged.path),staged.sha256,staged.mime_type,
                 staged.size_bytes,"upload",self.actor_user_id,f"{key}:document",
+                version_no=prior[0]["version_no"] + 1 if prior else 1,
             )
             return self.service._rule_snapshot(
                 "commission",document["uid"],{**configuration,"document_uid":document["uid"]},self.actor_user_id,
             )
 
         return self.repository.command(
-            idempotency_key=key,command_type="school_commission_configurable_draft_created",
+            idempotency_key=key,command_type=command_type,
             aggregate_type="rule_snapshot",payload=payload,actor_user_id=self.actor_user_id,operation=operation,
         )
 

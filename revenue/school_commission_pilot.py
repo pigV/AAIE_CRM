@@ -25,6 +25,8 @@ class PilotPolicy:
     simulation: bool = True
     self_service: bool = False
     revision: int = 0
+    contract_intake: bool = False
+    education_authorities: tuple[str, ...] = ()
 
     def allows(self, user, stage):
         if not user or user["role_name"] != "Admin" or user["id"] not in self.admin_ids:
@@ -33,6 +35,8 @@ class PilotPolicy:
             return True
         if stage == "setup":
             return self.enabled and self.self_service
+        if stage == "contract-intake":
+            return self.enabled and self.contract_intake and not self.self_service
         return self.enabled and stage in STAGES and STAGES.index(stage) <= STAGES.index(self.stage)
 
     def matches_payer(self, connection):
@@ -107,8 +111,9 @@ def read_pilot_policy(root, mode, override=None):
             return closed
         value = json.loads(path.read_text(encoding="utf-8"))
         if (not isinstance(value,dict)
-                or set(value)-{"self_service"}!={"mode","enabled","stage","school_id","entity_id","admin_ids"}
+                or set(value)-{"self_service","contract_intake","education_authorities"}!={"mode","enabled","stage","school_id","entity_id","admin_ids"}
                 or type(value.get("self_service",False)) is not bool
+                or type(value.get("contract_intake",False)) is not bool
                 or value["mode"]!=mode or type(value["enabled"]) is not bool
                 or value["stage"] not in STAGES):
             return closed
@@ -118,8 +123,16 @@ def read_pilot_policy(root, mode, override=None):
         ids = (value["school_id"],value["entity_id"],*admins)
         if any(type(item) is not int or item<=0 for item in ids) or len(set(admins))!=len(admins):
             return closed
+        from revenue.state_school_commission import STATE_AUTHORITIES
+
+        states = value.get("education_authorities", [])
+        if (not isinstance(states, list) or any(type(state) is not str or state not in STATE_AUTHORITIES for state in states)
+                or len(set(states)) != len(states)):
+            states = []
         return PilotPolicy(value["school_id"],value["entity_id"],tuple(admins),value["enabled"],
-                           value["stage"],mode=="rehearsal",value.get("self_service",False))
+                           value["stage"],mode=="rehearsal",value.get("self_service",False),
+                           contract_intake=value.get("contract_intake",False),
+                           education_authorities=tuple(sorted(states)))
     except (OSError,ValueError,RuntimeError):
         return closed
 
@@ -178,6 +191,8 @@ def list_school_pilot_scopes(connection, base):
         """SELECT DISTINCT school_id FROM revenue_entity_provider_links
            WHERE school_id IS NOT NULL AND effective_to IS NULL ORDER BY school_id"""
     ) if (scope := school_pilot_scope(connection,base,school_id=school_id)) is not None]
+
+
 
 
 def set_school_pilot_stage(repository, base, school_id, stage, actor, key):
