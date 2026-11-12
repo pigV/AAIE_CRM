@@ -22,12 +22,16 @@ def invoice_overviews(issuer, settlement, entity_id, *, issued_by=None):
             yield {**invoice, "settlement": detail["settlement"], "legal_name": detail["legal_name"]}
 
 
-def draft_reminder(invoice, recipient):
+def draft_reminder(invoice, recipient, *, simulation=None):
     settlement = invoice["settlement"]
     if not settlement["overdue_days"]:
         raise ValueError("只有已逾期且尚有未收余额的发票可以催款。")
     recipient = str(recipient or "").strip()
-    if len(recipient) > 254 or not EMAIL.fullmatch(recipient):
+    if simulation is not None:
+        from revenue.school_invoice_release import payer_mail_addresses
+
+        recipient = ", ".join(payer_mail_addresses(recipient, simulation=simulation))
+    elif len(recipient) > 254 or not EMAIL.fullmatch(recipient):
         raise ValueError("请输入并核对学校财务邮箱。")
     number = invoice["invoice_number"]
     due = settlement.get("due_date") or settlement["delivery"]["due_date"]

@@ -132,9 +132,19 @@ def _formal_authority_panel(formal, action, csrf):
     can_settle = formal.get("can_settle", simulation)
     if summary.get("due_date"):
         html += f'<p>到期 {escape(summary["due_date"])}</p>'
-    if reminder := formal.get("reminder"):
+    if formal.get("reminder_direct") and summary["overdue_days"]:
+        html += controls("reminder-preview", "提醒学校 · 预览邮件")
+    elif reminder := formal.get("reminder"):
         html += (f'<details><summary>催款草稿 · 未收 {_aud(summary["outstanding_cents"])}</summary>'
                  f'<p>{escape(reminder["subject"])}</p><pre>{escape(reminder["body"])}</pre></details>')
+    if reminder_mails := formal.get("reminder_mails"):
+        from revenue.school_invoice_views import render_reminder_mail_records
+
+        html += render_reminder_mail_records(
+            detail["uid"], reminder_mails, csrf, formal["reminder_token"],
+            retry_action=action if formal.get("reminder_direct") else "", operation="authority-formal-reminder-retry",
+            attachment_href=action + "&pdf=formal",
+        )
     if not delivery:
         return html + (controls("delivery","确认学校收件日" if school else "确认教育局收件日",
                                 date+proof,upload=True) if can_settle else "")

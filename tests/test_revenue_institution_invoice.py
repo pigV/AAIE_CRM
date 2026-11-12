@@ -184,6 +184,13 @@ class InstitutionInvoiceTests(RevenueDatabaseFixture, unittest.TestCase):
             detail = formal.view()
             self.assertEqual("2026-11-26", detail["detail"]["settlement"]["due_date"])
             self.assertIn("AUD 80.00", detail["reminder"]["body"])
+            from revenue.school_invoice_mail import preview_reminder_mail
+
+            reminder = preview_reminder_mail(connection, invoice["uid"], True)
+            self.assertEqual(8000, reminder["outstanding_cents"])
+            self.assertEqual([workflow.uid, draft["uid"]], reminder["institution_draft"])
+            self.assertEqual("accounts@aaie.com.hk, finance@school.example.test", reminder["cc"])
+            self.assertEqual("archive@school.example.test", reminder["bcc"])
             with patch("revenue.institution_invoice._today", return_value="2026-11-30"):
                 reminder_rows = list(overdue_institution_invoices(repo, workflow.pilot, 1))
             self.assertEqual([8000], [row["settlement"]["outstanding_cents"] for row in reminder_rows])

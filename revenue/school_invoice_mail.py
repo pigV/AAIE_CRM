@@ -13,7 +13,7 @@ from time import sleep
 
 from revenue.invoice_templates import FORMAL_INVOICE_KIND
 from revenue.repository import canonical_json, new_uid
-from revenue.school_invoice_reminders import EMAIL
+from revenue.school_invoice_reminders import EMAIL, draft_reminder
 from revenue.school_invoice_release import FINANCE_COPY_ADDRESS, SENDER, payer_copy_addresses, payer_mail_addresses, release_values
 from revenue.secure_storage import StorageUnavailable, read_secure, write_immutable
 from revenue.storage_locations import resolve_location
@@ -166,6 +166,116 @@ def enqueue_mail(repository, invoice, document, entity_id, actor, *, release=Non
     )
 
 
+def preview_reminder_mail(connection, invoice_uid, simulation):
+    from revenue.toorak_settlement import settlement_summary
+
+    invoice = connection.execute(
+        """SELECT i.*,d.uid AS document_uid,d.sha256,e.legal_name,a.action,a.after_json
+             FROM revenue_invoices i JOIN revenue_documents d ON d.id=i.document_id
+             JOIN revenue_entities e ON e.id=i.revenue_entity_id
+             JOIN revenue_audit_events a ON a.aggregate_uid=i.uid
+            WHERE i.uid=? AND i.status='issued' AND d.document_kind=?
+              AND a.action IN (?,?,?) AND json_extract(a.after_json,'$.simulation')=?
+            ORDER BY a.id DESC LIMIT 1""",
+        (invoice_uid, FORMAL_INVOICE_KIND, *ISSUE_ACTIONS, int(simulation)),
+    ).fetchone()
+    if not invoice:
+        raise ValueError("请选择本环境已签发的佣金发票。")
+    entity = invoice["revenue_entity_id"]
+    settings = mail_settings(connection, entity)
+    mode = "mock" if simulation else "production"
+    if not (settings["verified"] and settings.get("routing") == "payer" and settings.get("transport") == mode):
+        raise ValueError("请先核对付款主体的学校收票邮箱。")
+    lines = [row[0] for row in connection.execute(
+        "SELECT id FROM revenue_invoice_lines WHERE invoice_id=?", (invoice["id"],),
+    )]
+    if not lines:
+        raise ValueError("发票没有可对账的明细。")
+    summary = settlement_summary(connection, invoice_uid, lines, invoice["gross_cents"],
+                                 formal=True, due_date=invoice["due_date"])
+    draft = draft_reminder({**dict(invoice), "settlement": summary}, settings["recipient"], simulation=simulation)
+    cc, bcc = payer_copy_addresses(draft["recipient"], settings.get("cc", ""), settings.get("bcc", ""),
+                                   simulation=simulation)
+    event = {
+        "mail_kind": "reminder", "invoice_uid": invoice_uid, "entity_id": entity,
+        "invoice_number": invoice["invoice_number"], "payer_name": invoice["legal_name"],
+        "outstanding_cents": draft["outstanding_cents"], "due_date": draft["due_date"],
+        "recipient": draft["recipient"], "cc": ", ".join([FINANCE_COPY_ADDRESS, *cc]),
+        "bcc": ", ".join(bcc), "settings_revision": settings["revision"], "transport": mode,
+        "routing": "payer", "document_uid": invoice["document_uid"], "attachment_sha256": invoice["sha256"],
+        "message": {
+            "sender": SENDER,
+            "subject": ("TEST ONLY | " if simulation else "") + draft["subject"],
+            "body": ("TEST ONLY - simulated payment reminder.\n\n" if simulation else "") + draft["body"],
+            "attachment_name": f'{invoice["invoice_number"]}.pdf',
+        },
+    }
+    if invoice["action"] == ISSUE_ACTIONS[1]:
+        link = connection.execute(
+            "SELECT contract_draft_uid,draft_uid FROM revenue_authority_invoices WHERE invoice_id=?",
+            (invoice["id"],),
+        ).fetchone()
+        if not link:
+            raise ValueError("发票缺少教育局签发记录。")
+        event["authority_draft"] = list(link)
+    elif invoice["action"] == ISSUE_ACTIONS[2]:
+        issuance = json.loads(invoice["after_json"])
+        event["institution_draft"] = [issuance["contract_draft_uid"], issuance["draft_uid"]]
+    if not payer_invoice_approved(connection, event, simulation):
+        raise ValueError("发票的付款主体或原版附件无法核对。")
+    return {**event, "digest": hashlib.sha256(canonical_json(event).encode()).hexdigest()}
+
+
+def queue_reminder_mail(repository, invoice_uid, actor, simulation, digest, key):
+    if not key or not digest:
+        raise ValueError("请先预览并确认催款邮件。")
+    connection = repository.connection
+    owns_transaction = not connection.in_transaction
+    if owns_transaction:
+        connection.execute("BEGIN IMMEDIATE")
+    try:
+        draft = preview_reminder_mail(connection, invoice_uid, simulation)
+        if draft["digest"] != digest:
+            raise ValueError("余额、到期日或收票邮箱已变更，请重新预览。")
+        existing = next((record for record in reminder_mail_history(connection, invoice_uid)
+                         if record["outstanding_cents"] == draft["outstanding_cents"]
+                         and record["status"] != "cancelled"), None)
+        result = existing or repository.command(
+            idempotency_key=f"school-reminder-mail:{key}", command_type=QUEUED,
+            aggregate_type="invoice", payload={"invoice_uid": invoice_uid, "digest": digest},
+            actor_user_id=actor, operation=lambda: {**draft, "uid": new_uid("reminder"), "actor": actor},
+        )
+        if owns_transaction:
+            connection.commit()
+        return result
+    except BaseException:
+        if owns_transaction:
+            connection.rollback()
+        raise
+
+
+def reminder_mail_history(connection, invoice_uid):
+    if not invoice_uid:
+        return []
+    rows = connection.execute(
+        """SELECT aggregate_uid FROM revenue_outbox_events WHERE event_type=?
+             AND json_extract(payload_json,'$.mail_kind')='reminder'
+             AND json_extract(payload_json,'$.invoice_uid')=? ORDER BY id DESC""",
+        (QUEUED, invoice_uid),
+    )
+    return [mail_status(connection, row[0]) for row in rows]
+
+
+def _reminder_current(connection, event):
+    if event.get("mail_kind") != "reminder":
+        return True
+    try:
+        current = preview_reminder_mail(connection, event["invoice_uid"], event["transport"] == "mock")
+    except ValueError:
+        return False
+    return current["digest"] == event["digest"]
+
+
 def mail_status(connection, invoice_uid):
     row = connection.execute(
         """SELECT * FROM revenue_outbox_events WHERE event_type=? AND aggregate_uid=?""",
@@ -186,7 +296,7 @@ def mail_status(connection, invoice_uid):
     elif row["last_error_code"] == "smtp_inflight":
         started = datetime.fromisoformat(attempts[-1]["occurred_at"])
         status = "sending" if datetime.now(timezone.utc) - started < timedelta(minutes=3) else "needs_review"
-    elif row["last_error_code"] in {"settings_changed","smtp_disabled","smtp_limit","smtp_recipient_not_allowed","smtp_invoice_not_approved"}:
+    elif row["last_error_code"] in {"settings_changed","smtp_disabled","smtp_limit","smtp_recipient_not_allowed","smtp_invoice_not_approved","reminder_changed"}:
         status = "cancelled"
     elif row["last_error_code"] in {"simulation_mailbox_needs_review","smtp_uncertain"}:
         status = "needs_review"
@@ -220,12 +330,13 @@ def invoice_mail_history(connection, entity_ids, simulation, *, number="", start
                       .astimezone(timezone.utc).isoformat())
     matches = connection.execute(
         """WITH history AS (
-            SELECT i.uid,i.invoice_number,i.revenue_entity_id,e.legal_name,
+            SELECT o.aggregate_uid AS uid,i.invoice_number,i.revenue_entity_id,e.legal_name,
                    coalesce(o.dispatched_at,
                        (SELECT a.occurred_at FROM revenue_audit_events a
-                         WHERE a.aggregate_uid=i.uid AND a.action=? ORDER BY a.id DESC LIMIT 1),
+                         WHERE a.aggregate_uid=o.aggregate_uid AND a.action=? ORDER BY a.id DESC LIMIT 1),
                        o.created_at) AS history_at
-              FROM revenue_outbox_events o JOIN revenue_invoices i ON i.uid=o.aggregate_uid
+              FROM revenue_outbox_events o JOIN revenue_invoices i
+                ON i.uid=coalesce(json_extract(o.payload_json,'$.invoice_uid'),o.aggregate_uid)
               JOIN revenue_entities e ON e.id=i.revenue_entity_id
              WHERE o.event_type=? AND EXISTS (
                    SELECT 1 FROM revenue_audit_events a WHERE a.aggregate_uid=i.uid
@@ -254,7 +365,8 @@ def retry_mail(repository, invoice_uid, entity_id, actor, key, attempt_count):
     def operation():
         event = mail_status(repository.connection, invoice_uid)
         if (not event or event["entity_id"] != entity_id or event["status"] != "failed"
-                or event["attempt_count"] != attempt_count or not _settings_match(repository.connection, event)):
+                or event["attempt_count"] != attempt_count or not _settings_match(repository.connection, event)
+                or not _reminder_current(repository.connection, event)):
             raise ValueError("邮件状态已变更，请刷新后再重试。")
         repository.connection.execute(
             """UPDATE revenue_outbox_events SET last_error_code=NULL
@@ -321,7 +433,7 @@ def _verified_pdf(connection, root, event):
            FROM revenue_invoices i JOIN revenue_documents d ON d.id=i.document_id
            WHERE i.uid=? AND i.revenue_entity_id=? AND i.status='issued'
              AND d.uid=? AND d.document_kind=?""",
-        (event["uid"], event["entity_id"], event["document_uid"], FORMAL_INVOICE_KIND),
+        (event.get("invoice_uid", event["uid"]), event["entity_id"], event["document_uid"], FORMAL_INVOICE_KIND),
     ).fetchone()
     if not document or event.get("attachment_sha256", document["sha256"]) != document["sha256"]:
         raise StorageUnavailable()
@@ -369,8 +481,12 @@ def _dispatch(repository, root, row, event, *, mock_writable_mount=None):
     authorized = _settings_match(connection, event)
     if event.get("routing") == "payer":
         authorized = authorized and payer_invoice_approved(connection, event, True)
+    current = _reminder_current(connection, event)
+    authorized = authorized and current
     storage = {"mock_writable_mount":mock_writable_mount} if mock_writable_mount else {}
     result, error, pdf_digest = _deliver(connection, root, row, event, authorized, **storage)
+    if not current and result == "cancelled":
+        error = "reminder_changed"
     attempt = row["attempt_count"] + int(authorized or result == "sent")
     now = repository.now()
     connection.execute(
@@ -390,7 +506,7 @@ def _dispatch(repository, root, row, event, *, mock_writable_mount=None):
 
 def _settings_match(connection, event):
     settings = mail_settings(connection, event["entity_id"])
-    return (settings["enabled"] and settings["verified"]
+    return ((settings["enabled"] or event.get("mail_kind") == "reminder") and settings["verified"]
             and settings["revision"] == event["settings_revision"]
             and settings.get("delivery_recipient",settings["recipient"]) == event["recipient"]
             and settings.get("transport", "mock") == event.get("transport", "mock")
@@ -436,7 +552,7 @@ def payer_invoice_approved(connection, event, simulation):
             WHERE i.uid=? AND i.revenue_entity_id=? AND i.status='issued' AND e.status='active'
               AND d.uid=? AND d.document_kind=? AND d.sha256=?
               AND a.action IN (?,?,?) AND json_extract(a.after_json,'$.simulation')=?""",
-        (event["uid"], event["entity_id"], event["document_uid"], FORMAL_INVOICE_KIND,
+        (event.get("invoice_uid") or event["uid"], event["entity_id"], event["document_uid"], FORMAL_INVOICE_KIND,
          event["attachment_sha256"], *ISSUE_ACTIONS, int(simulation)),
     ).fetchone()
     if not row:
@@ -520,6 +636,8 @@ def _claim_smtp(repository, row, event, transport):
         error = "settings_changed"
     elif not _smtp_invoice_approved(connection,event,transport):
         error = "smtp_invoice_not_approved"
+    elif not _reminder_current(connection, event):
+        error = "reminder_changed"
     elif transport.limit is not None and prior[0] >= transport.limit and not prior[1]:
         error = "smtp_limit"
     attempt = row["attempt_count"] + int(error is None)
@@ -543,12 +661,15 @@ def _submit_smtp(repository, root, row, event, transport, eligible):
 
         def allowed():
             return (eligible(event) and _settings_match(connection,event)
-                    and _smtp_invoice_approved(connection,event,transport))
+                    and _smtp_invoice_approved(connection,event,transport)
+                    and _reminder_current(connection,event))
 
         copies = {}
         if event.get("routing") == "payer" and (event.get("cc") != FINANCE_COPY_ADDRESS or event.get("bcc")):
             copies = {"cc": event["cc"], "bcc": event.get("bcc", "")}
         result,error,code = transport.submit(event["recipient"],content,allowed,**copies)
+        if result == "cancelled" and error == "smtp_disabled" and not _reminder_current(connection, event):
+            error = "reminder_changed"
     accepted_at = repository.now() if result == "sent" else None
     attempt = row["attempt_count"]+1
     for retry in range(5):

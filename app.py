@@ -258,12 +258,12 @@ from revenue.school_invoice_smtp import RehearsalSMTP
 from revenue.school_invoice_release import SENDER
 from revenue.school_invoice_mail import (
     dispatch_next, invoice_mail_history, mail_settings, mail_status, payer_invoice_approved,
-    retry_mail, save_mail_release, save_mail_settings,
+    preview_reminder_mail, queue_reminder_mail, reminder_mail_history, retry_mail, save_mail_release, save_mail_settings,
 )
 from revenue.school_invoice_reminders import draft_reminder, invoice_overviews, record_reminder, reminder_history
 from revenue.school_invoice_views import (
     MAIL_STATUS_LABELS, URL as SCHOOL_INVOICE_URL, render_school_invoice_detail, render_school_invoice_list,
-    render_school_mail_history,
+    render_queued_reminder_preview, render_school_mail_history,
     render_school_invoice_preview, render_school_reminder_center, render_school_reminder_preview,
 )
 from revenue.views import (
@@ -27274,7 +27274,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/revenue/documents/([^/]+)/(view|download)$", self.revenue_document),
                 (r"^/revenue/school-commission-candidates(?:/(review|confirm))?$",
                  self.revenue_school_claim_candidates),
-                (r"^/revenue/school-commission-invoices(?:/(preview|pdf|issue|delivery|payment|reconcile|reminder|reminder-sent|mail-settings|mail-retry|mail-history))?$",
+                (r"^/revenue/school-commission-invoices(?:/(preview|pdf|issue|delivery|payment|reconcile|reminder|reminder-send|reminder-retry|reminder-sent|mail-settings|mail-retry|mail-history))?$",
                  self.revenue_school_commission_invoices),
                 (r"^/revenue/commission-invoice-templates(?:/(save|rename|publish|rollback|profile|preview))?$", self.revenue_commission_invoice_templates),
                 (r"^/revenue/cases/([^/]+)/toorak-settlement/(delivery|payment|reconcile)$", self.revenue_case_toorak_settlement),
@@ -29264,9 +29264,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return self.send_html(page("发票发送历史", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
                               headers=[("Cache-Control", "no-store")], presentation_surface="desktop")
 
+    def _submit_commission_reminder(self, repository, invoice, simulation, operation):
+        key = str(self.form.get("idempotency_key") or "")
+        if operation == "reminder-send":
+            return queue_reminder_mail(repository, invoice["uid"], int(self.user["id"]), simulation,
+                                       self.form.get("digest"), key)
+        mail = mail_status(repository.connection, str(self.form.get("mail_uid") or ""))
+        if not mail or mail.get("mail_kind") != "reminder" or mail["invoice_uid"] != invoice["uid"]:
+            raise ValueError("请选择这张发票的催款记录。")
+        return retry_mail(repository, mail["uid"], invoice["revenue_entity_id"], int(self.user["id"]),
+                          key, int(self.form.get("attempt_count") or 0))
+
     def revenue_school_commission_invoices(self, method, operation):
         settlement_operation = operation in {"delivery","payment","reconcile"}
-        reminder_operation = operation in {"reminder","reminder-sent"}
+        reminder_operation = operation in {"reminder", "reminder-send", "reminder-retry", "reminder-sent"}
         stage = "settlement" if settlement_operation or reminder_operation else {
             None:"read","preview":"preview","pdf":"preview","mail-history":"read",
         }.get(operation,"invoicing")
@@ -29339,6 +29350,23 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 connection.commit()
                 return self.redirect(SCHOOL_INVOICE_URL+"?invoice="+quote(invoice_uid,safe=""))
             if reminder_operation:
+                direct = operation in {"reminder-send", "reminder-retry"} or (operation == "reminder" and payer_mail)
+                if direct:
+                    if not payer_mail:
+                        return self.error_page("当前环境未开启学校催款邮件。", HTTPStatus.FORBIDDEN)
+                    details = settlement.detail(invoice_uid)
+                    back = SCHOOL_INVOICE_URL + "?invoice=" + quote(invoice_uid, safe="")
+                    if operation == "reminder":
+                        draft = preview_reminder_mail(connection, invoice_uid, simulation)
+                        body = render_queued_reminder_preview(draft, self.csrf, new_token(),
+                                                             SCHOOL_INVOICE_URL + "/reminder-send", back)
+                        return self.send_html(page("催款邮件预览", body, self.user, self.csrf,
+                                                   REVENUE_MODULE_KEY, nas.status()),
+                                              headers=[("Cache-Control", "no-store")], presentation_surface="desktop")
+                    self._begin_school_commission_write(connection, pilot, "settlement")
+                    self._submit_commission_reminder(actions.repository, details, simulation, operation)
+                    connection.commit()
+                    return self.redirect(back)
                 recipient = self.form.get("recipient")
                 if operation == "reminder-sent":
                     self._begin_school_commission_write(connection,pilot,"settlement")
@@ -29358,7 +29386,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                                         simulation=simulation,
                                                         reminder_records=reminder_history(connection,invoice_uid),
                                                         auto_mail=mail_status(connection,invoice_uid) if pilot else None,
-                                                        show_mail=bool(pilot),
+                                                        show_mail=bool(pilot), reminder_direct=payer_mail and allow_settlement,
+                                                        reminder_mails=reminder_mail_history(connection, invoice_uid),
                                                         allow_mail_retry=(mail_enabled or mail_release or payer_mail) and
                                                         school_commission_authority(self.user,"invoicing",invoice_uid=invoice_uid) is not False)
                 else:
@@ -30102,6 +30131,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         operation = None
         settlement = None
         formal_authority = None
+        reminder_direct = False
         requested = (self.query.get("invoice") or [""])[0]
         rehearsal = bool(getattr(STAGING, "mode", None) == "staging" and pilot.simulation
                          and os.environ.get("AAIE_SCHOOL_COMMISSION_FORMAL_REHEARSAL") == "1")
@@ -30172,6 +30202,21 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if not terms:
                 nsw_review = workflow.nsw_review()
                 analysis = nsw_review["analysis"] if nsw_review else workflow.analyse(ocr)
+            reminder_direct = (getattr(pilot, "stage", None) == "settlement" and (
+                rehearsal and payer_mail_mode == "mock" or formal_production and school_invoice_payer_mail_live()
+            ))
+            if operation == "authority-formal-reminder-preview":
+                if not reminder_direct or not formal_authority or not formal_authority.issued_uid():
+                    raise PermissionError("请选择已签发、可发送催款邮件的发票。")
+                issued = formal_authority.issued_uid()
+                formal_authority.detail(issued)
+                draft = preview_reminder_mail(connection, issued, pilot.simulation)
+                back = url + "?invoice=" + quote(invoice["uid"], safe="")
+                body = render_queued_reminder_preview(draft, self.csrf, new_token(), back, back,
+                                                      operation="authority-formal-reminder-send", attachment_href=back + "&pdf=formal")
+                return self.send_html(page("催款邮件预览", body, self.user, self.csrf, REVENUE_MODULE_KEY,
+                                           nas.status()), headers=[("Cache-Control", "no-store")],
+                                      presentation_surface="desktop")
             if method == "POST" and operation == "authority-formal-dispatch":
                 if not rehearsal or not formal_authority or not formal_authority.issued_uid():
                     raise PermissionError("请选择已签发的隔离发票。")
@@ -30237,6 +30282,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         formal_authority.issue(self.form.get("preview_token"))
                     elif not issued:
                         raise ValueError("请先核对并签发隔离测试发票。")
+                    elif action in {"reminder-send", "reminder-retry"}:
+                        if not reminder_direct:
+                            raise PermissionError("当前环境未开启学校催款邮件。")
+                        self._submit_commission_reminder(repository, formal_authority.detail(issued),
+                                                         pilot.simulation, action)
                     elif action == "retry" and (payer_mail_mode == "mock" or school_invoice_payer_mail_live()):
                         formal_authority.retry_mock_mail(issued, int(self.form.get("attempt_count", "-1")))
                     elif action == "reconcile" and (rehearsal or pilot.stage == "settlement"):
@@ -30400,7 +30450,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                settlement=settlement.summary() if settlement and not formal_authority else None,
                                formal_authority=({**formal_authority.view(),
                                                   "can_issue": rehearsal or formal_production,
-                                                  "can_settle": rehearsal or (formal_production and pilot.stage == "settlement")}
+                                                  "can_settle": rehearsal or (formal_production and pilot.stage == "settlement"),
+                                                  "reminder_direct": reminder_direct,
+                                                  "reminder_token": new_token(),
+                                                  "reminder_mails": reminder_mail_history(connection, formal_authority.issued_uid())}
                                                  if formal_authority else None))
         return self.send_html(page("机构佣金草稿", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
                               HTTPStatus.BAD_REQUEST if error else HTTPStatus.OK,
@@ -81998,10 +82051,14 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
                                 or not payer_invoice_approved(connection, event, not payer_live)):
                             return False
                         current = read_pilot_policy(STAGING.root, mode, override)
-                        if not current.enabled or current.stage not in {"invoicing", "settlement"}:
+                        if (not current.enabled or current.stage not in {"invoicing", "settlement"}
+                                or event.get("mail_kind") == "reminder" and current.stage != "settlement"):
                             return False
                         scope = school_pilot_scope(connection, current, entity_id=event["entity_id"])
                         if scope and scope.enabled and scope.stage in {"invoicing", "settlement"}:
+                            if (event.get("mail_kind") == "reminder" and not event.get("institution_draft")
+                                    and scope.stage != "settlement"):
+                                return False
                             return payer_matches(scope, connection)
                         if not current.contract_intake:
                             return False

@@ -365,9 +365,167 @@ class IssuedCommissionMailTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     formal.record_payment(invoice_uid, "VIC", 120000, day, "TEST-NSW", proof)
                 formal.record_payment(invoice_uid, state, 120000, day, "TEST-NSW", proof)
+                seed_state_enrolment(repo.connection, service, 125, "TEST-NSW-REMINDER", 15, 83333, "2026-09-01")
+                workflow.confirm_student_evidence(
+                    {"component": "state-component-125", "tier": "standard", "reference": "TEST registration",
+                     "eligible": "1"}, terms, "reminder-evidence",
+                )
+                eligible_rows = [row for row in workflow.candidates(terms) if row.get("uid")]
+                reminder_student = next(row for row in eligible_rows if row["student_id"] == "TEST-NSW-REMINDER")
+                reminder_draft = workflow.create_invoice_draft(
+                    [reminder_student["uid"]], _digest(sorted(row["revision"] for row in eligible_rows)),
+                    terms, "reminder-invoice-draft",
+                )
+                self._save_contact(repo, payer, "reminder", "ap@reminder.example.test, finance@reminder.example.test")
+                reminder_invoice = AuthorityInvoice(workflow, reminder_draft, rehearsal=True, payer_mail=True)
+                self._verify_reminder_mail(fixture, repo, reminder_invoice, day, proof)
             result = formal.reconcile(None, invoice_uid, True)
             self.assertEqual(result, formal.reconcile(None, invoice_uid, True))
             self.assertEqual("reconciled", formal.detail(invoice_uid)["settlement"]["status"])
+
+    def _verify_reminder_mail(self, fixture, repo, formal, day, proof):
+        from concurrent.futures import ThreadPoolExecutor
+        from contextlib import closing
+        from datetime import date, timedelta
+        from email import policy as email_policy
+        from email.parser import BytesParser
+        from pathlib import Path
+        from types import SimpleNamespace
+        import json
+        import os
+        import sqlite3
+        from unittest.mock import patch
+
+        from revenue.repository import RevenueRepository
+        from revenue.school_invoice_mail import (
+            dispatch_next, invoice_mail_history, mail_status, preview_reminder_mail, queue_reminder_mail, retry_mail,
+        )
+        from revenue.school_invoice_release import SENDER
+        from revenue.school_invoice_views import render_queued_reminder_preview, render_school_mail_history
+
+        invoice = formal.issue(formal.preview_token())
+        uid, payer = invoice["uid"], formal.entity_id
+        self.assertEqual(10000, invoice["gross_cents"])
+        repo.connection.commit()
+        self.assertEqual("sent", dispatch_next(repo, self.root, lambda event: event["uid"] == uid)["result"])
+        formal.delivery(None, uid, day, proof, 30)
+        formal.record_payment(uid, "NSW", 2000, day, "TEST-REMINDER-PART", proof)
+        repo.connection.commit()
+        overdue = (date.today() + timedelta(days=31)).isoformat()
+        with patch("revenue.toorak_settlement._today", return_value=overdue):
+            preview = preview_reminder_mail(repo.connection, uid, True)
+            self.assertIn("AUD 80.00", preview["message"]["body"])
+            self.assertNotIn("AUD 100.00", preview["message"]["body"])
+            self.assertEqual("accounts@aaie.com.hk", preview["cc"].split(", ")[0])
+            html = render_queued_reminder_preview(preview, "csrf", "test-key", "/send", "/invoice")
+            self.assertIn("确认发送", html)
+            self.assertIn("AUD 80.00", html)
+            self._verify_reminder_http(repo, formal, preview)
+
+            def submit(key):
+                with closing(sqlite3.connect(fixture.database_path, timeout=20)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    return queue_reminder_mail(RevenueRepository(connection), uid, 1, True, preview["digest"], key)
+
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                first, second = workers.map(submit, ("remind-nsw", "double-click"))
+            self.assertEqual(first["uid"], second["uid"])
+            self._verify_reminder_http(repo, formal, preview, confirm=True)
+            reminder_uid = first["uid"]
+            eligible = lambda event: event["uid"] == reminder_uid
+            self.assertEqual("failed", dispatch_next(repo, None, eligible)["result"])
+            retry_mail(repo, reminder_uid, payer, 1, "retry-reminder", 1)
+            self.assertEqual("sent", dispatch_next(repo, self.root, eligible)["result"])
+            self.assertIsNone(dispatch_next(repo, self.root, eligible))
+            message_bytes = (self.root / "school-invoice-test-mailbox" / (reminder_uid + ".eml")).read_bytes()
+            message = BytesParser(policy=email_policy.default).parsebytes(message_bytes)
+            self.assertIn("AUD 80.00", message.get_body().get_content())
+            self.assertEqual(["ap@reminder.example.test", "finance@reminder.example.test"],
+                             [address.addr_spec for address in message["To"].addresses])
+            self.assertEqual(formal.pdf(uid), next(message.iter_attachments()).get_payload(decode=True))
+            self.assertNotEqual(mail_status(repo.connection, uid)["uid"], reminder_uid)
+            history, _ = invoice_mail_history(repo.connection, [payer], True, number=preview["invoice_number"])
+            self.assertEqual(2, len(history))
+            reminder = next(row for row in history if row.get("invoice_uid") == uid)
+            self.assertEqual(["failed", "sent"], [attempt["result"] for attempt in reminder["attempts"]])
+            filters = dict(entity_id="", number=preview["invoice_number"], status="", start="", end="")
+            history_html = render_school_mail_history([(payer, formal.payer)], history, filters, 1, False)
+            self.assertIn("查看催款邮件内容", history_html)
+            self.assertIn("AUD 80.00", history_html)
+            if artifacts := os.environ.get("AAIE_COMMISSION_REMINDER_TEST_ARTIFACTS"):
+                output = Path(artifacts)
+                (output / "reminder.eml").write_bytes(message_bytes)
+                (output / "history.json").write_text(json.dumps(history, ensure_ascii=False, indent=2) + "\n")
+
+            formal.record_payment(uid, "NSW", 1000, day, "TEST-REMINDER-PART2", proof)
+            with self.assertRaisesRegex(ValueError, "重新预览"):
+                queue_reminder_mail(repo, uid, 1, True, preview["digest"], "stale-preview")
+            updated = preview_reminder_mail(repo.connection, uid, True)
+            pending = queue_reminder_mail(repo, uid, 1, True, updated["digest"], "remind-updated")
+
+            def submit_to_mock_smtp(recipient, content, allowed, **copies):
+                self.assertTrue(allowed())
+                formal.record_payment(uid, "NSW", 1000, day, "TEST-REMINDER-LATE-PART", proof)
+                self.assertFalse(allowed())
+                return "cancelled", "smtp_disabled", None
+
+            transport = SimpleNamespace(mode="mock", simulation=True, recipient=None, limit=None,
+                                        sender=SENDER, submit=submit_to_mock_smtp)
+            self.assertEqual("cancelled", dispatch_next(
+                repo, self.root, lambda event: event["uid"] == pending["uid"], smtp=transport)["result"])
+            cancelled = mail_status(repo.connection, pending["uid"])
+            self.assertEqual("cancelled", cancelled["status"])
+            self.assertEqual("reminder_changed", cancelled["attempts"][-1]["error"])
+            last = preview_reminder_mail(repo.connection, uid, True)
+            uncertain = queue_reminder_mail(repo, uid, 1, True, last["digest"], "remind-uncertain")
+            transport.submit = lambda *args, **kwargs: ("needs_review", "smtp_uncertain", None)
+            self.assertEqual("needs_review", dispatch_next(
+                repo, self.root, lambda event: event["uid"] == uncertain["uid"], smtp=transport)["result"])
+            with self.assertRaises(ValueError):
+                retry_mail(repo, uncertain["uid"], payer, 1, "uncertain-retry", 1)
+            formal.record_payment(uid, "NSW", 6000, day, "TEST-REMINDER-FINAL", proof)
+            with self.assertRaises(ValueError):
+                preview_reminder_mail(repo.connection, uid, True)
+
+    def _verify_reminder_http(self, repo, formal, preview, *, confirm=False):
+        import os
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        import app
+        from revenue.institution_commission_draft import InstitutionCommissionDraft
+        from revenue.institution_commission_draft_views import ROOT, render_workflow
+
+        pilot = formal.contract.pilot
+        pilot.stage = "settlement"
+        pilot.entity_id = formal.entity_id
+        handler = object.__new__(app.CRMHandler)
+        handler.user = {"id": 1, "role_name": "Admin"}
+        handler.csrf = "test-csrf"
+        handler.query = {"invoice": [formal.draft["uid"]]}
+        handler.form = {"operation": "authority-formal-reminder-preview"}
+        if confirm:
+            handler.form.update(operation="authority-formal-reminder-send",
+                                digest=preview["digest"], idempotency_key="reminder-http-confirm")
+        handler.redirect = Mock(side_effect=lambda location: location)
+        handler.send_html = Mock(side_effect=lambda html, **kwargs: html)
+        handler.error_page = Mock(side_effect=lambda message, status: (status, message))
+        with (patch.object(app, "STAGING", SimpleNamespace(mode="staging")),
+              patch.dict(os.environ, {"AAIE_SCHOOL_COMMISSION_FORMAL_REHEARSAL": "1"}),
+              patch.object(app, "school_invoice_payer_mail_mode", return_value="mock"),
+              patch.object(app, "school_commission_authority", return_value=pilot),
+              patch.object(app.nas, "status", return_value={}),
+              patch.object(app, "page", side_effect=lambda title, html, *args: html)):
+            response = handler._institution_commission_response(
+                repo.connection, pilot, formal.contract.uid, "POST", ROOT,
+                InstitutionCommissionDraft, render_workflow, Mock(),
+            )
+        if confirm:
+            self.assertEqual(f"{ROOT}/{formal.contract.uid}?invoice={formal.draft['uid']}", response)
+        else:
+            self.assertIn("确认发送", response)
+            self.assertIn(preview["digest"], response)
+            self.assertIn("pdf=formal", response)
 
     def test_school_issues_route_to_toorak_and_new_crm_payer(self):
         from datetime import date, timedelta

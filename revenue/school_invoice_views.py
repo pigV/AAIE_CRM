@@ -118,7 +118,7 @@ def render_school_invoice_preview(data, csrf, token, *, simulation=True, allow_i
       <a href="{URL}?entity_id={data["entity_id"]}">返回重新选择</a></section>"""
 
 
-def render_school_invoice_detail(data, csrf, token, *, allow_settlement=True, simulation=True, reminder_records=(), auto_mail=None, show_mail=False, allow_mail_retry=False):
+def render_school_invoice_detail(data, csrf, token, *, allow_settlement=True, simulation=True, reminder_records=(), auto_mail=None, show_mail=False, allow_mail_retry=False, reminder_direct=False, reminder_mails=()):
     number = escape(data["invoice_number"])
     document = quote(data["document_uid"],safe="")
     rows = "".join(
@@ -132,9 +132,11 @@ def render_school_invoice_detail(data, csrf, token, *, allow_settlement=True, si
                                           allow_actions=allow_settlement)
     reminder = ""
     if allow_settlement and data["settlement"]["overdue_days"]:
+        recipient_input = ("" if reminder_direct else
+                           '<label>已核对的学校财务邮箱<input type="email" name="recipient" maxlength="254" required></label>')
         reminder = f"""<form method="post" action="{URL}/reminder" class="revenue-action-form">
           {_hidden_security(csrf,token,"reminder-preview")}{_hidden("invoice_uid",data["uid"])}
-          <label>已核对的学校财务邮箱<input type="email" name="recipient" maxlength="254" required></label>
+          {recipient_input}
           <button type="submit">提醒学校 · 预览邮件</button></form>"""
     history = "".join(
         f'<li>{escape(record["occurred_at"])} · {escape(record["recipient"])}'
@@ -144,6 +146,9 @@ def render_school_invoice_detail(data, csrf, token, *, allow_settlement=True, si
     )
     if history:
         history = f'<h2>催款记录</h2><ul>{history}</ul>'
+    history += render_reminder_mail_records(
+        data["uid"], reminder_mails, csrf, token, retry_action=URL + "/reminder-retry" if reminder_direct else "",
+    )
     mail = render_school_mail_status(data["uid"],auto_mail,csrf,token,allow_mail_retry) if show_mail else ""
     return f"""<section class="revenue-panel">
       <h1>学校佣金发票 {number}</h1>
@@ -207,6 +212,42 @@ def render_school_reminder_preview(invoice, draft, csrf, token, *, simulation):
       </section>"""
 
 
+def render_queued_reminder_preview(draft, csrf, token, send_action, back_href, *, operation="", attachment_href=None):
+    message = draft["message"]
+    document = quote(draft["document_uid"], safe="")
+    title = "TEST ONLY · 催款邮件预览" if draft["transport"] == "mock" else "催款邮件预览"
+    return f"""<section class="revenue-panel">
+      <h1>{title}</h1>
+      <p>发票 {escape(draft["invoice_number"])} · 到期 {escape(draft["due_date"])}
+        · 未收 {_aud_money(draft["outstanding_cents"])}</p>
+      <p>收件人 {escape(draft["recipient"])} · 抄送 {escape(draft["cc"])}</p>
+      <p>密送 {escape(draft["bcc"] or "—")}</p>
+      <p>主题 {escape(message["subject"])}</p><pre>{escape(message["body"])}</pre>
+      <p>附件 <a href="{escape(attachment_href or f'/revenue/documents/{document}/download', quote=True)}">{escape(message["attachment_name"])}</a></p>
+      <form method="post" action="{escape(send_action, quote=True)}">
+        {_hidden_security(csrf,token,"reminder-send")}{_hidden("operation",operation)}
+        {_hidden("invoice_uid",draft["invoice_uid"])}{_hidden("digest",draft["digest"])}
+        <button type="submit">确认发送</button>
+      </form>
+      <a href="{escape(back_href, quote=True)}">返回发票</a>
+      </section>"""
+
+
+def render_reminder_mail_records(invoice_uid, records, csrf, token, *, retry_action="", operation="",
+                                 attachment_href=None):
+    sections = []
+    for mail in records:
+        content = render_school_mail_status(invoice_uid, mail, csrf, token, False, attachment_href=attachment_href)
+        if retry_action and mail["status"] == "failed":
+            content += f"""<form method="post" action="{escape(retry_action, quote=True)}">
+              {_hidden_security(csrf,token,"reminder-retry-"+mail["uid"])}
+              {_hidden("operation",operation)}{_hidden("invoice_uid",invoice_uid)}
+              {_hidden("mail_uid",mail["uid"])}{_hidden("attempt_count",mail["attempt_count"])}
+              <button type="submit">重试催款邮件</button></form>"""
+        sections.append(content)
+    return "".join(sections)
+
+
 def render_school_mail_settings(entity_id, settings, csrf, token, smtp_recipient=None):
     checked = " checked" if settings["enabled"] else ""
     status = "已启用" if settings["enabled"] else "已关闭"
@@ -256,18 +297,27 @@ def render_school_mail_history(entities, entries, filters, page_number, has_next
     rows = []
     for entry in entries:
         name = escape(entry["invoice_number"])
-        href = f'{URL}?invoice={quote(entry["uid"], safe="")}#invoice-mail-history'
+        href = f'{URL}?invoice={quote(entry.get("invoice_uid", entry["uid"]), safe="")}#invoice-mail-history'
+        attachment_href = None
         if draft := entry.get("authority_draft") or entry.get("institution_draft"):
             contract_uid, draft_uid = (quote(item, safe="") for item in draft)
             href = f'/revenue/institution-commission-drafts/{contract_uid}?invoice={draft_uid}'
+            attachment_href = href + '&pdf=formal'
         status = MAIL_STATUS_LABELS[entry["status"]]
         if entry["status"] == "sent":
             status = "已写入模拟邮箱" if entry.get("transport", "mock") == "mock" else "邮件服务器已接受"
+        detail = ""
+        mail_type = "发票"
+        if entry.get("mail_kind") == "reminder":
+            mail_type = "催款"
+            detail = ('<details><summary>查看催款邮件内容</summary>'
+                      + render_school_mail_status(entry["invoice_uid"], entry, "", "", False, attachment_href=attachment_href)
+                      + '</details>')
         rows.append(
             f'<tr><td>{escape(entry["school"])}</td><td><a href="{href}">{name}</a></td>'
             f'<td>{escape(entry["recipient"])}</td><td>{escape(entry.get("cc") or "—")}</td>'
             f'<td>{_mail_time(entry["sent_at"])}</td><td>{_mail_time(entry["history_at"])}</td>'
-            f'<td>{status}</td></tr>'
+            f'<td>{status} · {mail_type}{detail}</td></tr>'
         )
     pages = []
     for target, label, available in ((page_number - 1, "上一页", page_number > 1),
@@ -296,7 +346,7 @@ def render_school_mail_history(entities, entries, filters, page_number, has_next
 def render_school_mail_status(invoice_uid, mail, csrf, token, allow_retry, *, attachment_href=None):
     if not mail:
         return "<p>发票邮件 · 未安排自动发送。签发时需已启用本校自动发信并核对财务邮箱。</p>"
-    labels = {"pending":"待模拟发送","sent":"已写入模拟邮箱","failed":"模拟发送失败","cancelled":"学校邮箱设置已变更，发送已取消","needs_review":"模拟邮箱记录待核对"}
+    labels = {"pending":"待模拟发送","sending":"发送中","sent":"已写入模拟邮箱","failed":"模拟发送失败","cancelled":"学校邮箱设置已变更，发送已取消","needs_review":"模拟邮箱记录待核对"}
     if mail.get("transport") in {"smtp","candidate","production"}:
         labels.update(pending="待发送",sending="发送中",sent="网易已接受",failed="发信失败",
                       cancelled="发送已取消",needs_review="发送结果待核对")
@@ -307,13 +357,20 @@ def render_school_mail_status(invoice_uid, mail, csrf, token, allow_retry, *, at
         f' · {escape(record.get("message_id") or "")} · {escape(record.get("pdf_sha256") or "")}</li>'
         for record in mail["attempts"]
     )
+    if mail.get("mail_kind") == "reminder" and any(
+            record.get("error") == "reminder_changed" for record in mail["attempts"]):
+        labels["cancelled"] = "余额、到期日或收票邮箱已变更，催款已取消"
     retry = ""
     if allow_retry and mail["status"] == "failed":
         retry = f"""<form method="post" action="{URL}/mail-retry">
           {_hidden_security(csrf,token,"mail-retry")}{_hidden("invoice_uid",invoice_uid)}
           {_hidden("attempt_count",mail["attempt_count"])}
           <button type="submit">重试发票邮件</button></form>"""
-    title = "发票邮件" if mail.get("transport") == "production" else "发票邮件 · TEST ONLY"
+    reminder = mail.get("mail_kind") == "reminder"
+    title = "催款邮件" if reminder else "发票邮件"
+    if mail.get("transport") != "production":
+        title += " · TEST ONLY"
+    section_id = mail["uid"] if reminder else "invoice-mail-history"
     copy_line = f'<p>抄送 {escape(mail["cc"])}</p>' if mail.get("cc") else ""
     if mail.get("bcc"):
         copy_line += f'<p>密送 {escape(mail["bcc"])}</p>'
@@ -326,7 +383,7 @@ def render_school_mail_status(invoice_uid, mail, csrf, token, allow_retry, *, at
           <pre class="revenue-mail-body">{escape(archived["body"])}</pre></details>"""
     document_uid = quote(mail["document_uid"], safe="")
     attachment_name = archived["attachment_name"] if archived else f'{mail["invoice_number"]}.pdf'
-    return f"""<section id="invoice-mail-history"><h2>{title}</h2>
+    return f"""<section id="{escape(section_id, quote=True)}"><h2>{title}</h2>
       <p>{labels[mail["status"]]} · 收件人 {escape(mail["recipient"])} · 尝试 {mail["attempt_count"]} 次</p>
       {copy_line}<p>入队时间 {_mail_time(mail["queued_at"])} · 发送时间 {_mail_time(mail["sent_at"])}</p>
       <p>附件 <a href="{escape(attachment_href or f'/revenue/documents/{document_uid}/download', quote=True)}">{escape(attachment_name)}</a></p>
