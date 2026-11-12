@@ -49,13 +49,13 @@ def _allocated_payments(connection, invoice_line_ids):
     )]
 
 
-def settlement_summary(connection, invoice_uid, invoice_line_id, gross_cents, *, formal=False):
+def settlement_summary(connection, invoice_uid, invoice_line_id, gross_cents, *, formal=False, due_date=None):
     delivery = _audit_record(connection,FORMAL_DELIVERY if formal else TEST_DELIVERY,invoice_uid)
     reconciliation = _audit_record(connection,FORMAL_RECONCILIATION if formal else TEST_RECONCILIATION,invoice_uid)
     payments = _allocated_payments(connection,invoice_line_id)
     received = sum(payment["invoice_cents"] for payment in payments)
     outstanding = gross_cents-received
-    due = delivery["due_date"] if delivery else None
+    due = due_date or (delivery["due_date"] if delivery else None)
     full_date = payments[-1]["received_date"] if payments and outstanding == 0 else None
     if reconciliation:
         status = "reconciled"
@@ -75,7 +75,7 @@ def settlement_summary(connection, invoice_uid, invoice_line_id, gross_cents, *,
             timing = "overdue"
     return {"delivery":delivery,"reconciliation":reconciliation,"payments":payments,
             "received_cents":received,"outstanding_cents":outstanding,"status":status,
-            "timing":timing,"fully_received_on":full_date,"overdue_days":overdue_days}
+            "timing":timing,"fully_received_on":full_date,"overdue_days":overdue_days,"due_date":due}
 
 
 class ToorakSettlement:
@@ -163,7 +163,7 @@ class ToorakSettlement:
         lines = invoice["lines"]
         summary = settlement_summary(self.connection,invoice["uid"],
                                      [line["invoice_line_id"] for line in lines],invoice["gross_cents"],
-                                     formal=self.formal)
+                                     formal=self.formal, due_date=invoice.get("due_date"))
         paid = defaultdict(int)
         for payment in summary["payments"]:
             paid[payment["invoice_line_id"]] += payment["invoice_cents"]
@@ -226,7 +226,7 @@ class ToorakSettlement:
                 raise ValueError("付款期限必须与已签发发票引用的学校合同一致。")
             document = self._document(staged,self.delivery_kind,f"{self.workflow}-delivery-document:{invoice_uid}")
             return {"uid":invoice_uid,"invoice_uid":invoice_uid,"received_on":received_on,
-                    "due_date":(date.fromisoformat(received_on)+timedelta(days=term_days)).isoformat(),
+                    "due_date":invoice.get("due_date") or (date.fromisoformat(received_on)+timedelta(days=term_days)).isoformat(),
                     "term_days":term_days,"document_uid":document["uid"],
                     **({"simulation":self.simulation} if self.formal else {})}
 

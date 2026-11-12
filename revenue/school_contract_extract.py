@@ -47,7 +47,7 @@ TUITION_PERIODS = {
     "each_year": "每年学费（按年）",
 }
 FIELD_LABELS = {**ONBOARDING_FIELDS, **FIELDS, **CONFIGURABLE_FIELDS}
-RATES = {"local_rate", "international_rate", "rate"}
+RATES = {"local_rate", "international_rate", "rate", "standard", "iec_rate"}
 MAX_PAGES = 40
 TERM = re.compile(r"\b(?:the\s+)?term\s+of\s+this\s+agreement\s+is\s+(\d+)\s+years?\s+from\s+the\s+date\s+of\s+the\s+agreement\b", re.I)
 REVIEW = re.compile(r"\b(?:this\s+)?agreement\s+will\s+be\s+reviewed\s+after\s+(\d+)\s+months?\b", re.I)
@@ -70,8 +70,35 @@ def _evidence(page, clause, text):
     return {"page": page, "clause": clause, "text": _clean(text)}
 
 
-def read_pages(pdf, ocr):
-    """Use the text layer first and OCR only pages whose text is unusable."""
+NSW_SCHEDULE_PROFILE = "nsw_iec_schedule"
+NSW_SCHEDULE_CONFIRM_BLOCK = "NSW 的基础佣金和 IEC 佣金按不同学费基数计算，须配置独立计佣规则后才能启用。"
+NSW_SCHEDULE_DATES = {
+    field: re.compile(
+        label + r"\s*:?\s*(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*(\d{4})(?!\d)", re.I
+    )
+    for field, label in (("start", r"\bCommencement\s+Date"), ("end", r"\bExpiry\s+Date"))
+}
+
+
+def _nsw_dates(text, field):
+    for match in NSW_SCHEDULE_DATES[field].finditer(text):
+        try:
+            day, month, year = map(int, match.groups())
+            yield date(year, month, day).isoformat(), match[0]
+        except ValueError:
+            continue
+
+
+def _nsw_schedule_needs_ocr(text):
+    flat = _clean(text)
+    return (NSW_BASE.search(flat) and NSW_IEC.search(flat)
+            and re.search(r"\bCommencement Date\b", flat, re.I)
+            and re.search(r"\bExpiry Date\b", flat, re.I)
+            and not all(any(_nsw_dates(flat, field)) for field in NSW_SCHEDULE_DATES))
+
+
+def read_pages(pdf, ocr, *, review_nsw_schedule=False):
+    """Use the text layer first, with a date-only OCR fallback for a NSW schedule."""
     try:
         reader = PdfReader(BytesIO(pdf))
         if reader.is_encrypted or not 0 < len(reader.pages) <= MAX_PAGES:
@@ -86,14 +113,26 @@ def read_pages(pdf, ocr):
         return [], "unreadable"
     missing = [i for i, text in enumerate(pages)
                if sum(c.isascii() and c.isalpha() for c in text) < 40 or "\ufffd" in text or "(cid:" in text]
-    if missing:
+    schedule = [i for i, text in enumerate(pages)
+                if review_nsw_schedule and i not in missing and _nsw_schedule_needs_ocr(text)]
+    indexes = sorted(missing + schedule)
+    if indexes:
         try:
-            recovered = ocr(pdf, missing)
+            recovered = ocr(pdf, indexes)
         except Exception:
             recovered = {}
         for i in missing:
             pages[i] = recovered.get(i, "")
-    return pages, "partial" if any(not pages[i].strip() for i in missing) else "read"
+        for i in schedule:
+            dates = [
+                wording for field in NSW_SCHEDULE_DATES if not any(_nsw_dates(pages[i], field))
+                for _, wording in _nsw_dates(recovered.get(i, ""), field)
+            ]
+            if dates:
+                pages[i] += "\n" + "\n".join(dates)
+    partial = (any(not pages[i].strip() for i in missing)
+               or any(_nsw_schedule_needs_ocr(pages[i]) for i in schedule))
+    return pages, "partial" if partial else "read"
 
 
 def _clauses(text, pattern):
@@ -119,6 +158,48 @@ def _record(findings, key, value, evidence, *, derived=False):
     row["derived"] = derived
     if evidence not in row["sources"]:
         row["sources"].append(evidence)
+
+
+NSW_BASE = re.compile(
+    r"\bCommission\s+(\d{1,3}(?:\.\d{1,2})?)\s*%\s+of\s+(?:the\s+)?first\s+(?:twelve|12)\s+months[’']?\s+"
+    r"Tuition Fees,? or,? where the course is less than (?:twelve|12) months,? of the total Tuition Fees\.", re.I
+)
+NSW_IEC = re.compile(
+    r"\bPlus,? where applicable,? (\d{1,3}(?:\.\d{1,2})?)\s*%\s+of the Tuition Fees for any enrolment in an "
+    r"Intensive English Centre \(IEC\) up to a maximum of (?:2|two) terms duration\.", re.I
+)
+NSW_CLAIMS = re.compile(
+    r"\b5\.2\s+The Department will pay the Commission.*?(?=\s+5\.4\s|$)", re.I
+)
+NSW_GST = re.compile(
+    r"\b5\.4\s+The commission rate is exclusive of any goods and services tax \(GST\) payable\.", re.I
+)
+
+
+def extract_nsw_schedule(pages):
+    """Extract the two independent bases in the NSW DE International schedule."""
+    fields = _empty_fields(("start", "end", "standard", "iec_rate", "conditions", "gst", "payment_days"))
+    normalized = [_clean(text) for text in pages]
+    for page, text in enumerate(normalized, 1):
+        base, iec = NSW_BASE.search(text), NSW_IEC.search(text)
+        if not (base and iec and re.search(r"\bCommencement Date\b", text, re.I)
+                and re.search(r"\bExpiry Date\b", text, re.I)):
+            continue
+        _record(fields, "standard", base[1], _evidence(page, "Schedule · Commission", base[0]))
+        _record(fields, "iec_rate", iec[1], _evidence(page, "Schedule · Commission", iec[0]))
+        for field in NSW_SCHEDULE_DATES:
+            for value, wording in _nsw_dates(text, field):
+                _record(fields, field, value, _evidence(page, "Schedule", wording))
+    if not fields["standard"]["sources"]:
+        return None
+    for page, text in enumerate(normalized, 1):
+        if conditions := NSW_CLAIMS.search(text):
+            _record(fields, "conditions", conditions[0], _evidence(page, "§5.2–5.3", conditions[0]))
+        if gst := NSW_GST.search(text):
+            _record(fields, "gst", "exclusive", _evidence(page, "§5.4", gst[0]))
+        if payment := PAYMENT.search(text):
+            _record(fields, "payment_days", payment[1], _evidence(page, "付款条款", payment[0]))
+    return fields
 
 
 def extract_terms(pages):

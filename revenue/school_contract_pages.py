@@ -5,13 +5,17 @@ from html import escape
 from urllib.parse import quote, urlencode
 
 from revenue import vic_rcti
-from revenue.institution_commission_draft import CONFIRMED, FEE_PERIODS, GST_MODES, TIER_LABELS, InstitutionCommissionDraft
+from revenue.institution_commission_draft import (
+    CONFIRMED, FEE_PERIODS, GST_MODES, NSW_CLAIMS_ONLY, NSW_RATE_LABELS, NSW_REVIEW_SAVED, TIER_LABELS, InstitutionCommissionDraft,
+)
 from revenue.institution_commission_draft_views import ROOT as DRAFT_ROOT
 from revenue.multischool_views import _render_active_contract_rules
 from revenue.repository import RevenueRepository
 from revenue.school_commission_pilot import FORMAL_CONTRACT
 from revenue.school_contract_extract import TUITION_PERIODS
 from revenue.school_contract_review import review_state
+from revenue.school_invoice_release import REHEARSAL_RECIPIENT
+from revenue.school_invoice_reminders import EMAIL
 from revenue.state_school_commission import DISCARDED_CONTRACT_UPLOAD
 from revenue.views import _hidden_security
 
@@ -27,6 +31,10 @@ TARGET_LABELS = {"school": "中小学", "provider": "高等教育机构", "autho
 def confirmed_url(target):
     kind, key = target
     return CONFIRMED_ROOT + "?" + urlencode({TARGET_FIELDS[kind]: key})
+
+
+def billing_url(target):
+    return confirmed_url(target) + "&step=billing#school-invoice-mail-recipient"
 
 
 def uploaded_contract_targets(connection, simulation):
@@ -65,22 +73,22 @@ def reviewed_school_terms(connection, uid, profile):
         ("计佣学费周期", TUITION_PERIODS[fields["tuition_period"]]),
         ("GST", GST_MODES[fields["gst"]]), ("申领条件", conditions),
         ("有效发票收件后付款期限", f'{fields["payment_days"]} 天' if fields.get("payment_days") else "未确认"),
-        ("学校收票邮箱", fields.get("invoice_email") or "未确认"),
     )
 
 
 def _institution_fields(terms):
     rcti = terms.get("payment_mode") == vic_rcti.PAYMENT
-    labels = vic_rcti.LABELS if rcti else TIER_LABELS
+    nsw = terms.get('payment_mode') == NSW_CLAIMS_ONLY
+    labels = {**TIER_LABELS, **NSW_RATE_LABELS} if nsw else vic_rcti.LABELS if rcti else TIER_LABELS
     rates = " · ".join(f"{labels[key]} {basis_points / 100:g}%" for key, basis_points in terms["rates"].items())
     return (
         ("合同付款主体", terms["payer"]), ("佣金比例", rates),
         ("合同有效期", f'{terms["start"]} 至 {terms["end"]}'),
-        ("计佣学费周期", FEE_PERIODS[terms["period"]]), ("GST", GST_MODES[terms["gst"]]),
+        ("计佣学费周期", "普通课程首年，短于 12 个月按全程；IEC 另计，最多两学期、20 周"
+         if nsw else FEE_PERIODS[terms["period"]]), ("GST", GST_MODES[terms["gst"]]),
         ("申领条件", terms["conditions"]),
         *((("结算方式", "按季度自动付款 · 教育局出具 RCTI"),) if rcti else (
-            ("有效发票收件后付款期限", f'{terms["payment_days"]} 天'),
-            ("学校收票邮箱", terms.get("invoice_email") or "未确认"),
+            ("有效发票收件后付款期限", f'{terms["payment_days"]} 天' if terms["payment_days"] is not None else "未约定"),
         )),
     )
 
@@ -112,8 +120,33 @@ def confirmed_contracts(connection, scope, actor, *, active_schools=None):
         except (LookupError, PermissionError):
             continue
         school = schools.setdefault(workflow.target, {"name": workflow.name, "active": [], "confirmed": []})
-        school["confirmed"].append((workflow.document["uid"], _institution_fields(json.loads(payload)), uid))
+        terms = json.loads(payload)
+        school["confirmed"].append((workflow.document["uid"], _institution_fields(terms), uid))
+        if terms.get("payment_mode") == NSW_CLAIMS_ONLY:
+            school.setdefault("nsw_claims", set()).add(uid)
     return schools
+
+
+def reviewed_nsw_contracts(connection, scope, actor):
+    """Find saved NSW reviews for display without treating them as confirmed terms."""
+    if "NSW" not in scope.education_authorities:
+        return []
+    rows = connection.execute(
+        """SELECT aggregate_uid FROM revenue_audit_events
+           WHERE action=? AND aggregate_type='nsw_commission_review'
+           GROUP BY aggregate_uid ORDER BY max(id) DESC""",
+        (NSW_REVIEW_SAVED,),
+    ).fetchall()
+    repository = RevenueRepository(connection)
+    reviewed = []
+    for (uid,) in rows:
+        try:
+            workflow = InstitutionCommissionDraft(repository, scope, uid, actor)
+        except (LookupError, PermissionError):
+            continue
+        if workflow.nsw_review() and not workflow.terms():
+            reviewed.append((workflow.name, uid))
+    return reviewed
 
 
 def _page(title, body, *, back_href="/revenue", back_label="返回收入与佣金"):
@@ -125,14 +158,72 @@ def _page(title, body, *, back_href="/revenue", back_label="返回收入与佣�
       </main>'''
 
 
-def render_payer_billing_details(action, fields, settings, csrf, token, *, simulation):
-    checked = " checked" if settings["enabled"] and settings.get("routing") == "payer" else ""
+def render_school_template_selection(action, settings, csrf, token):
+    versions = settings["versions"]
+    names = {row["uid"]: row["name"] or ("版本 " + row["uid"][-8:]) for row in versions}
+    default_name = names.get(settings["active_uid"], "尚无已发布版本")
+    if not versions:
+        return f'<p>发票模板版本：{escape(default_name)}</p>'
+    selected = settings["selected_uid"]
+    options = [f'<option value="">跟随当前已发布版本 · {escape(default_name)}</option>']
+    for row in versions:
+        uid = row["uid"]
+        status = ("当前已发布" if uid == settings["active_uid"] else
+                  "曾发布" if uid in settings["published"] else "草稿")
+        options.append(f'<option value="{escape(uid, quote=True)}"{" selected" if uid == selected else ""}>'
+                       f'{escape(names[uid])} · {status}</option>')
+    current = names.get(settings["effective_uid"], default_name)
+    return f'''<form method="post" action="{escape(action, quote=True)}" class="revenue-action-form">
+        {_hidden_security(csrf, token, "school-template-selection")}
+        <input type="hidden" name="billing_operation" value="template-selection">
+        <input type="hidden" name="template_revision" value="{escape(settings["revision"], quote=True)}">
+        <label>发票模板版本<select name="template_uid">{"".join(options)}</select></label>
+        <p>本校当前使用：{escape(current)}</p>
+        <button type="submit">保存本校模板</button>
+      </form>'''
+
+
+def render_payer_billing_details(action, fields, settings, csrf, token, *, simulation, allow_auto_mail=True,
+                                 preview_href="", error="", template_form="", preview_label="预览 Invoice 1762 样张"):
+    checked = " checked" if settings["enabled"] else ""
+    verification_checked = " checked" if settings["verified"] else ""
     verified = "已核对" if settings["verified"] else "未核对"
     mode = "模拟投递" if simulation else "发送"
     def hidden_input(name, value):
         return f'<input type="hidden" name="{escape(name, quote=True)}" value="{escape(str(value), quote=True)}">'
     hidden = "".join(hidden_input(name, value) for name, value in fields.items())
 
+    auto_mail_control = (
+        f'<label><input name="enabled" type="checkbox" value="1"{checked}>签发后自动{mode}</label>'
+        if allow_auto_mail else ""
+    )
+    from revenue.invoice_billing_details import ADDRESS_FIELDS
+
+    parts = settings.get("address_parts")
+    address = settings["address"]
+    address_fields = "".join(
+        f'<label>{label}<input name="{field}" maxlength="{limit}"'
+        f'{" required" if field == "address_line_1" else ""} '
+        f'value="{escape((parts or {}).get(field, ""), quote=True)}"></label>'
+        for field, label, limit in ADDRESS_FIELDS
+    )
+    if address and not parts:
+        address_fields = (
+            f'<label>现有账单地址<textarea name="billing_address" maxlength="300" rows="3">'
+            f'{escape(address)}</textarea></label>'
+            f'<label><input type="checkbox" data-use-address-parts>改用分栏地址</label>'
+            f'<fieldset data-address-parts hidden disabled><legend>账单地址</legend>{address_fields}</fieldset>'
+        )
+    else:
+        address_fields = f'<fieldset><legend>账单地址</legend>{address_fields}</fieldset>'
+    copy_fields = "".join(
+        f'<label>{field.title()}（选填，逗号分隔）<input name="{field}" inputmode="email" maxlength="2048" '
+        f'data-payer-email-pattern="{escape(EMAIL.pattern, quote=True)}" '
+        f'data-payer-test-recipient="{escape(REHEARSAL_RECIPIENT.casefold(), quote=True)}" '
+        f'aria-describedby="payer-{field}-error" value="{escape(settings.get(field, ""), quote=True)}">'
+        f'<span id="payer-{field}-error" class="notice error" aria-live="polite" hidden></span></label>'
+        for field in ("cc", "bcc")
+    )
     form = f'''
       <form method="post" action="{escape(action, quote=True)}" class="revenue-action-form">
         {_hidden_security(csrf, token, "payer-billing-details")}{hidden}
@@ -140,13 +231,19 @@ def render_payer_billing_details(action, fields, settings, csrf, token, *, simul
         {hidden_input("billing_revision", settings["revision"])}
         <label>发票显示名称<input name="billing_name" maxlength="180" required
                value="{escape(settings['name'], quote=True)}"></label>
-        <label>账单地址<textarea name="billing_address" maxlength="300" rows="2" required>{escape(settings['address'])}</textarea></label>
-        <label>联系电话<input name="billing_phone" type="tel" maxlength="60" required
+        {address_fields}
+        <label>联系电话（选填）<input name="billing_phone" type="tel" maxlength="60"
                value="{escape(settings['phone'], quote=True)}"></label>
-        <label>收票邮箱（多个地址用逗号分隔）<input name="recipient" type="email" multiple maxlength="2048" required
-               value="{escape(settings["recipient"], quote=True)}"></label>
-        <label><input name="verified" type="checkbox" value="1">我已核对收票邮箱</label>
-        <label><input name="enabled" type="checkbox" value="1"{checked}>签发后自动{mode}</label>
+        <label>收票邮箱（多个地址用逗号分隔）<input name="recipient" type="text" inputmode="email"
+               spellcheck="false" maxlength="2048" required aria-describedby="payer-email-error"
+               data-payer-email-pattern="{escape(EMAIL.pattern, quote=True)}"
+               data-payer-test-recipient="{escape(REHEARSAL_RECIPIENT.casefold(), quote=True)}"
+               value="{escape(settings["recipient"], quote=True)}">
+          <span id="payer-email-error" class="notice error" aria-live="polite" hidden></span>
+        </label>
+        {copy_fields}
+        <label><input name="verified" type="checkbox" value="1"{verification_checked}>我已核对收票邮箱及抄送地址</label>
+        {auto_mail_control}
         <button type="submit">保存开票资料</button>
       </form>'''
 
@@ -157,18 +254,24 @@ def render_payer_billing_details(action, fields, settings, csrf, token, *, simul
             ("账单地址", "<br>".join(map(escape, settings["address"].splitlines()))),
             ("联系电话", escape(settings["phone"])),
             ("收票邮箱", "<br>".join(escape(address.strip()) for address in settings["recipient"].split(","))),
+            ("Cc", escape(settings.get("cc", ""))),
+            ("Bcc", escape(settings.get("bcc", ""))),
         )
         rows = "".join(f"<div><dt>{label}</dt><dd>{value or '未填写'}</dd></div>" for label, value in values)
         summary = f'''<div class="revenue-school-contract-summary revenue-school-billing-summary">
           <h4>当前已保存的开票资料</h4><dl>{rows}</dl></div>'''
-        form = f'''<details class="revenue-school-billing-editor">
+        form = f'''<details class="revenue-school-billing-editor"{' open' if error else ''}>
           <summary>修改</summary>
           {form}
         </details>'''
+    preview = (f'<p><a class="button-link secondary" href="{escape(preview_href, quote=True)}" '
+               f'target="_blank" rel="noopener">{escape(preview_label)}</a></p>' if preview_href else "")
+    feedback = f'<p role="alert">{escape(error)}</p>' if error else ""
     return f'''<section id="school-invoice-mail-recipient">
       <h3>学校开票资料</h3><p>以下资料会显示在发票 Invoice To 区块。{verified} · 发信抄送 accounts@aaie.com.hk</p>
-      {summary}
+      {feedback}{template_form}{summary}{preview}
       {form}
+      <script src="/assets/school-invoice-billing.js" defer></script>
       </section>'''
 
 
@@ -189,7 +292,19 @@ def render_authority_finance(state, terms, payer, csrf, token):
       </form></section>'''
 
 
-def render_confirmed_contracts(schools, target=None, *, mail_form="", authority_finance="", claim_href=""):
+def _billing_recipient_label(settings):
+    if settings is None:
+        return "暂无法读取"
+    recipient = settings["recipient"]
+    if not recipient:
+        return "尚未填写"
+    status = "已核对" if settings["verified"] else "待核对"
+    return f"{recipient} · {status}"
+
+
+def render_confirmed_contracts(schools, target=None, *, mail_form="", authority_finance="", claim_href="",
+                               title=CONFIRMED_TITLE, reviewed_nsw=(), can_edit=False, billing_href="",
+                               billing_settings=None):
     if target is None:
         ordered = sorted(schools.items(), key=lambda pair: (pair[1]["name"].casefold(), pair[0]))
         entries = "".join(
@@ -197,26 +312,43 @@ def render_confirmed_contracts(schools, target=None, *, mail_form="", authority_
             f' · {TARGET_LABELS[key[0]]}</li>'
             for key, school in ordered
         )
+        entries += "".join(
+            f'<li><a href="{DRAFT_ROOT}/{quote(uid, safe="")}?contract_only=1">'
+            f'{escape(name)} · 已核对，待启用</a></li>'
+            for name, uid in reviewed_nsw
+        )
         return _page(CONFIRMED_TITLE, f"<ul>{entries}</ul>" if entries else "<p>暂无已确认的学校佣金合同。</p>")
 
     school = schools[target]
+    billing_recipient = _billing_recipient_label(billing_settings)
     content = f'<h2>{escape(school["name"])}</h2>'
+    if billing_href:
+        label = "返回学校佣金" if mail_form else "学校开票资料"
+        content += f'<p><a class="button-link secondary" href="{escape(billing_href, quote=True)}">{label}</a></p>'
     if claim_href:
         content += f'<p><a class="button-link primary" href="{escape(claim_href, quote=True)}">选学生并生成发票草稿</a></p>'
     if school["active"]:
-        content += _render_active_contract_rules(school["active"], include_claim_terms=True)
+        edit_links = {uid: confirmed_url(target) + "&edit_commission=" + quote(uid, safe="")
+                      for uid, *_ in school["active"]} if can_edit else {}
+        content += _render_active_contract_rules(school["active"], include_claim_terms=True, edit_links=edit_links,
+                                                 billing_recipient=billing_recipient)
     for uid, fields, workflow_uid in school["confirmed"]:
+        label = ("查看 NSW 学生与预计佣金" if workflow_uid in school.get("nsw_claims", ())
+                 else "查看可申领学生和发票草稿")
         workflow_link = (
-            f'<p><a href="{DRAFT_ROOT}/{quote(workflow_uid, safe="")}">查看可申领学生和发票草稿</a></p>'
+            f'<p><a href="{DRAFT_ROOT}/{quote(workflow_uid, safe="")}">{label}</a></p>'
             if workflow_uid else ""
         )
-        rows = "".join(f'<div><dt>{label}</dt><dd>{escape(value)}</dd></div>' for label, value in fields)
+        edit_url = confirmed_url(target) + "&edit_commission=" + quote(workflow_uid, safe="") if can_edit and workflow_uid else ""
+        edit_link = f'<a class="button-link secondary" href="{escape(edit_url, quote=True)}">编辑佣金条款</a>' if edit_url else ""
+        rows = "".join(f'<div><dt>{label}</dt><dd>{escape(value)}</dd></div>'
+                       for label, value in (*fields, ("学校收票邮箱", billing_recipient)))
         content += f'''<article class="revenue-school-contract-summary">
           <h3>已确认条款</h3><dl>{rows}</dl>
-          <a href="/revenue/documents/{quote(uid, safe="")}/view">查看原合同 PDF</a>{workflow_link}</article>'''
+          <a href="/revenue/documents/{quote(uid, safe="")}/view">查看原合同 PDF</a> {edit_link}{workflow_link}</article>'''
     if target[0] == "authority":
         content += f'<p><a href="{UPLOAD_ROOT}?education_authority={quote(target[1], safe="")}">上传续约合同</a></p>'
-    return _page(CONFIRMED_TITLE, content + authority_finance + mail_form, back_href=CONFIRMED_ROOT, back_label="返回已确认学校佣金")
+    return _page(title, content + authority_finance + mail_form, back_href=CONFIRMED_ROOT, back_label="返回已确认学校佣金")
 
 
 def render_contract_upload(schools, providers, csrf, token, *, authorities=(), renewal=False, pending=()):

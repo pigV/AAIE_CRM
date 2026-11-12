@@ -30,7 +30,7 @@ def draft_reminder(invoice, recipient):
     if len(recipient) > 254 or not EMAIL.fullmatch(recipient):
         raise ValueError("请输入并核对学校财务邮箱。")
     number = invoice["invoice_number"]
-    due = settlement["delivery"]["due_date"]
+    due = settlement.get("due_date") or settlement["delivery"]["due_date"]
     outstanding = settlement["outstanding_cents"]
     amount = f"AUD {outstanding // 100:,}.{outstanding % 100:02d}"
     body = (

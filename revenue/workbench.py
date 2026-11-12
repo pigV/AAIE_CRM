@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+from revenue.first_year_tuition import first_year_records, school_components
 from revenue.read_models import RevenueReadModels, exception_code_label
 
 
@@ -61,7 +62,8 @@ class RevenueWorkbench:
                 ORDER BY ec.id""", (formal,entity_id,simulation,case_id,formal,school_id,formal),
         )
 
-    def toorak_claim_workbench(self, case_id, student_id, *, formal=False, entity_id=None, simulation=True):
+    def toorak_claim_workbench(self, case_id, student_id, *, formal=False, entity_id=None, simulation=True,
+                               template_context=None):
         from revenue.invoice_templates import FORMAL_INVOICE_KIND, TEST_INVOICE_KIND, current_invoice_template_revisions
         from revenue.toorak_claims import EVIDENCE_FIELDS, claim_evidence_fields, formal_evidence_options
         from revenue.toorak_settlement import settlement_summary
@@ -112,6 +114,7 @@ class RevenueWorkbench:
         ]
         template,profile = current_invoice_template_revisions(
             self.connection,formal=formal,entity_id=entity_id,simulation=simulation,
+            **(template_context or {}),
         )
         return {"lines":lines,"fields":fields,"template_revision":template,"finance_revision":profile,"formal":formal}
 
@@ -258,6 +261,10 @@ class RevenueWorkbench:
                 for label, href in self.ACTIONS
             ],
             "operations": {
+                "first_year": [
+                    {**component, "records":first_year_records(self.connection, component["id"])}
+                    for component in school_components(self.connection, case_uid)
+                ],
                 "components": [
                     {
                         "uid": str(component["uid"]),

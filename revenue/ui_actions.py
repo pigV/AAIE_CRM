@@ -320,8 +320,10 @@ class RevenueUIActions:
 
     def _toorak_claims(self):
         self._require_admin()
+        library = (getattr(self.school_pilot, "template_library_entity_id", None)
+                   or getattr(self.school_pilot, "entity_id", None))
         return ToorakClaims(self.service,self.actor_user_id,self.actor_role,lambda: self.document_root,
-                            mail_release=self.school_mail_release,**self._school_scope())
+                            mail_release=self.school_mail_release,library_entity_id=library,**self._school_scope())
 
     def upload_toorak_claim_evidence(self, case_uid, form, upload):
         if not self.school_pilot:
@@ -609,6 +611,97 @@ class RevenueUIActions:
             self._optional(form, "due_date"),
             planned_payment_allocations=planned,
         )
+
+    def record_first_year_tuition(self, form: dict, *, upload=None, read_offer=None) -> dict:
+        from revenue.first_year_tuition import (
+            OFFER_EXTENSIONS, OFFER_KIND, SCHEDULE_KIND, component_offers,
+            first_year_records, school_components,
+        )
+        from revenue.money import aud_cents
+        from revenue.tuition_storage import TuitionEvidenceStorage
+
+        case_uid = self._required(form, "case_uid")
+        component_uid = self._required(form, "component_uid")
+        key = "first-year-tuition:" + self._required(form, "idempotency_key")
+        cents = aud_cents(self._required(form, "tuition_aud"))
+        if cents <= 0:
+            raise ValueError("首年学费须大于 AUD 0。")
+        offer_id = self._optional(form, "offer_id")
+        if offer_id and upload is not None:
+            raise ValueError("请选择一份已有 Offer 或上传一份 Fee Schedule PDF。")
+
+        with self.repository.transaction():
+            component = next((row for row in school_components(self.connection, case_uid)
+                              if row["uid"] == component_uid), None)
+            if component is None:
+                raise ValueError("该入学组成不属于当前档案，或录取已失效。")
+            prior_rows = first_year_records(self.connection, component["id"])
+            if len(prior_rows) > 1 or (prior_rows and prior_rows[0]["currency_code"] != "AUD"):
+                raise ValueError("请先核对该入学组成已有的首年学费记录和币种。")
+            prior = prior_rows[0] if prior_rows else None
+            kind = SCHEDULE_KIND
+            if offer_id:
+                offer = next((row for row in component_offers(self.connection, component)
+                              if str(row["id"]) == offer_id), None)
+                if offer is None or read_offer is None:
+                    raise ValueError("请选择该学生、该申请周期及该学校下有效的 Offer。")
+                upload = read_offer(offer)
+                kind = OFFER_KIND
+            if upload is None and (prior is None or prior["evidence_document_id"] is None):
+                raise ValueError("请选择已有 Offer 或上传 Fee Schedule PDF 作为学费凭证。")
+            staged = (
+                TuitionEvidenceStorage(self._legacy_document_root, self._document_root).stage(
+                    upload, OFFER_EXTENSIONS if offer_id else {".pdf"},
+                ) if upload is not None else None
+            )
+            source_label = (f"Offer #{offer_id} · {staged.original_filename}" if offer_id
+                            else f"Fee Schedule · {staged.original_filename}" if staged
+                            else prior["source_label"] or "已关联的学费凭证")
+
+            def save():
+                if staged is not None:
+                    existing = self.connection.execute(
+                        """SELECT id FROM revenue_documents
+                            WHERE document_kind=? AND storage_path=? AND sha256=? AND size_bytes=?""",
+                        (kind, str(staged.path), staged.sha256, staged.size_bytes),
+                    ).fetchone()
+                    if existing:
+                        evidence_id = existing["id"]
+                    else:
+                        evidence_id = self.service.register_document(
+                            kind, str(staged.path), staged.sha256, staged.mime_type, staged.size_bytes,
+                            "imported" if offer_id else "upload", self.actor_user_id, key + ":document",
+                        )["id"]
+                else:
+                    evidence_id = prior["evidence_document_id"]
+                authority = (prior["authority_level"] if prior and prior["authority_level"] != "estimated"
+                             else "official")
+                if prior and prior["tuition_cents"] == cents:
+                    self.connection.execute(
+                        """UPDATE revenue_tuition_facts
+                              SET evidence_document_id=?, authority_level=?, confirmed_by=?
+                            WHERE id=?""", (evidence_id, authority, self.actor_user_id, prior["id"]),
+                    )
+                    fact = self.repository.require_by_uid("revenue_tuition_facts", prior["uid"])
+                else:
+                    if prior and self.connection.execute(
+                        "SELECT 1 FROM revenue_tuition_adjustments WHERE tuition_fact_id=?", (prior["id"],),
+                    ).fetchone():
+                        raise ValueError("该学费已有减免或调整，请先核对调整后再更改学费金额。")
+                    fact = self.service.record_tuition(
+                        component_uid, prior["academic_period"] if prior else "year_1",
+                        prior["fee_component"] if prior else "tuition", cents, authority,
+                        self.actor_user_id, key + ":tuition", evidence_id,
+                    )
+                return {**fact, "source_label": source_label, "commercial_case_uid": case_uid}
+
+            return self.repository.command(
+                idempotency_key=key, command_type="first_year_tuition_saved", aggregate_type="tuition_fact",
+                payload={"case_uid":case_uid,"component_uid":component_uid,"tuition_cents":cents,
+                         "offer_id":offer_id,"file_hash":staged.sha256 if staged else None,
+                         "source_label":source_label},
+                actor_user_id=self.actor_user_id, operation=save,
+            )
 
     def record_structured_tuition(self, form: dict) -> dict:
         component_uid = self._required(form, "component_uid")

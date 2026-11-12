@@ -114,3 +114,28 @@ class CommissionInvoiceTemplateTests(unittest.TestCase):
         pdf = render_configured_commission_invoice(snapshot,layout)
         text = PdfReader(BytesIO(pdf)).pages[0].extract_text()
         self.assertIn("Student reference: TOORAK-A\nTOORAK-B",text)
+
+
+class CommissionInvoiceGSTColumnTests(unittest.TestCase):
+    def test_selected_gst_is_printed_as_y_or_n_in_both_layouts(self):
+        from revenue.invoice_templates import PROFILE_DEFAULT, default_layout
+        from revenue.money import commission_gst_amounts
+        from revenue.pdf import render_configured_commission_invoice
+
+        for preset in ("invoice_1762", ""):
+            for mode, mark, amount in (("exclusive", "Y", 10000), ("inclusive", "Y", 10000),
+                                       ("none", "N", 10000), ("exclusive", "Y", 1)):
+                with self.subTest(preset=preset, gst=mode, amount=amount):
+                    layout = default_layout()
+                    layout["preset"] = preset
+                    totals = commission_gst_amounts(amount, mode)
+                    snapshot = {
+                        **PROFILE_DEFAULT, **totals, "document_number": "DRAFT", "issue_date": "2026-11-11",
+                        "bill_to": "TEST school", "gst_mode": mode,
+                        "lines": [{"description": "Synthetic GST check", **totals}],
+                    }
+                    data = render_configured_commission_invoice(snapshot, layout)
+                    text = " ".join(p.extract_text() for p in PdfReader(BytesIO(data)).pages)
+                    fields = [field.strip() for field in text.splitlines()]
+                    self.assertIn(mark, fields)
+                    self.assertNotIn("N" if mark == "Y" else "Y", fields)

@@ -118,7 +118,7 @@ def school_configuration_data(connection, base, school_id, draft_uid, *, add_sch
         (scope.entity_id,FORMAL_CONTRACT,school_id,scope.simulation),
     ).fetchall()
     data["active_contract_rules"] = connection.execute(
-        """SELECT d.uid,v.version_no,v.effective_from,v.effective_to,s.canonical_json
+        """SELECT d.uid,r.version_no,r.effective_from,r.effective_to,s.canonical_json
              FROM revenue_contract_versions v
              JOIN revenue_contract_groups g ON g.id=v.contract_group_id
              JOIN revenue_documents d ON d.id=v.document_id
@@ -128,7 +128,9 @@ def school_configuration_data(connection, base, school_id, draft_uid, *, add_sch
               AND v.status='active' AND d.document_kind=?
               AND json_extract(s.canonical_json,'$.school_id')=?
               AND json_extract(s.canonical_json,'$.pilot_simulation')=?
-            ORDER BY v.effective_from DESC,v.id DESC,r.id DESC""",
+              AND r.version_no=(SELECT max(latest.version_no) FROM revenue_commission_rule_versions latest
+                                 WHERE latest.contract_version_id=v.id AND latest.status='active')
+            ORDER BY r.effective_from DESC,v.id DESC,r.id DESC""",
         (scope.entity_id, FORMAL_CONTRACT, school_id, scope.simulation),
     ).fetchall()
     data["cases"] = connection.execute(
@@ -161,7 +163,7 @@ def _tier_inputs(suffix, required):
       <label>适用签证子类（逗号分隔，留空不限）<input name="visa_subclasses{suffix}" maxlength="120"></label>'''
 
 
-def _render_active_contract_rules(rows, *, include_claim_terms=False):
+def _render_active_contract_rules(rows, *, include_claim_terms=False, edit_links=None, billing_recipient=None):
     gst_labels = {"exclusive": "另加 10% GST", "inclusive": "已含 10% GST", "none": "不加 GST"}
     tuition_labels = {"local": "本地档", "international": "国际档", "any": "统一比例"}
     cards = []
@@ -173,15 +175,17 @@ def _render_active_contract_rules(rows, *, include_claim_terms=False):
                 f'{tuition_labels.get(tier["tuition_kind"], "佣金")} {tier["rate_basis_points"] / 100:g}%'
                 for tier in tiers
             )
-            period = "按首年学费一次性计佣"
+            from revenue.institution_commission_draft import FEE_PERIODS
+            period = FEE_PERIODS.get(rule.get("tuition_period"), "按首年学费一次性计佣")
         else:
             instalments = rule.get("instalments") or []
             rates = " · ".join(f'{item["rate_basis_points"] / 100:g}%' for item in instalments)
             single = len(instalments) == 1 and instalments[0].get("academic_period") == "single"
             period = "按学费一次性计佣" if single else "按合同期次"
         gst = gst_labels.get(rule.get("gst_mode"), "未单独设置")
-        email = rule.get("invoice_email")
-        recipient = f'<div><dt>合同收票邮箱建议</dt><dd>{escape(email)}</dd></div>' if email else ""
+        email = rule.get("invoice_email") if billing_recipient is None else billing_recipient
+        label = "合同收票邮箱建议" if billing_recipient is None else "学校收票邮箱"
+        recipient = f'<div><dt>{label}</dt><dd>{escape(email)}</dd></div>' if email else ""
         claim = rule.get("claim") or {}
         claim_rows = ""
         if include_claim_terms and claim:
@@ -193,6 +197,8 @@ def _render_active_contract_rules(rows, *, include_claim_terms=False):
             claim_rows = f'<div><dt>申领条件</dt><dd>{conditions}</dd></div>'
             if deadline is not None:
                 claim_rows += f'<div><dt>有效发票收件后付款期限</dt><dd>{int(deadline)} 天</dd></div>'
+        edit_href = (edit_links or {}).get(uid)
+        edit_link = f'<a class="button-link secondary" href="{escape(edit_href, quote=True)}">编辑佣金条款</a>' if edit_href else ""
         cards.append(f"""<article class="revenue-school-contract-summary">
           <h4>合同 V{int(version)} · 已启用</h4>
           <dl>
@@ -201,7 +207,7 @@ def _render_active_contract_rules(rows, *, include_claim_terms=False):
             <div><dt>计佣周期</dt><dd>{period}</dd></div>
             <div><dt>默认 GST</dt><dd>{gst}</dd></div>{recipient}{claim_rows}
           </dl>
-          <a href="/revenue/documents/{quote(uid, safe="")}/download">查看合同 PDF</a>
+          <a href="/revenue/documents/{quote(uid, safe="")}/download">查看合同 PDF</a> {edit_link}
         </article>""")
     content = "".join(cards) or '<p class="revenue-empty">该校暂无已启用的佣金合同规则。</p>'
     return f'<section aria-labelledby="active-school-contract-heading"><h3 id="active-school-contract-heading">已启用的学校佣金合同</h3>{content}</section>'

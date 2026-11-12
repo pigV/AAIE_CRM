@@ -1,6 +1,6 @@
 """School commission claims, invoice previews, and signed invoices."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -11,7 +11,7 @@ from revenue.pdf import render_configured_commission_invoice, render_toorak_invo
 from revenue.invoice_templates import (
     FORMAL_INVOICE_KIND, TEST_INVOICE_KIND, current_invoice_template_revisions, default_layout,
     financial_profile, invoice_origin_predicate, render_with_active_template,
-    school_test_billing_address,
+    invoice_customer_note, school_test_billing_address,
 )
 from revenue.money import apply_basis_points, commission_gst_amounts
 from revenue.repository import canonical_json, new_uid
@@ -60,7 +60,8 @@ def _today():
 
 class ToorakClaims:
     def __init__(self, service, actor, role, storage_root, *,
-                 formal=False, simulation=True, school_id=None, entity_id=None, mail_release=None):
+                 formal=False, simulation=True, school_id=None, entity_id=None, mail_release=None,
+                 library_entity_id=None):
         if role != "Admin":
             raise PermissionError("School commission claims require Admin")
         self.service = service
@@ -72,6 +73,8 @@ class ToorakClaims:
         self.mail_release = mail_release
         self.simulation = simulation
         self.entity_id = entity_id
+        self.template_context = {"template_target": ("school", school_id) if school_id else None,
+                                 "library_entity_id": library_entity_id}
         self.invoice_kind = FORMAL_INVOICE_KIND if formal else TEST_INVOICE_KIND
         self.workflow = "school-commission" if formal else "toorak"
         self.claim_action = "school_commission_claim_issued" if formal else "toorak_internal_claim_issued"
@@ -178,7 +181,7 @@ class ToorakClaims:
                 "sha256": digest, "size_bytes": len(content), "filename": row["original_name"]}, content
 
     def check_commencement(self, forecast):
-        if forecast.get("school_commission_configurable") is True:
+        if forecast.get("claim", {}).get("commencement_days"):
             elapsed = (date.fromisoformat(_today()) -
                        date.fromisoformat(forecast["commencement"]["actual_commencement_date"])).days
             minimum = forecast["claim"]["commencement_days"]
@@ -216,9 +219,9 @@ class ToorakClaims:
         if configurable:
             if not reviewed or recruited not in {"agent_named","configured_rule"}:
                 raise ValueError("须核对该学校合同及学生申领资料。")
-            self.check_commencement(configuration)
         elif recruited != "agent_named" or not reviewed:
             raise ValueError("须确认由代理招募、代理提交且申请载有代理名称，并核实资料属于本入学项目。")
+        self.check_commencement(configuration)
         current = self.forecast.preview(case_uid, configuration["component_uid"],
                                         configuration["visa"].get("category") == "other_resident_confirmed")
         if current["digest"] != configuration["digest"]:
@@ -400,6 +403,10 @@ class ToorakClaims:
                       claim.net_cents,claim.gst_cents,claim.gross_cents,
                       e.authoritative_facts_json,c.id AS case_id,c.student_id,c.uid AS case_uid,
                       entity.legal_name,
+                      (SELECT max(r.version_no) FROM revenue_commission_rule_versions r
+                        WHERE r.contract_version_id=(SELECT original.contract_version_id
+                              FROM revenue_commission_rule_versions original WHERE original.id=l.commission_rule_version_id)
+                          AND r.status='active') AS current_rule_revision,
                       EXISTS(SELECT 1 FROM revenue_invoice_lines il
                           WHERE il.source_kind='claim' AND il.source_uid=claim.uid) AS invoiced
                FROM revenue_claims claim
@@ -443,6 +450,7 @@ class ToorakClaims:
         return {
             "claim_uid":row["uid"],"claim_number":row["claim_number"],"student_id":row["student_id"],
             "rate":rate,"quantity":1,
+            **({"gst_mode": facts["gst_mode"]} if facts.get("gst_mode") else {}),
             "description":(f'{row["student_id"]} | {row["claim_number"]} | first-year {basis} tuition '
                            f'commission ({rate}%)'),
             **{key:row[key] for key in ("net_cents","gst_cents","gross_cents")},
@@ -457,16 +465,19 @@ class ToorakClaims:
     def _invoice_snapshot(self, rows, number):
         lines = [self._invoice_line(row) for row in rows]
         amounts = {key:sum(line[key] for line in lines) for key in ("net_cents","gst_cents","gross_cents")}
+        issued_on = _today()
+        due_date = None
         payment_terms = "Payment due date is confirmed after school receipt."
         if self.formal:
             terms = {json.loads(row["authoritative_facts_json"]).get("payment_days") for row in rows}
             if len(terms)!=1 or not terms <= {0,7,15,30}:
                 raise ValueError("正式发票的 Claim 必须使用同一已确认的付款期限。")
             days = terms.pop()
-            payment_terms = (f"Payment within {days} days of school receipt of a valid invoice."
-                             if days else "Payment due upon school receipt of a valid invoice.")
+            due_date = (date.fromisoformat(issued_on) + timedelta(days=days)).isoformat()
+            payment_terms = (f"Payment within {days} days of the invoice date."
+                             if days else "Payment due on the invoice date.")
         return dict(
-            document_number=number, issue_date=_today(), issuer_name="AAIE Education Services",
+            document_number=number, issue_date=issued_on, due_date=due_date, issuer_name="AAIE Education Services",
             issuer_abn="Test fixture", bill_to=rows[0]["legal_name"], currency_code="AUD",
             student_id="\n".join(line["student_id"] for line in lines),
             claim_number="\n".join(line["claim_number"] for line in lines),
@@ -482,28 +493,40 @@ class ToorakClaims:
             raise ValueError("所选 Claim 已生成发票，请刷新后重新选择。")
         return rows
 
-    def _school_invoice_preview(self, entity_id, claim_uids):
+    def _school_invoice_preview(self, entity_id, claim_uids, customer_note=""):
         rows = self._checked_invoice_claims(entity_id, claim_uids)
         snapshot = self._invoice_snapshot(rows,"DRAFT")
+        if note := invoice_customer_note(customer_note):
+            snapshot["customer_note"] = note
         revisions = current_invoice_template_revisions(self.connection,formal=self.formal,entity_id=self.entity_id,
-                                                       simulation=self.simulation,include_billing=True)
-        digest = hashlib.sha256(canonical_json([entity_id,claim_uids,snapshot,revisions]).encode()).hexdigest()
+                                                       simulation=self.simulation,include_billing=True,
+                                                       **self.template_context)
+        preview_data = [entity_id, claim_uids, snapshot, revisions]
+        rule_revisions = [row["current_rule_revision"] for row in rows]
+        if any(revision and revision > 1 for revision in rule_revisions):
+            preview_data.append(rule_revisions)
+        digest = hashlib.sha256(canonical_json(preview_data).encode()).hexdigest()
         return rows,snapshot,digest
 
-    def invoice_preview(self, entity_id, claim_uids):
+    def invoice_preview(self, entity_id, claim_uids, *, customer_note=""):
         ids = self._selected_claims(claim_uids)
-        _,snapshot,digest = self._school_invoice_preview(entity_id,ids)
+        _,snapshot,digest = self._school_invoice_preview(entity_id,ids,customer_note)
+        if self.formal:
+            from revenue.invoice_billing_details import billing_details
+
+            settings = billing_details(self.connection, self.entity_id, self.simulation)
+            snapshot["mail_preview"] = {key: settings[key] for key in ("recipient", "cc", "bcc")}
         return {**snapshot,"entity_id":entity_id,"claim_uids":ids,"digest":digest}
 
-    def invoice_preview_pdf(self, entity_id, claim_uids, digest):
-        _,snapshot,current_digest = self._school_invoice_preview(entity_id,self._selected_claims(claim_uids))
+    def invoice_preview_pdf(self, entity_id, claim_uids, digest, *, customer_note=""):
+        _,snapshot,current_digest = self._school_invoice_preview(entity_id,self._selected_claims(claim_uids),customer_note)
         if digest!=current_digest:
             raise ValueError("发票明细、模板或财务资料已更新，请重新预览。")
         return self._render_invoice(snapshot, use_default=True)[0]
 
     def _render_invoice(self, snapshot, use_default):
         configured = render_with_active_template(self.connection,snapshot,formal=self.formal,simulation=self.simulation,
-                                                 entity_id=self.entity_id)
+                                                 entity_id=self.entity_id, **self.template_context)
         if configured:
             return configured
         if not use_default:
@@ -539,10 +562,10 @@ class ToorakClaims:
         )
         invoice_id, = self.connection.execute(
             """INSERT INTO revenue_invoices(uid,document_kind,invoice_number,commercial_case_id,
-                  revenue_entity_id,issue_date,currency_code,net_cents,gst_cents,gross_cents,
+                  revenue_entity_id,issue_date,due_date,currency_code,net_cents,gst_cents,gross_cents,
                   status,document_id,issued_by,issued_at,created_at)
-                VALUES(?,'direct_commission_invoice',?,?,?,?,'AUD',?,?,?,'issued',?,?,?,?) RETURNING id""",
-            (uid,number,rows[0]["case_id"] if len(rows)==1 else None,rows[0]["revenue_entity_id"],today,
+                VALUES(?,'direct_commission_invoice',?,?,?,?,?,'AUD',?,?,?,'issued',?,?,?,?) RETURNING id""",
+            (uid,number,rows[0]["case_id"] if len(rows)==1 else None,rows[0]["revenue_entity_id"],today,data.get("due_date"),
              data["net_cents"],data["gst_cents"],data["gross_cents"],document["id"],self.actor,now,now),
         ).fetchone()
         self.connection.executemany(
@@ -573,12 +596,12 @@ class ToorakClaims:
                 "template_uid":template_uid,"finance_profile_uid":profile_uid,
                 **({"simulation":self.simulation, "invoice_bill_to":data["invoice_bill_to"]} if self.formal else {})}
 
-    def issue_school_invoice(self, entity_id, claim_uids, digest):
+    def issue_school_invoice(self, entity_id, claim_uids, digest, *, customer_note=""):
         ids = self._selected_claims(claim_uids)
         key = hashlib.sha256(canonical_json([entity_id,ids]).encode()).hexdigest()
 
         def operation():
-            rows,snapshot,current_digest = self._school_invoice_preview(entity_id,ids)
+            rows,snapshot,current_digest = self._school_invoice_preview(entity_id,ids,customer_note)
             if digest!=current_digest:
                 raise ValueError("发票明细、模板或财务资料已更新，请重新预览。")
             return self._persist_invoice(rows,snapshot,f"{self.workflow}-school-invoice-pdf:{key}",use_default=True)
@@ -595,7 +618,7 @@ class ToorakClaims:
 
         def operation():
             if expected_revisions is not None and expected_revisions!=current_invoice_template_revisions(self.connection,formal=self.formal,entity_id=self.entity_id,
-                                                       simulation=self.simulation):
+                                                       simulation=self.simulation, **self.template_context):
                 raise ValueError("发票模板或测试财务资料已更新，请刷新后重新确认。")
             rows = self._checked_invoice_claims(None,[claim_uid])
             if rows[0]["case_uid"]!=case_uid:

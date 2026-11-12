@@ -7,6 +7,7 @@ import base64
 from html import escape
 from pathlib import Path
 from io import BytesIO
+from revenue.money import commission_gst_indicator
 from revenue.secure_storage import write_immutable
 
 from reportlab.lib import colors
@@ -210,8 +211,11 @@ def render_configured_commission_invoice(snapshot: dict, layout: dict) -> bytes:
             logo.drawHeight*=scale
             logo.hAlign=style["alignment"].upper()
             story.append(logo)
-        if kind=="footer" and layout["footer"]:
-            story.append(Paragraph(escape(layout["footer"]),normal))
+        if kind == "footer":
+            if layout["footer"]:
+                story.append(Paragraph(escape(layout["footer"]), normal))
+            if note := snapshot.get("customer_note"):
+                story.append(Paragraph("Customer note: " + escape(note).replace("\n", "<br/>"), normal))
         elif kind=="items":
             fields=block["fields"]
             grid=[[Paragraph(escape(f["label"] or f["key"].title()),normal) for f in fields]]
@@ -220,7 +224,8 @@ def render_configured_commission_invoice(snapshot: dict, layout: dict) -> bytes:
                 quantity=int(line.get("quantity",1))
                 row={"product":"School recruitment commission","description":line["description"],
                      "quantity":quantity,"rate":_money(line["net_cents"]//quantity),
-                     "gst":"GST" if line["gst_cents"] else "—","amount":_money(line["net_cents"])}
+                     "gst":commission_gst_indicator(line["gst_cents"], line.get("gst_mode") or snapshot.get("gst_mode")),
+                     "amount":_money(line["net_cents"])}
                 grid.append([Paragraph(escape(str(row[f["key"]])),right if f["key"] in {"rate","amount"} else normal)
                              for f in fields])
             columns=[width*weights[f["key"]]/sum(weights.values()) for f in fields]

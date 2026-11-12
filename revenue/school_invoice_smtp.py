@@ -9,7 +9,7 @@ import smtplib
 import ssl
 import subprocess
 
-from revenue.school_invoice_release import FINANCE_COPY_ADDRESS, payer_mail_addresses
+from revenue.school_invoice_release import FINANCE_COPY_ADDRESS, payer_copy_addresses, payer_mail_addresses
 from revenue.school_invoice_reminders import EMAIL
 
 
@@ -50,12 +50,23 @@ class RehearsalSMTP:
             raise
         return smtp
 
-    def submit(self, recipient, content, allowed):
+    def submit(self, recipient, content, allowed, *, cc=None, bcc=""):
         message = BytesParser(policy=policy.default).parsebytes(content, headersonly=True)
         expected_cc = [self.cc] if self.cc else []
+        blind_copies = []
         if self.recipient is None and self.mode == "production" and not self.simulation:
             try:
                 recipients = payer_mail_addresses(recipient, simulation=False)
+                if cc is not None:
+                    prefix, _, additional = cc.partition(", ")
+                    if prefix != self.cc:
+                        raise ValueError("Finance copy missing")
+                    copies, blind_copies = payer_copy_addresses(recipient, additional, bcc, simulation=False)
+                    expected_cc.extend(copies)
+                    if cc != ", ".join(expected_cc) or bcc != ", ".join(blind_copies):
+                        raise ValueError("Invalid copy recipients")
+                elif bcc:
+                    raise ValueError("Missing copy recipients")
             except ValueError:
                 return "cancelled", "smtp_recipient_not_allowed", None
         elif (isinstance(recipient, str) and recipient == self.recipient and EMAIL.fullmatch(recipient)
@@ -64,9 +75,13 @@ class RehearsalSMTP:
         else:
             return "cancelled", "smtp_recipient_not_allowed", None
         to_headers = message.get_all("To") or []
+        cc_headers = message.get_all("Cc") or []
+        cc_matches = (len(cc_headers) == 1 and not cc_headers[0].defects
+                      and [address.addr_spec for address in cc_headers[0].addresses] == expected_cc
+                      if expected_cc else not cc_headers)
         if (len(to_headers) != 1 or to_headers[0].defects
                 or [address.addr_spec for address in to_headers[0].addresses] != recipients
-                or message.get_all("From") != [self.sender] or (message.get_all("Cc") or []) != expected_cc
+                or message.get_all("From") != [self.sender] or not cc_matches
                 or message.get_all("Bcc")):
             return "cancelled", "smtp_recipient_not_allowed", None
 
@@ -76,8 +91,7 @@ class RehearsalSMTP:
                 return "cancelled", "smtp_disabled", None
             smtp = self.connect()
             envelope = [(smtp.mail, self.sender), *((smtp.rcpt, address) for address in recipients)]
-            if self.cc:
-                envelope.append((smtp.rcpt, self.cc))
+            envelope.extend((smtp.rcpt, address) for address in (*expected_cc, *blind_copies))
             for command, address in envelope:
                 code, _ = command(address)
                 if code not in (250, 251):

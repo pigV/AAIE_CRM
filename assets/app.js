@@ -416,6 +416,7 @@
   });
 
   qa("[data-file-drop-zone]").forEach((zone) => {
+    if (zone.matches("[data-school-contract-drop]")) return;
     const input = q('input[type="file"]', zone);
     const summary = q("[data-file-drop-summary]", zone);
     if (!input) return;

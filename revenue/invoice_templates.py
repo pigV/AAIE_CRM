@@ -11,6 +11,7 @@ from PIL import Image
 
 from revenue.pdf import render_configured_commission_invoice
 from revenue.invoice_1762_pdf import REFERENCE_ORDER
+from revenue.repository import new_uid
 
 
 LAYOUT_SOURCE = "commission_invoice_template"
@@ -18,6 +19,7 @@ PROFILE_SOURCE = "commission_invoice_test_finance_profile"
 PUBLICATION = "commission_invoice_template_published"
 ROLLBACK = "commission_invoice_template_rolled_back"
 RENAME = "commission_invoice_template_renamed"
+SCHOOL_TEMPLATE_SELECTED = "school_commission_invoice_template_selected"
 VERSION_NAME_LIMIT = 80
 ISSUER_FONT_BOUNDS = (8, 18)
 FORMAL_LAYOUT_SOURCE = "school_commission_formal_invoice_template"
@@ -62,6 +64,13 @@ PROFILE_DEFAULT = {
 
 
 FORMAL_PROFILE_FIELDS = (*PROFILE_DEFAULT, "bill_to_address")
+
+
+def invoice_customer_note(note):
+    if (not isinstance(note, str) or len(note) > 500
+            or any(ord(char) < 32 and char not in "\r\n" for char in note)):
+        raise ValueError("客户备注最多填写 500 个字符。")
+    return note.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def _formal_profile(values):
@@ -215,6 +224,83 @@ def active_template_uid(connection, *, formal=False, entity_id=None, simulation=
     return _latest_event(connection,(PUBLICATION,ROLLBACK),source).get("template_uid","")
 
 
+def _template_versions(connection, source):
+    return [dict(row) for row in connection.execute(
+        """SELECT s.uid,s.created_at,
+                  COALESCE((SELECT json_extract(a.after_json,'$.name')
+                            FROM revenue_audit_events a
+                            WHERE a.aggregate_uid=s.uid AND a.action=?
+                            ORDER BY a.id DESC LIMIT 1),
+                           json_extract(s.canonical_json,'$.version_name'),'') AS name
+             FROM revenue_rule_snapshots s WHERE s.source_rule_uid=? ORDER BY s.id DESC""",
+        (RENAME, source),
+    )]
+
+
+def _school_template_key(target, simulation):
+    kind, key = target
+    return f"{'simulation' if simulation else 'production'}:{kind}:{key}"
+
+
+def _school_template_choice(connection, target, simulation):
+    return _latest_event(connection, (SCHOOL_TEMPLATE_SELECTED,), _school_template_key(target, simulation))
+
+
+def invoice_template_context(pilot, target):
+    library = getattr(pilot, "template_library_entity_id", None) or getattr(pilot, "entity_id", None)
+    return {"template_target": target, "library_entity_id": library}
+
+
+def school_template_state(connection, target, library_entity_id, simulation):
+    choice = _school_template_choice(connection, target, simulation)
+    versions, active, published = [], "", set()
+    if library_entity_id:
+        source, _ = _sources(True, library_entity_id, simulation)
+        versions = _template_versions(connection, source)
+        active = active_template_uid(connection, formal=True, entity_id=library_entity_id, simulation=simulation)
+        published = {row[0] for row in connection.execute(
+            "SELECT json_extract(after_json,'$.template_uid') FROM revenue_audit_events WHERE action=? AND aggregate_uid=?",
+            (PUBLICATION, source),
+        )}
+    selected = choice.get("template_uid", "")
+    return dict(versions=versions, active_uid=active, published=published, selected_uid=selected,
+                effective_uid=selected or active, revision=choice.get("revision", ""))
+
+
+def save_school_template_selection(repository, target, library_entity_id, simulation, uid, revision, actor, key):
+    if not isinstance(uid, str) or len(uid)>100 or not isinstance(revision, str):
+        raise ValueError("请选择有效的发票模板版本。")
+    source, _ = _sources(True, library_entity_id, simulation)
+    aggregate = _school_template_key(target, simulation)
+
+    def operation():
+        current = _school_template_choice(repository.connection, target, simulation)
+        if current.get("revision", "") != revision:
+            raise ValueError("学校模板选版已变更，请刷新后重试。")
+        if uid:
+            _version(repository.connection, uid, source)
+        return {"uid": aggregate, "revision": new_uid("school-template-selection"), "template_uid": uid}
+
+    return repository.command(
+        idempotency_key=key, command_type=SCHOOL_TEMPLATE_SELECTED, aggregate_type="school_invoice_template_selection",
+        payload={"scope": aggregate, "library": source, "template_uid": uid, "revision": revision},
+        actor_user_id=actor, operation=operation,
+    )
+
+
+def invoice_layout_selection(connection, *, formal=False, entity_id=None, simulation=True,
+                             template_target=None, library_entity_id=None):
+    if formal and template_target and library_entity_id:
+        source, _ = _sources(True, library_entity_id, simulation)
+        selected = _school_template_choice(connection, template_target, simulation).get("template_uid")
+        uid = selected or active_template_uid(
+            connection, formal=True, entity_id=library_entity_id, simulation=simulation,
+        )
+        return uid, source
+    source, _ = _sources(formal, entity_id, simulation)
+    return active_template_uid(connection, formal=formal, entity_id=entity_id, simulation=simulation), source
+
+
 def invoice_origin_predicate():
     """Match invoice alias i to one origin using its immutable Claim evaluations."""
     return """(?=0 OR (EXISTS (
@@ -250,9 +336,12 @@ def financial_profile(connection, *, formal=False, entity_id=None, simulation=Tr
 
 
 def current_invoice_template_revisions(connection, *, formal=False, entity_id=None, simulation=True,
-                                       include_billing=False):
-    revisions = (active_template_uid(connection,formal=formal,entity_id=entity_id,simulation=simulation),
-                 financial_profile(connection,formal=formal,entity_id=entity_id,simulation=simulation)[1] or "")
+                                       include_billing=False, template_target=None, library_entity_id=None):
+    uid, _ = invoice_layout_selection(
+        connection, formal=formal, entity_id=entity_id, simulation=simulation,
+        template_target=template_target, library_entity_id=library_entity_id,
+    )
+    revisions = (uid, financial_profile(connection,formal=formal,entity_id=entity_id,simulation=simulation)[1] or "")
     if formal and include_billing:
         from revenue.invoice_billing_details import billing_details
 
@@ -262,23 +351,27 @@ def current_invoice_template_revisions(connection, *, formal=False, entity_id=No
 
 
 def _bill_to_layout(layout, data):
-    """Let already published Invoice 1762 layouts display newly configured contact fields."""
-    if layout.get("preset") != "invoice_1762":
-        return layout
-    selected = {field["key"] for block in layout["blocks"] for field in block["fields"]}
-    missing = [{"key": key, "label": LABELS[key]} for key in FIELD_GROUPS["bill_to"]
-               if data.get(key) and key not in selected]
-    if not missing:
+    """Show configured contacts on Invoice 1762 and omit an empty optional phone."""
+    block = next(block for block in layout["blocks"] if block["kind"] == "bill_to")
+    selected = {field["key"] for field in block["fields"]}
+    fields = [field for field in block["fields"] if field["key"] != "bill_to_phone" or data.get("bill_to_phone")]
+    if layout.get("preset") == "invoice_1762":
+        fields.extend({"key": key, "label": LABELS[key]} for key in FIELD_GROUPS["bill_to"]
+                      if data.get(key) and key not in selected)
+    if fields == block["fields"]:
         return layout
     layout = deepcopy(layout)
-    block = next(block for block in layout["blocks"] if block["kind"] == "bill_to")
-    block["fields"].extend(missing)
+    next(block for block in layout["blocks"] if block["kind"] == "bill_to")["fields"] = fields
     return layout
 
 
-def render_with_active_template(connection, snapshot, *, formal=False, simulation=True, entity_id=None):
-    layout_source,profile_source = _sources(formal,entity_id,simulation)
-    uid = active_template_uid(connection,formal=formal,entity_id=entity_id,simulation=simulation)
+def render_with_active_template(connection, snapshot, *, formal=False, simulation=True, entity_id=None,
+                                template_target=None, library_entity_id=None):
+    _,profile_source = _sources(formal,entity_id,simulation)
+    uid, layout_source = invoice_layout_selection(
+        connection, formal=formal, entity_id=entity_id, simulation=simulation,
+        template_target=template_target, library_entity_id=library_entity_id,
+    )
     profile,profile_uid = financial_profile(connection,formal=formal,entity_id=entity_id,simulation=simulation)
     if formal and (not uid or not profile_uid):
         raise ValueError("正式签发须先发布发票模板并批准完整的开票及收款资料。")
@@ -292,8 +385,7 @@ def render_with_active_template(connection, snapshot, *, formal=False, simulatio
         _formal_profile(profile)
         fields = snapshot.get("invoice_bill_to")
         data.update(bill_to_fields(connection, entity_id, simulation) if fields is None else fields)
-        if data.get("bill_to_phone") or data.get("bill_to_email"):
-            layout = _bill_to_layout(layout, data)
+        layout = _bill_to_layout(layout, data)
         approved = _latest_event(connection,(FORMAL_PROFILE_APPROVED,),profile_source)
         if not simulation and approved.get("simulation") is not False:
             raise ValueError("正式签发须使用当前环境独立批准的开票资料。")
@@ -319,16 +411,7 @@ class CommissionInvoiceTemplates:
         self.invoice_kind=FORMAL_INVOICE_KIND if formal else TEST_INVOICE_KIND
 
     def state(self, selected=""):
-        rows=[dict(row) for row in self.connection.execute(
-            """SELECT s.uid,s.created_at,
-                      COALESCE((SELECT json_extract(a.after_json,'$.name')
-                                FROM revenue_audit_events a
-                                WHERE a.aggregate_uid=s.uid AND a.action=?
-                                ORDER BY a.id DESC LIMIT 1),
-                               json_extract(s.canonical_json,'$.version_name'),'') AS name
-                 FROM revenue_rule_snapshots s WHERE s.source_rule_uid=? ORDER BY s.id DESC""",
-            (RENAME,self.layout_source),
-        )]
+        rows = _template_versions(self.connection, self.layout_source)
         active=active_template_uid(self.connection,formal=self.formal,entity_id=self.entity_id,simulation=self.simulation)
         uid=selected or (rows[0]["uid"] if rows else "")
         published={row[0] for row in self.connection.execute(
@@ -436,13 +519,14 @@ class CommissionInvoiceTemplates:
             payload={"template_uid":uid,"expected_active":expected_active},actor_user_id=self.actor,operation=operation,
         )
 
-    def preview_sample(self, template_uid, *, authority_name=None):
+    def preview_sample(self, template_uid, *, authority_name=None, billing_sample=None, layout_source=None,
+                       sample_finance=False):
         if not self.formal:
             raise ValueError("请选择正式发票模板。")
-        layout = (_version(self.connection,template_uid,self.layout_source)["value"]
+        layout = (_version(self.connection,template_uid,layout_source or self.layout_source)["value"]
                   if template_uid else default_layout())
         profile,uid = financial_profile(self.connection,formal=True,entity_id=self.entity_id,
-                                        simulation=self.simulation)
+                                        simulation=self.simulation) if not sample_finance else ({}, None)
         if not uid:
             profile = {**PROFILE_DEFAULT,"bill_to_address":"3 Example Street, Melbourne VIC 3000"}
         lines = [
@@ -458,6 +542,9 @@ class CommissionInvoiceTemplates:
         sample = {**profile,**amounts,"document_number":"DRAFT","issue_date":"2026-11-07","test_only":True,
                   "bill_to":f"{authority_name or 'Toorak College'} (synthetic)","claim_number":"DEMO-CLAIM-A\nDEMO-CLAIM-B",
                   "student_id":"DEMO-STUDENT-A\nDEMO-STUDENT-B","lines":lines}
+        if billing_sample:
+            sample.update(billing_sample)
+            layout = _bill_to_layout(layout, sample)
         return render_configured_commission_invoice(sample,layout)
 
     def preview(self,invoice_uid,template_uid):

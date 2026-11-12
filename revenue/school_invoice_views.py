@@ -52,6 +52,7 @@ def render_school_invoice_list(entities, entity_id, claims, invoices, csrf, toke
             selection = f"""<form method="post" action="{URL}/preview">
               {_hidden_security(csrf,token,"toorak-school-preview")}{_hidden("entity_id",entity_id)}
               {_claim_table(claims,selectable=True)}
+              <label>客户备注（选填）<textarea name="customer_note" maxlength="500" rows="2"></textarea></label>
               <button type="submit" class="primary">预览所选发票</button></form>"""
         else:
             selection = '<p>该付款主体目前没有可开票的 Claim。</p>'
@@ -88,14 +89,26 @@ def render_school_invoice_list(entities, entity_id, claims, invoices, csrf, toke
 def render_school_invoice_preview(data, csrf, token, *, simulation=True, allow_issue=True):
     hidden = "".join(_hidden(k,v) for k,v in (
         ("entity_id",data["entity_id"]),("claim_uids",",".join(data["claim_uids"])),("preview_digest",data["digest"]),
+        ("customer_note",data.get("customer_note","")),
     ))
     mode = "TEST ONLY · " if simulation else ""
     issue = '<button type="submit" class="primary">确认签发佣金发票</button>' if allow_issue else ""
     action = "issue" if allow_issue else "pdf"
+    terms = ""
+    if data.get("due_date"):
+        terms = f'<p>开票日 {escape(data["issue_date"])} · 到期日 {escape(data["due_date"])}</p>'
+    if copies := data.get("mail_preview"):
+        from revenue.school_invoice_release import FINANCE_COPY_ADDRESS
+
+        terms += (f'<p>收件人 {escape(copies["recipient"] or "未填写")} · '
+                  f'Cc {escape(", ".join(filter(None, (FINANCE_COPY_ADDRESS, copies["cc"]))))} · '
+                  f'Bcc {escape(copies["bcc"] or "未填写")}</p>')
+    if note := data.get("customer_note"):
+        terms += f'<p>客户备注 {escape(note)}</p>'
     return f"""<section class="revenue-panel">
       <h1>学校佣金发票预览</h1>
       <p>{mode}{escape(data["bill_to"])} · 预览阶段尚未分配 COM 编号。</p>
-      {_claim_table(data["lines"])}
+      {_claim_table(data["lines"])}{terms}
       <p>未税 {_aud_money(data["net_cents"])} · GST {_aud_money(data["gst_cents"])}
       · 合计 <strong>{_aud_money(data["gross_cents"])}</strong></p>
       <form method="post" action="{URL}/{action}">
@@ -145,9 +158,10 @@ def _invoice_payment_label(settlement):
         return ""
     outstanding = _aud_money(settlement["outstanding_cents"])
     delivery = settlement["delivery"]
-    if not delivery:
+    due_date = settlement.get("due_date") or (delivery["due_date"] if delivery else None)
+    if not due_date:
         return f" · 待确认学校收件 · 未收 {outstanding}"
-    due = escape(delivery["due_date"])
+    due = escape(due_date)
     days = settlement["overdue_days"]
     overdue = f" · <strong>逾期 {days} 天</strong>" if days else ""
     return f" · 到期 {due} · 未收 {outstanding}{overdue}"
@@ -156,12 +170,13 @@ def _invoice_payment_label(settlement):
 def render_school_reminder_center(invoices):
     if not invoices:
         return ""
-    rows = "".join(
-        f'<li>{escape(invoice["legal_name"])} · '
-        f'<a href="{URL}?invoice={quote(invoice["uid"], safe="")}">{escape(invoice["invoice_number"])}</a>'
-        f'{_invoice_payment_label(invoice["settlement"])}</li>'
-        for invoice in invoices
-    )
+    rows = []
+    for invoice in invoices:
+        href = invoice.get("href") or f'{URL}?invoice={quote(invoice["uid"], safe="")}'
+        rows.append(f'<li>{escape(invoice["legal_name"])} · '
+                    f'<a href="{escape(href, quote=True)}">{escape(invoice["invoice_number"])}</a>'
+                    f'{_invoice_payment_label(invoice["settlement"])}</li>')
+    rows = "".join(rows)
     return f'<section class="panel"><h2>学校佣金逾期提醒（{len(invoices)}）</h2><ul>{rows}</ul></section>'
 
 
@@ -242,7 +257,7 @@ def render_school_mail_history(entities, entries, filters, page_number, has_next
     for entry in entries:
         name = escape(entry["invoice_number"])
         href = f'{URL}?invoice={quote(entry["uid"], safe="")}#invoice-mail-history'
-        if draft := entry.get("authority_draft"):
+        if draft := entry.get("authority_draft") or entry.get("institution_draft"):
             contract_uid, draft_uid = (quote(item, safe="") for item in draft)
             href = f'/revenue/institution-commission-drafts/{contract_uid}?invoice={draft_uid}'
         status = MAIL_STATUS_LABELS[entry["status"]]
@@ -300,6 +315,8 @@ def render_school_mail_status(invoice_uid, mail, csrf, token, allow_retry, *, at
           <button type="submit">重试发票邮件</button></form>"""
     title = "发票邮件" if mail.get("transport") == "production" else "发票邮件 · TEST ONLY"
     copy_line = f'<p>抄送 {escape(mail["cc"])}</p>' if mail.get("cc") else ""
+    if mail.get("bcc"):
+        copy_line += f'<p>密送 {escape(mail["bcc"])}</p>'
     archived = mail.get("message")
     content = "<p>邮件主题和正文未存档。</p>"
     if archived:

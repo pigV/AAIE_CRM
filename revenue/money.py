@@ -75,6 +75,14 @@ def commission_gst_amounts(commission_cents: int, gst_mode: str) -> dict[str, in
     return {"net_cents": net, "gst_cents": gst, "gross_cents": net + gst}
 
 
+def commission_gst_indicator(gst_cents: int, gst_mode: str | None = None) -> str:
+    if gst_mode in {"exclusive", "inclusive"}:
+        return "Y"
+    if gst_mode == "none":
+        return "N"
+    return "Y" if gst_cents else "N"
+
+
 def allocate_cents(total_cents: int, weights: list[int] | tuple[int, ...]) -> list[int]:
     total_cents = _integer(total_cents, "total_cents")
     normalized = [_integer(value, "weight") for value in weights]

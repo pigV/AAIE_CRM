@@ -371,14 +371,15 @@ def select_final_acceptance(
     cursor = conn.execute(
         """
         INSERT INTO cycle_final_acceptances(
-          application_cycle_id,student_id,offer_received_event_id,school_name_snapshot,
+          application_cycle_id,student_id,offer_received_event_id,school_id,school_name_snapshot,
           signed_offer_completed_at,payment_completed_at,selected_at,
           selected_by_user_id,selected_by_name,created_at,updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES(?,?,?,(SELECT school_id FROM offer_received_events WHERE id=?),?,?,?,?,?,?,?,?)
         """,
         (
             int(application_cycle_id),
             offer.student_id,
+            offer.id,
             offer.id,
             offer.school_name,
             signed_offer_completed_at,
@@ -610,14 +611,15 @@ def change_final_acceptance(
         )
         cursor = conn.execute(
             """INSERT INTO cycle_final_acceptances(
-                 application_cycle_id,student_id,offer_received_event_id,
+                 application_cycle_id,student_id,offer_received_event_id,school_id,
                  school_name_snapshot,selected_at,selected_by_user_id,
                  selected_by_name,acceptance_status,replaces_acceptance_id,
                  created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,'active',?,?,?)""",
+               ) VALUES(?,?,?,(SELECT school_id FROM offer_received_events WHERE id=?),?,?,?,?,'active',?,?,?)""",
             (
                 int(application_cycle_id),
                 offer.student_id,
+                offer.id,
                 offer.id,
                 offer.school_name,
                 stamp,

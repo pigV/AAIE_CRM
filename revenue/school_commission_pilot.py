@@ -27,6 +27,7 @@ class PilotPolicy:
     revision: int = 0
     contract_intake: bool = False
     education_authorities: tuple[str, ...] = ()
+    template_library_entity_id: int = 0
 
     @property
     def toorak_draft_release(self):
@@ -190,7 +191,8 @@ def school_pilot_scope(connection, base, *, school_id=None, entity_id=None):
     elif STAGES.index(stage)>STAGES.index(base.stage):
         stage = base.stage
     return replace(base,school_id=school_id,entity_id=entity_id,enabled=enabled,stage=stage,
-                   revision=saved[0] if saved else 0)
+                   revision=saved[0] if saved else 0,
+                   template_library_entity_id=base.template_library_entity_id or base.entity_id)
 
 
 def list_school_pilot_scopes(connection, base):

@@ -9,11 +9,12 @@ import re
 from zoneinfo import ZoneInfo
 
 from revenue import vic_rcti
-from revenue.money import apply_basis_points, commission_gst_amounts
+from revenue.money import apply_basis_points, aud_cents, commission_gst_amounts
 from revenue.repository import canonical_json, new_uid
 from revenue.school_commission_pilot import FORMAL_CONTRACT
 from revenue.school_contract_extract import (
-    add_onboarding_findings, extract_configurable_terms, read_pages,
+    NSW_SCHEDULE_CONFIRM_BLOCK, NSW_SCHEDULE_PROFILE, add_onboarding_findings,
+    extract_configurable_terms, extract_nsw_schedule, normalize_value, read_pages,
 )
 from revenue.school_contracts import PROVIDER_REGISTRATION_ACTION, SCHOOL_REGISTRATION_ACTION
 from revenue.secure_storage import StorageUnavailable
@@ -24,8 +25,15 @@ from revenue.state_school_commission import (
 
 
 CONFIRMED = "institution_commission_terms_confirmed"
+NSW_REVIEW_SAVED = "nsw_commission_review_saved"
+NSW_CLAIMS_ONLY = "nsw_claims_only"
+NSW_BLOCK_INVOICE = "NSW 当前仅开放核对申领条件和预计佣金。"
+NSW_RATE_LABELS = {"standard": "基础佣金", "iec_rate": "IEC 佣金"}
 FACTS = "institution_commission_evidence_confirmed"
 DRAFT = "institution_commission_invoice_draft_created"
+DRAFT_GST_CHANGED = "institution_commission_invoice_draft_gst_changed"
+DRAFT_REPREVIEWED = "institution_commission_invoice_draft_repreviewed"
+INVOICE_ISSUED = "institution_commission_invoice_issued"
 TIER_LABELS = {
     "onshore_full": "境内招募 · 全日制",
     "offshore_full": "境外招募 · 全日制",
@@ -53,6 +61,9 @@ def extract_draft_terms(pages, institution, *, authority=None):
     if authority == "VIC" and (findings := vic_rcti.extract(pages)):
         fields.update(findings)
         return vic_rcti.PROFILE, fields
+    if authority == "NSW" and (findings := extract_nsw_schedule(pages)):
+        fields.update(findings)
+        return NSW_SCHEDULE_PROFILE, fields
     rates, evidence = {}, {}
     condition_lines = []
     for page, text in enumerate(pages, 1):
@@ -195,7 +206,7 @@ class InstitutionCommissionDraft:
             pdf = configured_contract_store().read(
                 Path(self.document["storage_path"]), self.document["sha256"], self.document["size_bytes"],
             )
-            pages, status = read_pages(pdf, ocr)
+            pages, status = read_pages(pdf, ocr, review_nsw_schedule=self.target == ("authority", "NSW"))
         except (OSError, StorageUnavailable):
             pages, status = [], "unreadable"
         profile, fields = extract_draft_terms(
@@ -209,6 +220,213 @@ class InstitutionCommissionDraft:
                 ORDER BY id DESC LIMIT 1""", (CONFIRMED, self.uid),
         ).fetchone()
         return json.loads(row[0]) if row else None
+
+    def nsw_review(self):
+        if self.target != ("authority", "NSW"):
+            return None
+        row = self.db.execute(
+            """SELECT after_json FROM revenue_audit_events
+                 WHERE action=? AND aggregate_uid=? AND json_extract(after_json,'$.pdf_sha256')=?
+                 ORDER BY id DESC LIMIT 1""",
+            (NSW_REVIEW_SAVED, self.uid, self.document["sha256"]),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_nsw_review(self, form, analysis, key):
+        if self.target != ("authority", "NSW") or analysis["profile"] != NSW_SCHEDULE_PROFILE:
+            raise PermissionError("此操作仅适用于已识别的 NSW 佣金合同。")
+        analysis_revision = _value(form, "analysis_revision")
+        if analysis_revision != _digest(analysis):
+            raise ValueError("提取结果已变更，请刷新后重新核对。")
+        values = {
+            name: normalize_value(name, _value(form, name))
+            for name in ("standard", "iec_rate", "start", "end", "gst")
+        }
+        if values["start"] > values["end"]:
+            raise ValueError("合同到期日不得早于生效日。")
+        conditions = _value(form, "conditions")
+        if not conditions or len(conditions) > 6000:
+            raise ValueError("请填写申领条件，最多 6000 个字符。")
+        payment_days = _value(form, "payment_days")
+        values.update(conditions=conditions, payment_days=(
+            normalize_value("payment_days", payment_days) if payment_days else ""
+        ))
+        if "school_name" in form:
+            school_name = _value(form, "school_name")
+            values["school_name"] = normalize_value("school_name", school_name) if school_name else ""
+        revision = _value(form, "review_revision")
+
+        def operation():
+            if self.terms() or discarded_contract_upload(self.db, self.uid):
+                raise ValueError("合同状态已变更，请刷新后核对。")
+            current = self.nsw_review()
+            if revision != (current["revision"] if current else ""):
+                raise ValueError("已有更新的核对结果，请刷新后重试。")
+            saved_values = {**(current["values"] if current else {}), **values}
+            return {"uid": self.uid, "revision": new_uid("nsw-review"), "values": saved_values,
+                    "pdf_sha256": self.document["sha256"], "analysis": analysis}
+
+        return self.repo.command(
+            idempotency_key=key, command_type=NSW_REVIEW_SAVED, aggregate_type="nsw_commission_review",
+            payload={"contract": self.uid, "review_revision": revision,
+                     "analysis_revision": analysis_revision, "values": values},
+            actor_user_id=self.actor, operation=operation,
+        )
+
+    def enable_nsw_claims(self, review_revision, key):
+        if self.target != ("authority", "NSW") or not self.pilot.enabled:
+            raise PermissionError("当前未开放 NSW 佣金申领。")
+
+        def operation():
+            review = self.nsw_review()
+            if self.terms() or not review or review_revision != review["revision"] or discarded_contract_upload(
+                self.db, self.uid
+            ):
+                raise ValueError("合同核对状态已变更，请刷新后重试。")
+            values = review["values"]
+            if not values.get("school_name"):
+                raise ValueError("请先核对合同付款主体。")
+            if any(values["start"] <= previous for previous in authority_version_starts(
+                self.db, "NSW", self.pilot.simulation
+            )):
+                raise ValueError("续约生效日须晚于该教育局上一版合同的生效日。")
+            return {
+                "uid": self.uid, "revision": new_uid("terms"), "target": list(self.target),
+                "profile": NSW_SCHEDULE_PROFILE, "payment_mode": NSW_CLAIMS_ONLY,
+                "payer": values["school_name"],
+                "rates": {name: _rate(values[name]) for name in NSW_RATE_LABELS},
+                "start": values["start"], "end": values["end"], "gst": values["gst"],
+                "period": "first_year", "conditions": values["conditions"],
+                "payment_days": int(values["payment_days"]) if values["payment_days"] else None,
+                "pdf_sha256": self.document["sha256"], "findings": review["analysis"]["fields"],
+                "review_revision": review_revision,
+            }
+
+        return self.repo.command(
+            idempotency_key=key, command_type=CONFIRMED, aggregate_type="institution_commission_terms",
+            payload={"draft": self.uid, "enable_nsw_review": review_revision},
+            actor_user_id=self.actor, operation=operation,
+        )
+
+    def revise_terms(self, form, key):
+        revision = _value(form, "revision")
+
+        def operation():
+            current = self.terms()
+            if not current or revision != current["revision"]:
+                raise ValueError("合同条款已变更，请刷新后再编辑。")
+            start, end = (normalize_value(name, _value(form, name)) for name in ("start", "end"))
+            if start > end:
+                raise ValueError("合同到期日不得早于生效日。")
+            if self.target[0] == "authority":
+                from revenue.state_school_commission import authority_contracts
+
+                for uid, payload in authority_contracts(self.db, self.target[1], self.pilot.simulation):
+                    if uid == self.uid or not payload:
+                        continue
+                    other = json.loads(payload)
+                    if (current["start"] < other["start"]) != (start < other["start"]) or start == other["start"]:
+                        raise ValueError("合同生效日不能越过其他已确认版本的生效日。")
+            gst = _value(form, "gst")
+            conditions = _value(form, "conditions")
+            if gst not in GST_MODES or not conditions or len(conditions) > 6000:
+                raise ValueError("请核对 GST 和申领条件。")
+            mode = current.get("payment_mode")
+            period = current["period"] if mode in {NSW_CLAIMS_ONLY, vic_rcti.PAYMENT} else _value(form, "period")
+            if period not in FEE_PERIODS or (current["profile"] == "recruitment_matrix" and period != "whole_course"):
+                raise ValueError("请选择合同支持的计佣学费周期。")
+            days = _value(form, "payment_days")
+            if mode != vic_rcti.PAYMENT and (days or mode != NSW_CLAIMS_ONLY):
+                days = int(normalize_value("payment_days", days))
+            else:
+                days = None
+            rates = {name: _rate(_value(form, name)) for name in current["rates"]}
+            version = new_uid("terms")
+            evidence = (current.get("evidence_revision", current["revision"])
+                        if conditions == current["conditions"] else version)
+            return {**current, "revision": version, "previous_revision": revision,
+                    "evidence_revision": evidence, "start": start, "end": end,
+                    "gst": gst, "conditions": conditions, "period": period,
+                    "payment_days": days, "rates": rates}
+
+        return self.repo.command(
+            idempotency_key=key, command_type=CONFIRMED, aggregate_type="institution_commission_terms",
+            payload={"draft": self.uid, "revision": revision, "form": dict(form)},
+            actor_user_id=self.actor, operation=operation,
+        )
+
+    def _billing_payer(self, *, create=False, key=""):
+        terms = self.terms()
+        if not terms:
+            raise ValueError("请先确认学校佣金条款。")
+        if self.target[0] not in {"school", "provider"}:
+            raise PermissionError("请从学校或高等教育机构合同填写开票资料。")
+        from revenue.services import RevenueService
+        from revenue.school_contracts import SchoolCommissionContracts
+
+        column, entity_type = {
+            "school": ("school_id", "school"),
+            "provider": ("higher_education_provider_id", "higher_education_provider"),
+        }[self.target[0]]
+        rows = self.db.execute(
+            f"""SELECT e.* FROM revenue_entity_provider_links l JOIN revenue_entities e
+                  ON e.id=l.revenue_entity_id WHERE l.{column}=? AND l.effective_to IS NULL""",
+            (self.target[1],),
+        ).fetchall()
+        if rows:
+            if (len(rows) != 1 or rows[0]["status"] != "active" or rows[0]["entity_type"] != entity_type
+                    or rows[0]["legal_name"].casefold() != terms["payer"].casefold()):
+                raise ValueError("该学校的付款主体关联与已确认合同不一致，请核对。")
+            return dict(rows[0])
+        if not create:
+            return None
+        service = RevenueService(self.repo)
+        if self.target[0] == "school":
+            return SchoolCommissionContracts(service, self.actor, "Admin").bind(
+                self.target[1], terms["payer"], terms["start"], key + ":school-payer",
+            )
+        candidates = self.db.execute(
+            "SELECT * FROM revenue_entities WHERE entity_type=? AND lower(legal_name)=lower(?)",
+            (entity_type, terms["payer"]),
+        ).fetchall()
+        if candidates:
+            if (len(candidates) != 1 or candidates[0]["status"] != "active" or self.db.execute(
+                    "SELECT 1 FROM revenue_entity_provider_links WHERE revenue_entity_id=?",
+                    (candidates[0]["id"],),
+            ).fetchone()):
+                raise ValueError("存在已绑定或冲突的同名付款主体，请核对。")
+            payer = dict(candidates[0])
+        else:
+            payer = service.create_revenue_entity(entity_type, terms["payer"], self.actor, key + ":provider-payer")
+        self.db.execute(
+            """INSERT INTO revenue_entity_provider_links
+               (uid,revenue_entity_id,higher_education_provider_id,effective_from,created_at)
+               VALUES(?,?,?,?,?)""",
+            (new_uid("provider-link"), payer["id"], self.target[1], terms["start"], self.repo.now()),
+        )
+        return payer
+
+    def invoice_billing_settings(self):
+        from revenue.invoice_billing_details import billing_details
+
+        payer = self._billing_payer()
+        if payer:
+            return billing_details(self.db, payer["id"], self.pilot.simulation)
+        return dict(name=self.terms()["payer"], address="", phone="", recipient="", revision="",
+                    settings_revision="", enabled=False, verified=False)
+
+    def save_invoice_billing(self, form, key, *, allow_auto_mail=False):
+        from revenue.invoice_billing_details import billing_details, save_billing_details
+
+        with self.repo.transaction():
+            payer = self._billing_payer(create=True, key=key)
+            current = billing_details(self.db, payer["id"], self.pilot.simulation)
+            if not allow_auto_mail and form.get("enabled") == "1" and not current["enabled"]:
+                raise ValueError("请先完成开票资料核对，再单独启用该学校的自动发信。")
+            # This step edits addressee details, never the payer's delivery permission.
+            details = form if allow_auto_mail else {**form, "enabled": "1" if current["enabled"] else "0"}
+            return save_billing_details(self.repo, payer["id"], self.actor, key, details,
+                                        simulation=self.pilot.simulation)
 
     def discard(self, key):
         def operation():
@@ -231,6 +449,8 @@ class InstitutionCommissionDraft:
         profile = analysis["profile"]
         if profile == "unsupported":
             raise ValueError("此合同包含尚未支持的多档佣金，请保留草稿并复核各档规则。")
+        if profile == NSW_SCHEDULE_PROFILE:
+            raise ValueError(NSW_SCHEDULE_CONFIRM_BLOCK)
         if _value(form, "analysis_revision") != _digest(analysis):
             raise ValueError("提取结果已变更，请重新核对。")
         start, end = (date.fromisoformat(_value(form, name)).isoformat() for name in ("start", "end"))
@@ -322,13 +542,18 @@ class InstitutionCommissionDraft:
         )
         return [{**dict(row), "student_name": model._student_display_name(row["student_id"])} for row in rows]
 
-    def _drafts_for_target(self):
+    def _drafts_for_target(self, *, all_targets=False):
         rows = self.db.execute(
-            """SELECT after_json FROM revenue_audit_events
-                WHERE action=? AND json_extract(after_json,'$.target[0]')=?
-                  AND json_extract(after_json,'$.target[1]')=?
-                  AND json_extract(after_json,'$.simulation')=? ORDER BY id DESC""",
-            (DRAFT, *self.target, int(self.pilot.simulation)),
+            """SELECT coalesce((
+                    SELECT change.after_json FROM revenue_audit_events change
+                     WHERE change.action IN (?,?) AND change.aggregate_uid=draft.aggregate_uid
+                     ORDER BY change.id DESC LIMIT 1
+                ), draft.after_json)
+                FROM revenue_audit_events draft
+                WHERE draft.action=? AND (? OR (json_extract(draft.after_json,'$.target[0]')=?
+                  AND json_extract(draft.after_json,'$.target[1]')=?))
+                  AND json_extract(draft.after_json,'$.simulation')=? ORDER BY draft.id DESC""",
+            (DRAFT_GST_CHANGED, DRAFT_REPREVIEWED, DRAFT, all_targets, *self.target, int(self.pilot.simulation)),
         )
         return [json.loads(row[0]) for row in rows]
 
@@ -336,11 +561,86 @@ class InstitutionCommissionDraft:
         return next((row for row in self._drafts_for_target()
                      if row["uid"] == uid and row["contract_draft_uid"] == self.uid), None)
 
+    def invoice_issued(self, draft_uid):
+        if self.target[0] == "authority" and self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='revenue_authority_invoices'"
+        ).fetchone():
+            return bool(self.db.execute(
+                "SELECT 1 FROM revenue_authority_invoices WHERE draft_uid=? AND contract_draft_uid=?",
+                (draft_uid, self.uid),
+            ).fetchone())
+        return bool(self.db.execute(
+            """SELECT 1 FROM revenue_audit_events WHERE action=?
+                 AND json_extract(after_json,'$.draft_uid')=?
+                 AND json_extract(after_json,'$.contract_draft_uid')=?
+                 AND json_extract(after_json,'$.simulation')=? LIMIT 1""",
+            (INVOICE_ISSUED, draft_uid, self.uid, int(self.pilot.simulation)),
+        ).fetchone())
+
+    @staticmethod
+    def invoice_line_gst(line, gst_mode):
+        commission = apply_basis_points(line["tuition_cents"], line["rate_basis_points"])
+        return {**line, **commission_gst_amounts(commission, gst_mode)}
+
+    def draft_needs_repreview(self, invoice, terms):
+        return bool(terms and invoice["terms_revision"] != terms["revision"] and not self.invoice_issued(invoice["uid"]))
+
+    def repreview_invoice(self, draft_uid, revision, key):
+        def operation():
+            invoice, terms = self.invoice(draft_uid), self.terms()
+            if not invoice or not self.draft_needs_repreview(invoice, terms) or revision != terms["revision"]:
+                raise ValueError("草稿或合同已更新，请刷新后重新预览。")
+            available = [row for row in self.candidates(terms, excluding_draft=draft_uid) if row.get("uid")]
+            lines = []
+            for old in invoice["lines"]:
+                choices = [row for row in available if row["component_uid"] == old["component_uid"]]
+                exact = next((row for row in choices if row["academic_period"] == old["academic_period"]), None)
+                if not exact and len(choices) != 1:
+                    raise ValueError("学生学费或申领条件已变更，请先核对学生资料，再重新预览。")
+                lines.append(exact or choices[0])
+            if len({line["uid"] for line in lines}) != len(lines):
+                raise ValueError("计佣周期已变更，原草稿中有重叠明细，请先核对学生资料。")
+            if "gst_mode" in invoice:
+                lines = [self.invoice_line_gst(row, invoice["gst_mode"]) for row in lines]
+            totals = {field: sum(line[field] for line in lines) for field in ("net_cents", "gst_cents", "gross_cents")}
+            return {**invoice, "terms_revision": revision, "payment_days": terms["payment_days"], "lines": lines, **totals}
+
+        return self.repo.command(
+            idempotency_key=key, command_type=DRAFT_REPREVIEWED, aggregate_type="institution_commission_invoice_draft",
+            payload={"draft_uid": draft_uid, "revision": revision, "contract": self.uid},
+            actor_user_id=self.actor, operation=operation,
+        )
+
+    def save_invoice_gst(self, draft_uid, gst_mode, revision, key):
+        if self.target[0] not in {"school", "provider"}:
+            raise PermissionError("请从学校发票草稿修改 GST。")
+        if not isinstance(gst_mode, str) or gst_mode not in GST_MODES:
+            raise ValueError("请选择有效的发票 GST 方式。")
+
+        def operation():
+            draft = self.invoice(draft_uid)
+            terms = self.terms()
+            if not draft or not terms or draft["terms_revision"] != terms["revision"]:
+                raise ValueError("找不到当前合同的发票草稿，请刷新后重试。")
+            if self.invoice_issued(draft_uid):
+                raise ValueError("这张发票已签发，不能修改 GST。")
+            if revision != _digest(draft):
+                raise ValueError("草稿已更新，请刷新后重新选择 GST。")
+            lines = [self.invoice_line_gst(line, gst_mode) for line in draft["lines"]]
+            totals = {field: sum(line[field] for line in lines) for field in ("net_cents", "gst_cents", "gross_cents")}
+            return {**draft, "gst_mode": gst_mode, "lines": lines, **totals}
+
+        return self.repo.command(
+            idempotency_key=key, command_type=DRAFT_GST_CHANGED, aggregate_type="institution_commission_invoice_draft",
+            payload={"draft_uid": draft_uid, "gst_mode": gst_mode, "revision": revision},
+            actor_user_id=self.actor, operation=operation,
+        )
+
     def _facts(self, terms):
         rows = self.db.execute(
             """SELECT after_json FROM revenue_audit_events
                 WHERE action=? AND aggregate_uid=? AND json_extract(after_json,'$.revision')=?
-                ORDER BY id""", (FACTS, self.uid, terms["revision"]),
+                ORDER BY id""", (FACTS, self.uid, terms.get("evidence_revision", terms["revision"])),
         )
         result = {}
         for row in rows:
@@ -348,21 +648,45 @@ class InstitutionCommissionDraft:
             result[value["component_uid"]] = value
         return result
 
+    @staticmethod
+    def _nsw_evidence(form, terms):
+        period, iec = _value(form, "base_period"), _value(form, "iec")
+        if period not in {"first_year", "whole_course"} or iec not in {"yes", "no"}:
+            raise ValueError("请核对基础学费周期及是否符合 IEC 条件。")
+        result = {"tier": "standard", "base_period": period, "iec_tuition_cents": 0}
+        if iec == "no":
+            return result
+        if _value(form, "iec_followed_secondary") != "1":
+            raise ValueError("请确认学生已开始 IEC 并衔接 NSW 公立中学课程。")
+        commenced = _value(form, "iec_commenced_on")
+        today = datetime.now(ZoneInfo("Australia/Melbourne")).date().isoformat()
+        if not commenced or not terms["start"] <= date.fromisoformat(commenced).isoformat() <= min(today, terms["end"]):
+            raise ValueError("IEC 实际开学日须在本合同有效期内，且已经开学。")
+        term_count, week_count = _value(form, "iec_terms"), _value(form, "iec_weeks")
+        if term_count not in {"1", "2"} or not re.fullmatch(r"(?:[1-9]|1[0-9]|20)", week_count):
+            raise ValueError("IEC 上限为两学期、最多 20 周。请按凭证填写限额内的合资格 IEC 学费。")
+        tuition = aud_cents(_value(form, "iec_tuition"))
+        if tuition <= 0:
+            raise ValueError("请填写限额内有凭证的 IEC 学费。")
+        return {**result, "iec_tuition_cents": tuition, "iec_commenced_on": commenced,
+                "iec_terms": int(term_count), "iec_weeks": int(week_count)}
+
     def confirm_student_evidence(self, form, terms, key):
         component = _value(form, "component")
         tier, reference = _value(form, "tier"), _value(form, "reference")
         rcti = terms.get("payment_mode") == vic_rcti.PAYMENT
+        nsw = terms.get("payment_mode") == NSW_CLAIMS_ONLY
         if (not reference or len(reference) > 240 or _value(form, "eligible") != "1"
-                or (not rcti and tier not in terms["rates"])):
+                or (not (rcti or nsw) and tier not in terms["rates"])):
             raise ValueError("请确认已核对申领条件和凭证。")
         if not any(row["component_uid"] == component and not row.get("assignment_reason")
                    for row in self._components()):
             raise ValueError("请选择本机构已关联的学生入学项目。")
-        result = {"uid": self.uid, "revision": terms["revision"], "component_uid": component,
+        result = {"uid": self.uid, "revision": terms.get("evidence_revision", terms["revision"]), "component_uid": component,
                   "tier": tier, "reference": reference}
+        if nsw:
+            result.update(self._nsw_evidence(form, terms))
         if rcti:
-            from revenue.money import aud_cents
-
             duration = _value(form, "duration")
             if duration not in {"short", "full"} or _value(form, "visa") != "500":
                 raise ValueError("请核对课程期限和学生 500 签证。")
@@ -397,14 +721,10 @@ class InstitutionCommissionDraft:
         if terms.get("payment_mode") == vic_rcti.PAYMENT:
             yield from self._vic_estimates(terms, facts)
             return
-        drafts = self.db.execute(
-            """SELECT after_json FROM revenue_audit_events
-                WHERE action=? AND json_extract(after_json,'$.simulation')=?""",
-            (DRAFT, int(self.pilot.simulation)),
-        )
+        nsw = terms.get("payment_mode") == NSW_CLAIMS_ONLY
+        drafts = self._drafts_for_target(all_targets=True)
         reserved = {(line["component_uid"], line["academic_period"])
-                    for (payload,) in drafts for draft in (json.loads(payload),)
-                    if draft["uid"] != excluding_draft for line in draft["lines"]}
+                    for draft in drafts if draft["uid"] != excluding_draft for line in draft["lines"]}
         next_start = min((
             start for start in authority_version_starts(self.db, self.target[1], self.pilot.simulation)
             if start > terms["start"]
@@ -444,6 +764,11 @@ class InstitutionCommissionDraft:
             if previous:
                 yield {**base, "reason":"已有佣金申领记录，请核对历史单据。"}
                 continue
+            fact = facts.get(component)
+            if nsw and not fact:
+                yield {**base, "reason": "请先核对申领条件和凭证。", "needs_evidence": True}
+                continue
+            period_mode = fact["base_period"] if nsw else terms["period"]
             tuition_rows = [
                 row for row in self.db.execute(
                     """SELECT t.id,t.uid,t.academic_period,t.tuition_cents,
@@ -455,16 +780,16 @@ class InstitutionCommissionDraft:
                           AND t.evidence_document_id IS NOT NULL
                           AND t.fee_component IN ('tuition','tuition_local','tuition_international')
                         ORDER BY t.academic_period,t.id""", (student["component_id"],),
-                ) if self._period_matches(terms["period"],row["academic_period"])
+                ) if self._period_matches(period_mode, row["academic_period"])
             ]
             groups = {}
             for tuition in tuition_rows:
-                period = tuition["academic_period"].casefold().strip() if terms["period"] == "each_year" else terms["period"]
+                period = tuition["academic_period"].casefold().strip() if period_mode == "each_year" else period_mode
                 groups.setdefault(period,[]).append(tuition)
             if not groups:
-                yield {**base, "reason":f'缺少有凭证的已确认 AUD {FEE_PERIODS[terms["period"]]}。'}
+                yield {**base, "reason": f'缺少有凭证的已确认 AUD {FEE_PERIODS[period_mode]}。',
+                       **({"needs_evidence": True} if nsw else {})}
                 continue
-            fact = facts.get(component)
             for period, rows in groups.items():
                 row = {**base,"academic_period":period}
                 prior_period = [p for c,p in reserved if c==component]
@@ -485,7 +810,12 @@ class InstitutionCommissionDraft:
                     yield {**row,"reason":"扣除已确认减免后，计佣学费为零。"}
                     continue
                 points = terms["rates"][fact["tier"]]
-                amounts = commission_gst_amounts(apply_basis_points(base_cents,points),terms["gst"])
+                standard_cents = apply_basis_points(base_cents, points)
+                iec_cents = apply_basis_points(fact["iec_tuition_cents"], terms["rates"]["iec_rate"]) if nsw else 0
+                amounts = commission_gst_amounts(standard_cents + iec_cents, terms["gst"])
+                if nsw:
+                    row.update(standard_cents=standard_cents, iec_cents=iec_cents,
+                               iec_tuition_cents=fact["iec_tuition_cents"])
                 if amounts["gross_cents"] <= 0:
                     yield {**row,"reason":"计算后佣金金额为零。"}
                     continue
@@ -515,15 +845,23 @@ class InstitutionCommissionDraft:
                 result["eligible_on"] = (date.fromisoformat(commenced[0]) + timedelta(weeks=4)).isoformat()
             yield {**row, **result, "evidence": fact["reference"] if fact else ""}
 
-    def create_invoice_draft(self, selection, revision, terms, key):
+    def create_invoice_draft(self, selection, revision, terms, key, *, customer_note=""):
+        if terms.get("payment_mode") == NSW_CLAIMS_ONLY:
+            raise ValueError(NSW_BLOCK_INVOICE + " 发票功能未开放。")
         if terms.get("payment_mode") == vic_rcti.PAYMENT:
             raise PermissionError(vic_rcti.BLOCK_INVOICE)
         if isinstance(selection,str):
             selection = [selection]
         if not selection or len(selection) > 50 or len(set(selection)) != len(selection):
             raise ValueError("请勾选 1 至 50 条不同的可申领记录。")
+        from revenue.invoice_templates import invoice_customer_note
+
+        customer_note = invoice_customer_note(customer_note)
         ids = sorted(selection)
         payload = {"contract_draft_uid":self.uid,"terms":terms["revision"],"selection":ids,"revision":revision}
+        if customer_note:
+            payload["customer_note"] = customer_note
+
         def operation():
             candidates = {row["uid"]:row for row in self.candidates(terms) if row.get("uid")}
             if not all(uid in candidates for uid in ids):
@@ -535,7 +873,7 @@ class InstitutionCommissionDraft:
                     "contract_draft_uid":self.uid,"terms_revision":terms["revision"],
                     "simulation":self.pilot.simulation,"payer":terms["payer"],"payment_days":terms["payment_days"],
                     "created_on":datetime.now(ZoneInfo("Australia/Melbourne")).date().isoformat(),
-                    "lines":rows,
+                    "lines":rows, **({"customer_note": customer_note} if customer_note else {}),
                     **{field:sum(row[field] for row in rows) for field in ("net_cents","gst_cents","gross_cents")}}
         return self.repo.command(
             idempotency_key=key, command_type=DRAFT, aggregate_type="institution_commission_invoice_draft",
@@ -543,13 +881,15 @@ class InstitutionCommissionDraft:
         )
 
     def render_pdf(self, invoice):
-        from revenue.invoice_templates import default_layout
+        from revenue.invoice_templates import _bill_to_layout, _version, default_layout, invoice_layout_selection, invoice_template_context
+        from revenue.invoice_billing_details import bill_to_fields
         from revenue.pdf import render_configured_commission_invoice
 
         data = {
             "bill_to":invoice["payer"],"document_number":"DRAFT",
             "issue_date":invoice["created_on"],"due_date":None,
             "draft_notice":True,"test_only":self.pilot.simulation,
+            "gst_mode":invoice.get("gst_mode") or (self.terms() or {}).get("gst"),
             "payment_terms":f'Within {invoice["payment_days"]} days of receipt of a valid invoice',
             **{field:invoice[field] for field in ("net_cents","gst_cents","gross_cents")},
             "lines":[{"description":" | ".join(filter(None, (
@@ -558,4 +898,22 @@ class InstitutionCommissionDraft:
                       **{field:row[field] for field in ("net_cents","gst_cents","gross_cents")}}
                      for row in invoice["lines"]],
         }
-        return render_configured_commission_invoice(data,default_layout())
+        context = invoice_template_context(self.pilot, self.target)
+        layout = default_layout()
+        if context["library_entity_id"]:
+            uid, source = invoice_layout_selection(
+                self.db, formal=True, entity_id=context["library_entity_id"],
+                simulation=self.pilot.simulation, **context,
+            )
+            if uid:
+                layout = _version(self.db, uid, source)["value"]
+            if self.target[0] in {"school", "provider"}:
+                payer = self._billing_payer()
+            else:
+                from revenue.authority_formal import authority_payer
+
+                payer = authority_payer(self.db, self.target[1])
+            if payer:
+                data.update(bill_to_fields(self.db, payer["id"], self.pilot.simulation))
+            layout = _bill_to_layout(layout, data)
+        return render_configured_commission_invoice(data,layout)

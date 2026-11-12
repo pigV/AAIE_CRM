@@ -180,6 +180,29 @@ class ContractIntakeDiscardTests(RevenueDatabaseFixture, unittest.TestCase):
                     }
                     confirmed = handler.revenue_institution_commission_draft("POST", replacement)
                     self.assertTrue(isinstance(confirmed, str) and confirmed.startswith("/revenue/contracts?"), confirmed)
+                    if target == "school:10":
+                        self.assertIn("step=billing", confirmed)
+                        handler.query = {"contract_only": ["1"]}
+                        self.assertEqual(confirmed, handler.revenue_institution_commission_draft("GET", replacement))
+                        handler.query = {"school_id": ["10"], "step": ["billing"]}
+                        status, body = handler._revenue_school_contract_page(self.pilot, upload=False)
+                        self.assertEqual(200, status)
+                        self.assertIn("学校开票资料", body)
+                        self.assertIn('name="address_line_1"', body)
+                        handler.query = {}
+                        handler.form = dict(operation="payer-billing-details", idempotency_key="route-details",
+                            billing_name="Example Invoice To", billing_address="8 Test Road", billing_phone="",
+                            recipient="billing@example.test, finance@example.test", verified="1",
+                            billing_revision="", settings_revision="")
+                        saved_url = handler.revenue_institution_commission_draft("POST", replacement)
+                        self.assertEqual("/revenue/contracts?school_id=10&step=billing#school-invoice-mail-recipient", saved_url)
+                        handler.query = {"school_id": ["10"], "step": ["billing"]}
+                        status, body = handler._revenue_school_contract_page(self.pilot, upload=False)
+                        self.assertEqual(200, status)
+                        self.assertIn("当前已保存的开票资料", body)
+                        self.assertIn("Example Invoice To", body)
+                        self.assertIn("<summary>修改</summary>", body)
+                        handler.query = {}
                     handler.form = {"operation": "discard", "idempotency_key": "remove-confirmed-" + target}
                     self.assertEqual(handler.revenue_institution_commission_draft("POST", replacement)[0], 400)
                     handler.wfile = BytesIO()
@@ -187,3 +210,75 @@ class ContractIntakeDiscardTests(RevenueDatabaseFixture, unittest.TestCase):
                     self.assertEqual(handler.wfile.getvalue(), source_pdf)
                     handler.form = {"operation": "invoice"}
                     self.assertEqual(handler.revenue_institution_commission_draft("POST", replacement)[0], 400)
+
+    def test_confirmed_school_enters_billing_without_active_toorak_scope(self):
+        self.contracts.register_school(10)
+        draft = self.contracts.upload_configurable_draft(10, self.pdf, "billing-contract", signed_confirmed=True)
+        workflow = self.workflow(draft["uid"])
+        with self.assertRaisesRegex(ValueError, "确认"):
+            workflow.invoice_billing_settings()
+        terms = workflow.confirm({
+            "analysis_revision": _digest(self.analysis), "start": "2026-01-01", "end": "2027-01-01",
+            "standard": "8", "gst": "none", "tuition_period": "first_year", "conditions": "Enrolled",
+            "school_name": "Example Education", "payment_days": "15", "reviewed": "1",
+        }, self.analysis, "confirm-billing")
+        settings = workflow.invoice_billing_settings()
+        self.assertEqual("Example Education", settings["name"])
+        self.assertEqual("", settings["revision"])
+        form = dict(billing_name="Example Education Accounts", billing_address="8 Synthetic Street",
+                    billing_phone="", recipient="billing@example.test, accounts@example.test",
+                    verified="1", billing_revision="", settings_revision="")
+        invalid = {**form, "recipient": "broken"}
+        with self.assertRaises(ValueError):
+            workflow.save_invoice_billing(invalid, "invalid-billing")
+        self.assertEqual(0, self.db.execute("SELECT count(*) FROM revenue_entity_provider_links").fetchone()[0])
+        saved = workflow.save_invoice_billing(form, "save-billing")
+        self.assertEqual("", saved["phone"])
+        self.assertFalse(saved["enabled"])
+        self.assertEqual(saved, workflow.save_invoice_billing(form, "save-billing"))
+        settings = workflow.invoice_billing_settings()
+        self.assertEqual(saved, settings)
+        from revenue.school_contract_pages import render_payer_billing_details, billing_url
+        html = render_payer_billing_details("/save", {}, settings, "csrf", "token", simulation=True,
+                                           allow_auto_mail=False)
+        self.assertIn("当前已保存的开票资料", html)
+        self.assertIn("<summary>修改</summary>", html)
+        self.assertNotIn('name="enabled"', html)
+        self.assertIn("step=billing", billing_url(workflow.target))
+        changed = {**form, "billing_address":"9 Synthetic Street",
+                   "billing_revision":settings["revision"], "settings_revision":settings["settings_revision"]}
+        updated = workflow.save_invoice_billing(changed, "update-billing")
+        self.assertEqual("9 Synthetic Street", updated["address"])
+        with self.assertRaises(ValueError):
+            workflow.save_invoice_billing({**changed,"enabled":"1"}, "forbidden-auto-mail")
+        self.assertEqual(1, self.db.execute("SELECT count(*) FROM revenue_entity_provider_links").fetchone()[0])
+        self.assertEqual(terms, workflow.terms())
+        self.assertEqual(0, self.db.execute("SELECT count(*) FROM revenue_invoices").fetchone()[0])
+        self.assertEqual(0, self.db.execute("SELECT count(*) FROM revenue_outbox_events WHERE event_type='school_invoice_test_mail_queued'").fetchone()[0])
+
+    def test_provider_uses_same_billing_step_and_preserves_delivery_permission(self):
+        self.db.execute("UPDATE higher_education_providers SET provider_name='Example University', active_status='Active', review_status='Pending'")
+        provider = self.db.execute("SELECT id FROM higher_education_providers LIMIT 1").fetchone()[0]
+        self.contracts.register_provider(provider)
+        draft = self.contracts.upload_provider_draft(provider, self.pdf, "provider-contract", signed_confirmed=True)
+        workflow = self.workflow(draft["uid"])
+        workflow.confirm({
+            "analysis_revision": _digest(self.analysis), "start": "2026-01-01", "end": "2027-01-01",
+            "standard": "8", "gst": "none", "tuition_period": "first_year", "conditions": "Enrolled",
+            "school_name": "Example University", "payment_days": "15", "reviewed": "1",
+        }, self.analysis, "confirm-provider")
+        form = dict(billing_name="University Accounts", billing_address="7 Campus Road", billing_phone="",
+                    recipient="accounts@example.test", verified="1", billing_revision="", settings_revision="")
+        saved = workflow.save_invoice_billing(form, "save-provider")
+        payer = workflow._billing_payer()
+        self.assertEqual("higher_education_provider", payer["entity_type"])
+        from revenue.invoice_billing_details import save_billing_details
+        enabled = save_billing_details(self.repo, payer["id"], 1, "separate-delivery-permission", {
+            **form, "enabled":"1", "billing_revision": saved["revision"],
+            "settings_revision": saved["settings_revision"]}, simulation=True)
+        updated = workflow.save_invoice_billing({**form, "billing_address":"9 Campus Road",
+            "billing_revision":enabled["revision"], "settings_revision":enabled["settings_revision"]}, "update-provider")
+        self.assertTrue(updated["enabled"])
+        self.assertEqual("9 Campus Road", updated["address"])
+        self.assertEqual(1, self.db.execute("SELECT count(*) FROM revenue_entity_provider_links WHERE higher_education_provider_id=?", (provider,)).fetchone()[0])
+        self.assertEqual(0, self.db.execute("SELECT count(*) FROM revenue_invoices").fetchone()[0])

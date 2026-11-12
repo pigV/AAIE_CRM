@@ -248,8 +248,12 @@ class RevenueOperationalRouteTests(RevenueDatabaseFixture, unittest.TestCase):
         mobile = render_revenue_case_workbench(
             data, csrf="csrf-token", action_token="action-token", mobile=True
         )
-        self.assertIn('action="/revenue/cases/tuition"', desktop)
-        self.assertIn('action="/revenue/cases/commencement"', desktop)
+        main_actions = desktop.split('id="revenue-case-actions"', 1)[1].split("</section>", 1)[0]
+        self.assertNotIn("确认结构化学费", main_actions)
+        self.assertNotIn("确认实际入学", main_actions)
+        other = desktop.split('<details class="revenue-panel revenue-case-secondary-operations">', 1)[1].split("</details>", 1)[0]
+        self.assertIn('action="/revenue/cases/tuition"', other)
+        self.assertIn('action="/revenue/cases/commencement"', other)
         self.assertIn('name="component_uid"', desktop)
         self.assertNotIn('action="/revenue/cases/tuition"', mobile)
         self.assertNotIn('action="/revenue/cases/commencement"', mobile)

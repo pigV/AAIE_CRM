@@ -113,6 +113,7 @@ class AuthorityConfigurationTests(RevenueDatabaseFixture, unittest.TestCase):
                 issue = handler(state, {"operation": "authority-formal-issue", "reviewed": "1"})
                 issue.query["invoice"] = [draft["uid"]]
                 workflow.invoice = lambda _: draft
+                workflow.draft_needs_repreview = Mock(return_value=False)
                 with patch.object(app, "school_invoice_payer_mail_mode", return_value="production"):
                     denied_issue = issue._institution_commission_response(
                         self.connection, base, terms["uid"], "POST", "/fixture",

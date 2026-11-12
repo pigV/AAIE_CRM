@@ -1433,10 +1433,15 @@ class RevenueService:
     def activate_commission_rule(
         self, contract_version_uid: str, configuration: dict,
         actor_user_id: int, actor_role: str, idempotency_key: str, *, school_commission_formal: bool = False,
+        revision_dates: tuple[str, str] | None = None,
     ):
         self._require_admin(actor_role)
         payload = {"contract_version_uid": contract_version_uid,
                    "configuration": configuration}
+        if revision_dates:
+            if not school_commission_formal or not configuration.get("school_contract_v1"):
+                raise ValueError("仅支持修订已确认的学校佣金规则。")
+            payload["revision_dates"] = list(revision_dates)
 
         if school_commission_formal:
             payload["school_commission_formal"] = True
@@ -1466,13 +1471,20 @@ class RevenueService:
             )
             uid = new_uid("commission-rule")
             now = self.repository.now()
+            version = 1
+            start, end = contract["effective_from"], contract["effective_to"] if configuration.get("school_contract_v1") else None
+            if revision_dates:
+                start, end = revision_dates
+                version = self.connection.execute(
+                    "SELECT max(version_no)+1 FROM revenue_commission_rule_versions WHERE contract_version_id=?",
+                    (contract["id"],),
+                ).fetchone()[0]
             self.connection.execute(
                 """INSERT INTO revenue_commission_rule_versions(
                      uid,contract_version_id,version_no,effective_from,effective_to,priority,status,
                      rule_snapshot_id,activated_by,activated_at,created_at
-                   ) VALUES(?,?,1,?,?,100,'active',?,?,?,?)""",
-                (uid, contract["id"], contract["effective_from"],
-                 contract["effective_to"] if configuration.get("school_contract_v1") else None,
+                   ) VALUES(?,?,?,?,?,100,'active',?,?,?,?)""",
+                (uid, contract["id"], version, start, end,
                  snapshot["id"],
                  actor_user_id, now, now),
             )

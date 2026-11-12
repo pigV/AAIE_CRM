@@ -14,7 +14,7 @@ from time import sleep
 from revenue.invoice_templates import FORMAL_INVOICE_KIND
 from revenue.repository import canonical_json, new_uid
 from revenue.school_invoice_reminders import EMAIL
-from revenue.school_invoice_release import FINANCE_COPY_ADDRESS, SENDER, payer_mail_addresses, release_values
+from revenue.school_invoice_release import FINANCE_COPY_ADDRESS, SENDER, payer_copy_addresses, payer_mail_addresses, release_values
 from revenue.secure_storage import StorageUnavailable, read_secure, write_immutable
 from revenue.storage_locations import resolve_location
 from revenue.data_invoice_storage import SUFFIX, read_invoice_pdf
@@ -24,7 +24,8 @@ SETTINGS = "school_invoice_test_mail_settings"
 QUEUED = "school_invoice_test_mail_queued"
 ATTEMPTED = "school_invoice_test_mail_attempted"
 RETRY = "school_invoice_test_mail_retry"
-ISSUE_ACTIONS = ("school_commission_invoice_issued", "authority_commission_invoice_issued")
+ISSUE_ACTIONS = ("school_commission_invoice_issued", "authority_commission_invoice_issued",
+                 "institution_commission_invoice_issued")
 
 
 def mail_settings(connection, entity_id):
@@ -36,7 +37,7 @@ def mail_settings(connection, entity_id):
     return json.loads(row[0]) if row else {"enabled": False, "recipient": "", "verified": False, "revision": ""}
 
 
-def save_mail_settings(repository, entity_id, actor, key, recipient, enabled, verified, expected_revision, *, smtp_recipient=None, payer_routing=False, simulation=True):
+def save_mail_settings(repository, entity_id, actor, key, recipient, enabled, verified, expected_revision, *, smtp_recipient=None, payer_routing=False, simulation=True, cc=None, bcc=None):
     recipient = str(recipient or "").strip()
     if recipient and payer_routing:
         recipient = ", ".join(payer_mail_addresses(recipient, simulation=simulation))
@@ -51,13 +52,23 @@ def save_mail_settings(repository, entity_id, actor, key, recipient, enabled, ve
                    transport="smtp" if smtp_recipient else ("mock" if simulation else "production"))
     if payer_routing:
         payload["routing"] = "payer"
+        previous = mail_settings(repository.connection, entity_id)
+        preserve = previous.get("transport", "mock") == payload["transport"] and previous.get("routing") == "payer"
+        copies = payer_copy_addresses(
+            recipient, previous.get("cc", "") if cc is None and preserve else cc or "",
+            previous.get("bcc", "") if bcc is None and preserve else bcc or "", simulation=simulation,
+        ) if recipient else ([], [])
+        for field, addresses in zip(("cc", "bcc"), copies):
+            if addresses or field in previous:
+                payload[field] = ", ".join(addresses)
     def operation():
         current = mail_settings(repository.connection, entity_id)
         if current["revision"] != expected_revision:
             raise ValueError("学校发信设置已变更，请刷新后核对。")
         unchanged = (all(current[field] == payload[field] for field in ("enabled", "recipient", "verified"))
                      and current.get("transport", "mock") == payload["transport"]
-                     and current.get("routing") == payload.get("routing"))
+                     and current.get("routing") == payload.get("routing")
+                     and all(current.get(field, "") == payload.get(field, "") for field in ("cc", "bcc")))
         return {**payload, "revision": current["revision"] if unchanged else new_uid("mail-settings")}
 
     return repository.command(
@@ -106,7 +117,7 @@ def save_mail_release(repository, entity_id, actor, key, revision, stage, recipi
 
 
 def enqueue_mail(repository, invoice, document, entity_id, actor, *, release=None, claim_uids=(),
-                 payer_routing=False, simulation=True, authority_draft=None):
+                 payer_routing=False, simulation=True, authority_draft=None, institution_draft=None):
     settings = mail_settings(repository.connection, entity_id)
     if not (settings["enabled"] and settings["verified"]):
         return
@@ -134,9 +145,16 @@ def enqueue_mail(repository, invoice, document, entity_id, actor, *, release=Non
     if mode in {"mock", "production"}:
         payload["cc"] = FINANCE_COPY_ADDRESS
     if payer_routing:
+        cc, bcc = payer_copy_addresses(payload["recipient"], settings.get("cc", ""), settings.get("bcc", ""),
+                                       simulation=simulation)
         payload.update(routing="payer", payer_name=" ".join(payer[0].split()))
+        payload["cc"] = ", ".join([FINANCE_COPY_ADDRESS, *cc])
+        if bcc:
+            payload["bcc"] = ", ".join(bcc)
         if authority_draft:
             payload["authority_draft"] = authority_draft
+        if institution_draft:
+            payload["institution_draft"] = institution_draft
     payload["message"] = _message_fields(payload, SENDER if mode != "mock" or payer_routing else None)
     payload["attachment_sha256"] = document["sha256"]
     if release:
@@ -211,7 +229,7 @@ def invoice_mail_history(connection, entity_ids, simulation, *, number="", start
               JOIN revenue_entities e ON e.id=i.revenue_entity_id
              WHERE o.event_type=? AND EXISTS (
                    SELECT 1 FROM revenue_audit_events a WHERE a.aggregate_uid=i.uid
-                     AND a.action IN (?,?)
+                     AND a.action IN (?,?,?)
                      AND json_extract(a.after_json,'$.simulation')=?)
         ) SELECT * FROM history i WHERE """ + " AND ".join(filters) + " ORDER BY history_at DESC,uid DESC",
         params,
@@ -377,7 +395,21 @@ def _settings_match(connection, event):
             and settings.get("delivery_recipient",settings["recipient"]) == event["recipient"]
             and settings.get("transport", "mock") == event.get("transport", "mock")
             and settings.get("routing") == event.get("routing")
-            and (event.get("transport") != "production" or event.get("cc") == FINANCE_COPY_ADDRESS))
+            and (event.get("routing") != "payer" or _approved_copies(settings, event))
+            and (event.get("transport") != "production" or event.get("routing") == "payer"
+                 or event.get("cc") == FINANCE_COPY_ADDRESS))
+
+
+def _approved_copies(settings, event):
+    try:
+        cc, bcc = payer_copy_addresses(
+            event["recipient"], settings.get("cc", ""), settings.get("bcc", ""),
+            simulation=event.get("transport", "mock") == "mock",
+        )
+    except ValueError:
+        return False
+    return (event.get("cc") == ", ".join([FINANCE_COPY_ADDRESS, *cc])
+            and event.get("bcc", "") == ", ".join(bcc))
 
 
 def _smtp_audit(repository, event, attempt, result, **detail):
@@ -394,16 +426,16 @@ def _smtp_audit(repository, event, attempt, result, **detail):
 
 def payer_invoice_approved(connection, event, simulation):
     """Require the immutable issuance audit and the current payer binding."""
-    if event.get("routing") != "payer" or event.get("cc") != FINANCE_COPY_ADDRESS:
+    if event.get("routing") != "payer" or not _approved_copies(mail_settings(connection, event["entity_id"]), event):
         return False
     row = connection.execute(
-        """SELECT i.id,i.revenue_entity_id,a.action
+        """SELECT i.id,i.revenue_entity_id,a.action,a.after_json
              FROM revenue_invoices i JOIN revenue_documents d ON d.id=i.document_id
              JOIN revenue_entities e ON e.id=i.revenue_entity_id
              JOIN revenue_audit_events a ON a.aggregate_uid=i.uid
             WHERE i.uid=? AND i.revenue_entity_id=? AND i.status='issued' AND e.status='active'
               AND d.uid=? AND d.document_kind=? AND d.sha256=?
-              AND a.action IN (?,?) AND json_extract(a.after_json,'$.simulation')=?""",
+              AND a.action IN (?,?,?) AND json_extract(a.after_json,'$.simulation')=?""",
         (event["uid"], event["entity_id"], event["document_uid"], FORMAL_INVOICE_KIND,
          event["attachment_sha256"], *ISSUE_ACTIONS, int(simulation)),
     ).fetchone()
@@ -423,6 +455,21 @@ def payer_invoice_approved(connection, event, simulation):
                       AND t.aggregate_uid=a.contract_draft_uid
                       AND json_extract(t.after_json,'$.payment_mode')='rcti_quarterly'
                 )""", (event["entity_id"], row["id"]),
+        ).fetchone())
+    if row["action"] == ISSUE_ACTIONS[2]:
+        issuance = json.loads(row["after_json"])
+        target = issuance.get("target")
+        if (not isinstance(target, list) or len(target) != 2 or
+                issuance.get("entity_id") != event["entity_id"] or event.get("institution_draft") != [
+                    issuance.get("contract_draft_uid"), issuance.get("draft_uid")]):
+            return False
+        column = {"school": "school_id", "provider": "higher_education_provider_id"}.get(target[0])
+        if not column:
+            return False
+        return bool(connection.execute(
+            f"""SELECT 1 FROM revenue_entity_provider_links
+                 WHERE {column}=? AND revenue_entity_id=? AND effective_to IS NULL""",
+            (target[1], event["entity_id"]),
         ).fetchone())
     return bool(connection.execute(
         """SELECT 1 FROM revenue_invoice_lines l JOIN revenue_claims c ON c.uid=l.source_uid
@@ -498,7 +545,10 @@ def _submit_smtp(repository, root, row, event, transport, eligible):
             return (eligible(event) and _settings_match(connection,event)
                     and _smtp_invoice_approved(connection,event,transport))
 
-        result,error,code = transport.submit(event["recipient"],content,allowed)
+        copies = {}
+        if event.get("routing") == "payer" and (event.get("cc") != FINANCE_COPY_ADDRESS or event.get("bcc")):
+            copies = {"cc": event["cc"], "bcc": event.get("bcc", "")}
+        result,error,code = transport.submit(event["recipient"],content,allowed,**copies)
     accepted_at = repository.now() if result == "sent" else None
     attempt = row["attempt_count"]+1
     for retry in range(5):

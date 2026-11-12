@@ -30,6 +30,26 @@ def _aud_money(cents: int) -> str:
     return f"AUD {_money(cents)}"
 
 
+def _first_year_tuition_summary(components):
+    sections = []
+    for component in components:
+        rows = []
+        for record in component["records"]:
+            source = escape(record["source_label"] or (
+                "已关联学费凭证" if record["evidence_document_id"] else "待关联凭证"
+            ))
+            if record["document_uid"]:
+                href = "/revenue/documents/" + quote(record["document_uid"], safe="") + "/view"
+                source += f' · <a href="{href}" target="_blank" rel="noopener">查看学费凭证</a>'
+            intake = (f'{record["intake_year"]} · {escape(record["intake_grade"] or "")} · '
+                      if record["intake_year"] else "")
+            amount = _currency_money(record["currency_code"], record["tuition_cents"])
+            rows.append(f'<p>{intake}已保存首年学费 {amount} · {source}</p>')
+        if rows:
+            sections.append(f'<div><h3>{escape(component["school_name"])} · 首年学费</h3>{"".join(rows)}</div>')
+    return "".join(sections)
+
+
 def render_student_revenue_context(data: dict) -> str:
     stream_labels = {
         "school_education": "中小学",
@@ -1095,7 +1115,7 @@ def _toorak_settlement_controls(line, path, csrf, token, *, allow_actions=True):
     timing = {"late":"逾期后收清","due_day":"到期当天收清","early":"到期前收清",
               "overdue":"逾期未收清"}.get(data["timing"],"")
     received = escape(delivery["received_on"]) if delivery else "待确认"
-    due = escape(delivery["due_date"]) if delivery else "待确认"
+    due = escape(data.get("due_date") or (delivery["due_date"] if delivery else "待确认"))
     term = ""
     if delivery:
         days = delivery.get("term_days",30)
@@ -1431,6 +1451,7 @@ def render_revenue_case_workbench(
         if technical_cards else ""
     )
     actions = ""
+    other_operations = ""
     if not mobile:
         operations = data.get("operations") or {}
         component_options = "".join(
@@ -1441,9 +1462,10 @@ def render_revenue_case_workbench(
             f'<option value="{int(item["id"])}">{escape(str(item["label"]))}</option>'
             for item in operations.get("evidence_documents") or []
         )
-        operation_forms = ""
         if component_options:
-            operation_forms = f"""
+            other_operations = f"""
+            <details class="revenue-panel revenue-case-secondary-operations">
+            <summary>其他学费与入学记录</summary>
             <div class="revenue-case-operation-grid">
               <form method="post" action="/revenue/cases/tuition" class="revenue-action-form">
                 {_hidden_security(csrf, action_token, 'case-tuition')}
@@ -1463,15 +1485,16 @@ def render_revenue_case_workbench(
                 <label>Revenue 证据文件<select name="evidence_document_id">{evidence_options}</select></label>
                 <button type="submit" class="primary">确认实际入学</button>
               </form>
-            </div>"""
+            </div></details>"""
+        first_year_summary = _first_year_tuition_summary(operations.get("first_year") or [])
         actions = (
-            '<section class="revenue-panel revenue-case-actions"><div class="revenue-panel-heading">'
+            '<section id="revenue-case-actions" class="revenue-panel revenue-case-actions"><div class="revenue-panel-heading">'
             '<h2>收入与佣金操作</h2></div><nav>'
             + "".join(
                 f'<a class="revenue-primary-link" href="{escape(str(item["href"]), quote=True)}">{escape(str(item["label"]))}</a>'
                 for item in data.get("actions") or []
             )
-            + f"</nav>{operation_forms}</section>"
+            + f"</nav>{first_year_summary}</section>"
         )
     variant = " revenue-case-workbench--mobile" if mobile else ""
     access_badge = "仅限管理员" if data.get("can_administer", True) else "已授权用户"
@@ -1489,6 +1512,7 @@ def render_revenue_case_workbench(
       <nav class="revenue-case-contexts" aria-label="权威业务上下文">{contexts}</nav>
       {actions}
       <div class="revenue-case-sections">{''.join(sections)}</div>
+      {other_operations}
       {technical_details}
     </main>"""
 

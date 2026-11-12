@@ -444,6 +444,9 @@ class RevenueOperationalOrchestrator:
                 self.actor_user_id, f"revenue-component:acceptance:{fact.id}",
                 final_acceptance_id=fact.id,
             )
+        from revenue.student_intake_tuition import link_offer_tuition
+
+        link_offer_tuition(self.connection, fact.id, self.actor_user_id)
         entity, rule = self._school_entity_and_rule(fact.school_id)
         if not entity:
             self.open_exception(

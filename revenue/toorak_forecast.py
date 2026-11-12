@@ -67,7 +67,7 @@ class ToorakForecast:
 
         rows = self.connection.execute(
             """SELECT r.uid AS rule_uid,r.id AS rule_id,v.uid AS contract_uid,v.version_no,
-                      v.effective_from,v.effective_to,e.id AS entity_id,s.uid AS snapshot_uid,s.canonical_json
+                      r.effective_from,r.effective_to,e.id AS entity_id,s.uid AS snapshot_uid,s.canonical_json
                  FROM revenue_entity_provider_links l
                  JOIN revenue_entities e ON e.id=l.revenue_entity_id
                  JOIN revenue_contract_groups g ON g.revenue_entity_id=e.id
@@ -78,13 +78,14 @@ class ToorakForecast:
                 WHERE l.school_id=? AND e.status='active' AND e.entity_type='school'
                   AND l.effective_from<=? AND (l.effective_to IS NULL OR l.effective_to>=?)
                   AND g.contract_kind='direct_commission' AND v.status='active' AND (v.version_no=1 OR ?)
-                  AND v.effective_from<=? AND v.effective_to>=?
+                  AND r.version_no=(SELECT max(latest.version_no) FROM revenue_commission_rule_versions latest
+                                     WHERE latest.contract_version_id=v.id AND latest.status='active')
                   AND d.document_kind=? AND r.status='active' AND (? IS NULL OR e.id=?)
                   AND r.effective_from<=? AND r.effective_to>=?
                   AND json_extract(s.canonical_json,'$.toorak_tier_package')=1
                   AND json_extract(s.canonical_json,'$.school_id')=l.school_id
                   AND (?=0 OR json_extract(s.canonical_json,'$.pilot_simulation')=?)""",
-            (school["id"],day,day,self.formal,day,day,contracts.contract_kind,self.entity_id,self.entity_id,day,day,self.formal,self.simulation),
+            (school["id"],day,day,self.formal,contracts.contract_kind,self.entity_id,self.entity_id,day,day,self.formal,self.simulation),
         ).fetchall()
         if len(rows) != 1:
             raise ValueError("实际开学日须匹配唯一已激活的学校佣金合同。")
@@ -113,10 +114,14 @@ class ToorakForecast:
             "tuition": dict(tuition), "gst_mode": mode,
             "net_cents": net, "gst_cents": gst, "gross_cents": net + gst,
         }
+        if (period := self._academic_period(config)) != "year_1":
+            result["tuition"]["academic_period"] = period
         if self.formal:
             result.update(school_commission_formal=True,school_commission_simulation=self.simulation)
         if configurable:
             result.update(school_commission_configurable=True,claim=config["claim"])
+        elif config.get("claim", {}).get("commencement_days"):
+            result["claim"] = config["claim"]
         return {**result, "digest": hashlib.sha256(canonical_json(result).encode()).hexdigest()}
 
     def _toorak_tier(self, config, component, cycle, day, confirm_other):
@@ -138,25 +143,31 @@ class ToorakForecast:
             """SELECT t.uid,t.tuition_cents,t.fee_component,t.authority_level,t.evidence_document_id,
                       d.uid AS document_uid,d.sha256
                  FROM revenue_tuition_facts t JOIN revenue_documents d ON d.id=t.evidence_document_id
-                WHERE t.enrolment_component_id=? AND t.academic_period='year_1'
+                WHERE t.enrolment_component_id=? AND t.academic_period=?
                   AND t.fee_component=? AND t.status='active' AND t.currency_code='AUD'
                   AND t.authority_level IN ('official','manual') AND t.tuition_cents>0""",
-            (component["id"], "tuition_"+tier["tuition_kind"]),
+            (component["id"], self._academic_period(config), "tuition_"+tier["tuition_kind"]),
         ).fetchone()
         if not tuition:
             raise ValueError("缺少与签证档对应、有来源的已确认首年 AUD 学费。")
         return tier,tuition,{**visa,"category":category}
+
+    @staticmethod
+    def _academic_period(config):
+        return {"first_half_year": "first_half_year", "whole_course": "whole_course"}.get(
+            config.get("tuition_period"), "year_1"
+        )
 
     def _configurable_tier(self, config, component_id, cycle, day):
         fees = self.connection.execute(
             """SELECT t.uid,t.tuition_cents,t.fee_component,t.authority_level,t.evidence_document_id,
                       d.uid AS document_uid,d.sha256
                  FROM revenue_tuition_facts t JOIN revenue_documents d ON d.id=t.evidence_document_id
-                WHERE t.enrolment_component_id=? AND t.academic_period='year_1'
+                WHERE t.enrolment_component_id=? AND t.academic_period=?
                   AND t.fee_component IN ('tuition_local','tuition_international')
                   AND t.status='active' AND t.currency_code='AUD'
                   AND t.authority_level IN ('official','manual') AND t.tuition_cents>0""",
-            (component_id,),
+            (component_id, self._academic_period(config)),
         ).fetchall()
         candidates = [
             (tier,fee) for tier in config["tiers"] for fee in fees
@@ -204,8 +215,8 @@ class ToorakForecast:
                 """INSERT INTO revenue_commission_instalments
                    (uid,commission_line_id,instalment_no,academic_period,net_cents,gst_cents,gross_cents,
                     eligible_cents,claimed_cents,status,created_at)
-                   VALUES(?,?,1,'year_1',?,?,?,0,0,'forecast',?)""",
-                (new_uid("commission-instalment"),line_id,*amounts,now),
+                   VALUES(?,?,1,?,?,?,?,0,0,'forecast',?)""",
+                (new_uid("commission-instalment"),line_id,result["tuition"].get("academic_period", "year_1"),*amounts,now),
             )
             return self.repository.require_by_uid("revenue_commission_lines", uid)
 

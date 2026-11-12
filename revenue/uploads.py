@@ -19,6 +19,7 @@ MIME_BY_EXTENSION = {
     ".jpeg": "image/jpeg",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".csv": "text/csv",
+    ".txt": "text/plain",
 }
 
 
@@ -42,6 +43,7 @@ ACCEPTED_UPLOAD_MIME_TYPES = {
         "application/zip",
     },
     ".csv": {"text/csv", "application/csv", "text/plain"},
+    ".txt": {"text/plain"},
 }
 
 
@@ -67,13 +69,14 @@ def _validate_upload_identity(extension: str, content_type: str, payload: bytes)
             name.startswith("word/") for name in names
         ):
             raise ValueError("DOCX 文件结构无效。")
-    if extension == ".csv":
+    if extension in {".csv", ".txt"}:
+        label = "CSV" if extension == ".csv" else "TXT"
         try:
             text = payload.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
-            raise ValueError("CSV 文件必须使用 UTF-8 编码。") from exc
+            raise ValueError(f"{label} 文件必须使用 UTF-8 编码。") from exc
         if "\x00" in text:
-            raise ValueError("CSV 文件内容无效。")
+            raise ValueError(f"{label} 文件内容无效。")
 
 
 def stage_revenue_upload(
@@ -83,6 +86,7 @@ def stage_revenue_upload(
     *,
     max_bytes: int = 20 * 1024 * 1024,
     encrypted_store=None,
+    writable_mount=None,
 ) -> StagedRevenueUpload:
     filename = str(getattr(upload, "filename", "") or "")
     if (
@@ -107,7 +111,7 @@ def stage_revenue_upload(
     from revenue.secure_storage import write_immutable
     digest = hashlib.sha256(payload).hexdigest()
     if encrypted_store is None:
-        target, created = write_immutable(root, f"{digest}{extension}", payload)
+        target, created = write_immutable(root, f"{digest}{extension}", payload, writable_mount=writable_mount)
     else:
         target, created = encrypted_store.publish(payload)
     return StagedRevenueUpload(

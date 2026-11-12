@@ -250,8 +250,8 @@ from revenue.institution_commission_draft import InstitutionCommissionDraft
 from revenue.multischool_views import provider_commission_intake_data, school_configuration_data, render_configurable_preview
 from revenue.school_contract_pages import (
     CONFIRMED_ROOT, CONFIRMED_TITLE, DRAFT_ROOT, TARGET_FIELDS, UPLOAD_ROOT, UPLOAD_TITLE,
-    confirmed_contracts, confirmed_url, render_confirmed_contracts, render_contract_upload,
-    pending_contracts, reviewed_school_terms, uploaded_contract_targets,
+    billing_url, confirmed_contracts, confirmed_url, render_confirmed_contracts, render_contract_upload,
+    pending_contracts, reviewed_nsw_contracts, reviewed_school_terms, uploaded_contract_targets,
 )
 from revenue.state_school_commission import STATE_AUTHORITIES, authority_contracts, discarded_contract_upload, school_commission_assignment
 from revenue.school_invoice_smtp import RehearsalSMTP
@@ -27628,6 +27628,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/(\d+)/upload-review/([^/]+)/(\d+)/preview/download$", self.upload_review_download),
                 (r"^/students/(\d+)/materials-complete$", self.materials_complete),
                 (r"^/students/(\d+)/offer$", self.offer_create),
+                (r"^/students/(\d+)/offer/first-year-tuition$", self.student_first_year_tuition_update),
                 (r"^/students/(\d+)/offer/(\d+)/update$", self.offer_update),
                 (r"^/students/(\d+)/offer/(\d+)/classify$", self.offer_classify),
                 (r"^/students/(\d+)/offer/(\d+)/accept$", self.offer_accept),
@@ -28453,6 +28454,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             workbench = RevenueWorkbench(connection)
             data = workbench.load(case_uid)
             data["can_administer"] = is_revenue_admin(self.user)
+            from revenue.first_year_tuition import COE_KIND, OFFER_KIND
+
+            denied_evidence = {
+                kind: label for kind, permission, label in (
+                    (OFFER_KIND, "offers.manage", "已关联 Offer"),
+                    (COE_KIND, "coe.manage", "已关联 CoE"),
+                ) if not allowed(self.user, permission)
+            }
+            for component in data.get("operations", {}).get("first_year", []):
+                for record in component["records"]:
+                    if label := denied_evidence.get(record["document_kind"]):
+                        record.update(document_uid=None, source_label=label)
             pilot = school_commission_authority(self.user,"contracts",case_uid=case_uid)
             if pilot is not False:
                 data["toorak_forecast_components"] = workbench.toorak_forecast_components(
@@ -28462,10 +28475,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 data["school_commission_formal"] = bool(pilot)
                 data["school_commission_simulation"] = pilot.simulation if pilot else True
                 if school_commission_authority(self.user,"invoicing",case_uid=case_uid) is not False:
+                    from revenue.invoice_templates import invoice_template_context
+
                     data["toorak_claim"] = workbench.toorak_claim_workbench(
                         data["case"]["id"],data["case"]["student_id"],formal=bool(pilot),
                         entity_id=pilot.entity_id if pilot else None,
                         simulation=pilot.simulation if pilot else True,
+                        template_context=invoice_template_context(pilot, ("school", pilot.school_id)) if pilot else None,
                     )
                 data["school_commission_settlement"] = school_commission_authority(self.user,"settlement",case_uid=case_uid) is not False
             return data
@@ -28507,13 +28523,19 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
     def revenue_workspace_page(self, method, workspace_name):
         if not can_access_revenue(self.user):
             return self.error_page("无权限访问该功能。", HTTPStatus.FORBIDDEN)
-        if method != "GET":
+        commission_edit = workspace_name == "contracts" and "edit_commission" in self.query
+        billing_edit = workspace_name == "contracts" and self.query.get("step") == ["billing"]
+        if method != "GET" and not (method == "POST" and (commission_edit or billing_edit)):
             return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
         if workspace_name == "contracts":
             intake = school_commission_authority(self.user, "contract-intake")
             state = (self.query.get("education_authority") or [""])[0]
             if state and (not intake or state not in intake.education_authorities):
                 return self.error_page("州／领地教育局尚未开放。", HTTPStatus.FORBIDDEN)
+            if commission_edit or billing_edit:
+                if not intake or not can_perform_revenue_action(self.user, "contracts/school/register"):
+                    return self.error_page("无权修改学校佣金或开票资料。", HTTPStatus.FORBIDDEN)
+                return self._revenue_school_contract_page(intake, upload=False, method=method)
             if intake and intake.education_authorities:
                 if self.query.get("add_school") == ["1"] or self.query.get("provider_catalog") == ["1"]:
                     return self.redirect(UPLOAD_ROOT)
@@ -28609,7 +28631,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("州／领地教育局合同入口尚未开放。", HTTPStatus.FORBIDDEN)
         return self._revenue_school_contract_page(intake, upload=True)
 
-    def _revenue_school_contract_page(self, intake, *, upload):
+    def _revenue_school_contract_page(self, intake, *, upload, method="GET"):
         from html import escape
         from revenue.views import render_contract_analysis
 
@@ -28678,10 +28700,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                 else self._school_commission_scope_id(key))
                                for kind, key in TARGET_FIELDS.items() if key in self.query), None)
                 schools = confirmed_contracts(connection, intake, int(self.user["id"]), active_schools=bound)
+                if "edit_commission" in self.query:
+                    if target not in schools:
+                        return self.error_page("找不到已确认的学校佣金条款。", HTTPStatus.NOT_FOUND)
+                    return self._revenue_commission_terms_editor(connection, intake, bound, schools[target], target, method)
                 if target is not None and target not in schools:
                     return self.error_page("该学校暂无已确认的佣金合同。", HTTPStatus.NOT_FOUND)
+                billing_step = self.query.get("step") == ["billing"]
+                if billing_step and (target is None or sum(key in self.query for key in TARGET_FIELDS.values()) != 1):
+                    return self.error_page("请选择已确认的学校或教育局。", HTTPStatus.BAD_REQUEST)
+                if billing_step and method == "POST" and any(key in self.form for key in TARGET_FIELDS.values()):
+                    return self.error_page("请选择已确认的学校或教育局。", HTTPStatus.BAD_REQUEST)
                 title = CONFIRMED_TITLE
-                mail_form = ""
                 authority_finance = ""
                 if target and target[0] == "authority":
                     from revenue.authority_formal import authority_payer, authority_schema_ready
@@ -28689,6 +28719,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
                     terms = self._confirmed_authority_terms(connection, intake, target[1])
                     from revenue import vic_rcti
+                    from revenue.institution_commission_draft import NSW_CLAIMS_ONLY
                     if terms and terms.get("payment_mode") == vic_rcti.PAYMENT:
                         from revenue.vic_rcti_reconciliation import URL, ready
                         authority_finance = "<p>" + vic_rcti.BLOCK_INVOICE + "</p>"
@@ -28696,47 +28727,148 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             href = URL + "/" + quote(terms["uid"], safe="")
                             authority_finance += (f'<p><a class="button-link primary" href="{href}">RCTI 对账</a></p>'
                                                   '<p>上传单据后可核对差额并登记到账。</p>')
-                    elif terms and authority_schema_ready(connection):
+                    elif terms and terms.get("payment_mode") != NSW_CLAIMS_ONLY and authority_schema_ready(connection):
                         authority_finance = render_authority_finance(
                             target[1], terms, authority_payer(connection, target[1]), self.csrf, new_token(),
                         )
-                if target:
-                    from revenue.authority_formal import authority_payer
-                    from revenue.invoice_billing_details import billing_details
-                    from revenue.school_contract_pages import DRAFT_ROOT, render_payer_billing_details
-
-                    payer_id = None
-                    if target[0] == "school":
-                        scope = school_commission_authority(self.user, "contracts", school_id=target[1])
-                        if scope and has_active_school_commission_rule(connection, scope):
-                            payer_id = scope.entity_id
-                            action = "/revenue/contracts/school/mail-recipient"
-                            fields = {"school_id": target[1]}
-                    elif target[0] == "authority" and not (
-                        terms and terms.get("payment_mode") == vic_rcti.PAYMENT
-                    ):
-                        payer = authority_payer(connection, target[1])
-                        if payer and terms:
-                            payer_id = payer["id"]
-                            action = DRAFT_ROOT + "/" + quote(terms["uid"], safe="")
-                            fields = {"operation": "payer-billing-details"}
-                    if payer_id is not None:
-                        mail_form = render_payer_billing_details(
-                            action, fields, billing_details(connection, payer_id, intake.simulation), self.csrf, new_token(),
-                            simulation=intake.simulation,
-                        )
+                if target and can_perform_revenue_action(self.user, "contracts/school/register"):
+                    if billing_step or self.query.get("billing_preview") == ["1"]:
+                        return self._revenue_school_billing_details(connection, intake, bound, schools[target], target,
+                                                                    authority_finance, method)
                 claim_href = ""
                 if target and target[0] == "school":
                     scope = school_commission_authority(self.user, "preview", school_id=target[1])
                     if scope and scope.toorak_claim_drafts:
                         claim_href = f"/revenue/school-commission-candidates?school_id={scope.school_id}"
-                body = render_confirmed_contracts(schools, target, mail_form=mail_form,
-                                                  authority_finance=authority_finance, claim_href=claim_href)
+                reviewed_nsw = reviewed_nsw_contracts(connection, intake, int(self.user["id"])) if target is None else ()
+                can_edit = can_perform_revenue_action(self.user, "contracts/school/register")
+                billing_settings = None
+                if target and can_edit:
+                    try:
+                        billing_settings = self._commission_billing_target(connection, intake, bound, schools[target], target).settings()
+                    except (LookupError, PermissionError, ValueError, sqlite3.Error):
+                        # Keep the contract readable when the addressee cannot be resolved.
+                        pass
+                body = render_confirmed_contracts(schools, target, authority_finance=authority_finance,
+                                                  claim_href=claim_href, reviewed_nsw=reviewed_nsw,
+                                                  can_edit=can_edit, billing_href=billing_url(target) if target and can_edit else "",
+                                                  billing_settings=billing_settings)
         finally:
             db._release_connection(connection)
         message, message_kind = self.message()
         return self.send_html(page(title, body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status(),
                                    message=message, message_kind=message_kind),
+                              headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop")
+
+    def _commission_billing_target(self, connection, intake, bound, school, target):
+        from revenue.commission_billing_target import CommissionBillingTarget
+
+        scope = bound.get(target[1], {}).get("scope") if target[0] == "school" else None
+        terms = self._confirmed_authority_terms(connection, intake, target[1]) if target[0] == "authority" else None
+        return CommissionBillingTarget(RevenueRepository(connection), intake, target, school, int(self.user["id"]),
+                                       scope=scope, terms=terms, mail_mode=school_invoice_payer_mail_mode())
+
+    def _revenue_school_billing_details(self, connection, intake, bound, school, target, authority_finance, method):
+        from revenue.school_contract_pages import render_payer_billing_details, render_school_template_selection
+
+        destination = billing_url(target)
+        scope = bound.get(target[1], {}).get("scope") if target[0] == "school" else None
+        error = ""
+        billing = None
+        try:
+            if method == "POST":
+                if self.query.get("billing_preview") == ["1"]:
+                    return self.error_page("样张只提供预览。", HTTPStatus.METHOD_NOT_ALLOWED)
+                self._begin_school_commission_write(connection, intake, "contract-intake")
+                if scope and school_commission_authority(self.user, "contracts", school_id=target[1]) != scope:
+                    raise PermissionError("当前学校配置已变更。")
+            billing = self._commission_billing_target(connection, intake, bound, school, target)
+            if method == "POST":
+                key = str(self.form.get("idempotency_key") or "")
+                if self.form.get("billing_operation") == "template-selection":
+                    billing.save_template(self.form, key)
+                    message = "本校发票模板已保存。"
+                elif "billing_operation" not in self.form:
+                    billing.save(self.form, key)
+                    message = "学校开票资料已保存。"
+                else:
+                    raise ValueError("无法识别开票资料操作。")
+                connection.commit()
+                return self.flash_redirect(destination, message, "success")
+            if self.query.get("billing_preview") == ["1"]:
+                payload = billing.preview()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/pdf")
+                self.send_header("Content-Disposition", 'inline; filename="commission-billing-sample.pdf"')
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+        except (PermissionError, LookupError):
+            connection.rollback()
+            return self.error_page("找不到已确认的开票主体或无权编辑。", HTTPStatus.FORBIDDEN)
+        except (ValueError, sqlite3.Error) as exc:
+            connection.rollback()
+            error = str(exc)
+            if not re.search(r"[\u4e00-\u9fff]", error):
+                error = "无法保存学校开票资料，请检查填写内容。"
+            if method == "GET" or billing is None:
+                return self.error_page(error, HTTPStatus.BAD_REQUEST)
+
+        try:
+            settings = billing.settings()
+            templates = billing.template_settings()
+        except (ValueError, sqlite3.Error):
+            return self.error_page("开票主体资料暂不可用，请核对付款主体。", HTTPStatus.BAD_REQUEST)
+        address = destination.split("#", 1)[0]
+        token = new_token()
+        template_form = render_school_template_selection(address, templates, self.csrf, token)
+        has_preview = settings["revision"] or templates["effective_uid"]
+        mail_form = render_payer_billing_details(
+            address, {}, settings, self.csrf, token, simulation=intake.simulation,
+            allow_auto_mail=billing.allow_auto_mail, preview_href=address + "&billing_preview=1" if has_preview else "",
+            preview_label="预览发票样张" if templates["effective_uid"] else "预览 Invoice 1762 样张",
+            template_form=template_form, error=error,
+        )
+        body = render_confirmed_contracts({target: school}, target, mail_form=mail_form,
+                                          authority_finance=authority_finance, title="学校开票资料",
+                                          can_edit=True, billing_href=confirmed_url(target), billing_settings=settings)
+        message, message_kind = self.message()
+        return self.send_html(page("学校开票资料", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status(),
+                                   message=message, message_kind=message_kind),
+                              HTTPStatus.BAD_REQUEST if error else HTTPStatus.OK,
+                              headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop")
+
+    def _revenue_commission_terms_editor(self, connection, intake, bound, school, target, method):
+        from revenue.commission_terms_editor import CommissionTermsEditor
+
+        uid = (self.query.get("edit_commission") or [""])[0]
+        scope = bound.get(target[1], {}).get("scope") if target[0] == "school" else None
+        repository = RevenueRepository(connection)
+        error = ""
+        try:
+            editor = CommissionTermsEditor(repository, intake, school, target, uid, int(self.user["id"]), scope)
+            if method == "POST":
+                self._begin_school_commission_write(connection, intake, "contract-intake")
+                if scope and school_commission_authority(self.user, "contracts", school_id=target[1]) != scope:
+                    raise PermissionError("学校范围已变更。")
+                editor.save(self.form, str(self.form.get("idempotency_key") or ""))
+                connection.commit()
+                return self.flash_redirect(confirmed_url(target), "佣金条款已保存。", "success")
+            body = editor.render(self.csrf, new_token())
+        except (LookupError, PermissionError):
+            connection.rollback()
+            return self.error_page("找不到可编辑的合同或无权修改。", HTTPStatus.NOT_FOUND)
+        except (ValueError, sqlite3.Error) as exc:
+            connection.rollback()
+            message = str(exc)
+            error = message if re.search(r"[\u4e00-\u9fff]", message) else "无法保存，请检查表单后再试。"
+            form = self.form if method == "POST" else None
+            body = editor.render(self.csrf, new_token(), error=error, form=form)
+        return self.send_html(page("编辑佣金条款", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                              HTTPStatus.BAD_REQUEST if error else HTTPStatus.OK,
                               headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop")
 
     def revenue_initialization(self, method):
@@ -28886,7 +29018,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if state:
                 from revenue.authority_formal import authority_payer, authority_schema_ready
 
+                from revenue import vic_rcti
+                from revenue.institution_commission_draft import NSW_CLAIMS_ONLY
+
                 terms = self._confirmed_authority_terms(connection, pilot, state)
+                if terms and terms.get("payment_mode") in {vic_rcti.PAYMENT, NSW_CLAIMS_ONLY}:
+                    return self.error_page("当前教育局可在学校开票资料预览样张。", HTTPStatus.FORBIDDEN)
                 payer = authority_payer(connection, state) if terms and authority_schema_ready(connection) else None
                 if not payer or payer["legal_name"] != terms["payer"]:
                     return self.error_page("请先确认教育局合同并登记对应付款主体。", HTTPStatus.FORBIDDEN)
@@ -29026,9 +29163,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         row_digests = {uid: self.form.get("revision_" + uid) for uid in selected}
                         if can_generate:
                             if scope.toorak_claim_drafts:
-                                from revenue.invoice_templates import current_invoice_template_revisions
+                                from revenue.invoice_templates import current_invoice_template_revisions, invoice_template_context
                                 if not all(current_invoice_template_revisions(
                                     connection, formal=True, entity_id=scope.entity_id, simulation=False,
+                                    **invoice_template_context(scope, ("school", scope.school_id)),
                                 )):
                                     raise ValueError("请先发布正式发票模板并批准财务资料。")
                             if finance_entity_id and not gst_mode:
@@ -29094,6 +29232,23 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 from revenue.authority_formal import authority_payer
                 entities.extend((payer["id"], payer["legal_name"]) for state in intake.education_authorities
                                 if (payer := authority_payer(connection, state)))
+            if intake:
+                from revenue.institution_commission_draft import InstitutionCommissionDraft
+
+                contracts = confirmed_contracts(connection, intake, int(self.user["id"]))
+                for target, school in contracts.items():
+                    if target[0] not in {"school", "provider"}:
+                        continue
+                    uid = next((uid for _, _, uid in school["confirmed"] if uid), None)
+                    if uid:
+                        contract = InstitutionCommissionDraft(RevenueRepository(connection), intake, uid, int(self.user["id"]))
+                        try:
+                            payer = contract._billing_payer()
+                        except ValueError:
+                            continue
+                        if payer:
+                            entities.append((payer["id"], payer["legal_name"]))
+            entities = list(dict(entities).items())
             entity_ids = [key for key, _ in entities]
             if entity_id is not None:
                 if entity_id not in entity_ids:
@@ -29243,12 +29398,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     self._begin_school_commission_write(connection,pilot,"invoicing")
                     if issuer.mail_release == "payer" and not school_invoice_payer_mail_live():
                         issuer.mail_release = None
-                    issued = issuer.issue_school_invoice(entity_id,claim_uids,digest)
+                    issued = issuer.issue_school_invoice(entity_id,claim_uids,digest, customer_note=self.form.get("customer_note", ""))
                     connection.commit()
                     return self.redirect(SCHOOL_INVOICE_URL+"?invoice="+quote(issued["uid"],safe=""))
                 connection.execute("BEGIN")
                 if operation == "pdf":
-                    payload = issuer.invoice_preview_pdf(entity_id,claim_uids,digest)
+                    payload = issuer.invoice_preview_pdf(entity_id,claim_uids,digest, customer_note=self.form.get("customer_note", ""))
                     connection.commit()
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type","application/pdf")
@@ -29259,7 +29414,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(payload)
                     return
-                preview = issuer.invoice_preview(entity_id,claim_uids)
+                preview = issuer.invoice_preview(entity_id,claim_uids, customer_note=self.form.get("customer_note", ""))
                 connection.commit()
                 body = render_school_invoice_preview(preview,self.csrf,new_token(),simulation=simulation,
                                                      allow_issue=school_commission_authority(self.user,"invoicing",
@@ -29469,6 +29624,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 else:
                     message = "收款未保存，请检查输入后重试。"
                 return self.json_response({"ok": False, "message": message}, HTTPStatus.BAD_REQUEST)
+            if action_name == "cases/tuition" and "tuition_aud" in self.form:
+                message = detail if any("\u4e00" <= char <= "\u9fff" for char in detail) else "请检查首年学费和凭证后重试。"
+                return self.error_page(message, HTTPStatus.BAD_REQUEST)
             if action_name.startswith("contracts/school/"):
                 message = detail if any("\u4e00" <= char <= "\u9fff" for char in detail) else "请检查学校、日期和规则输入。"
                 return self.error_page(f"需要处理：{message}", HTTPStatus.BAD_REQUEST)
@@ -29585,7 +29743,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     raise ValueError("请先确认该学校的佣金合同。")
                 save_billing_details(actions.repository, pilot.entity_id, actions.actor_user_id,
                                      self.form.get("idempotency_key"), self.form, simulation=pilot.simulation)
-                destination = f"/revenue/contracts?school_id={pilot.school_id}#school-invoice-mail-recipient"
+                destination = billing_url(("school", pilot.school_id))
                 message = "学校开票资料已保存。"
             elif action_name == "contracts/school/bind":
                 actions.bind_school_commission_entity(self.form)
@@ -29800,9 +29958,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
                 message = "客户收据已正式签发。"
             elif action_name == "cases/tuition":
-                result = actions.record_structured_tuition(self.form)
-                destination = desktop_case_url(result["commercial_case_uid"])
-                message = "结构化学费已确认。"
+                if "tuition_aud" in self.form:
+                    schedules = [item for item in self.files if item.field_name == "fee_schedule" and item.filename]
+                    if len(schedules) > 1:
+                        raise ValueError("请只上传一份 Fee Schedule PDF。")
+                    result = actions.record_first_year_tuition(
+                        self.form, upload=schedules[0] if schedules else None,
+                        read_offer=lambda offer: self._read_revenue_tuition_offer(connection, offer),
+                    )
+                    destination = desktop_case_url(result["commercial_case_uid"]) + "#revenue-case-actions"
+                    message = "首年学费及凭证已保存。"
+                else:
+                    result = actions.record_structured_tuition(self.form)
+                    destination = desktop_case_url(result["commercial_case_uid"])
+                    message = "结构化学费已确认。"
             elif action_name == "cases/commencement":
                 result = actions.confirm_actual_commencement(self.form)
                 destination = desktop_case_url(result["commercial_case_uid"])
@@ -29846,6 +30015,52 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             })
         return self.flash_redirect(destination, message, message_kind)
 
+    def _read_revenue_tuition_offer(self, connection, offer):
+        if not allowed(self.user, "offers.manage"):
+            raise ValueError("当前账号无权读取已有 Offer。")
+        student = connection.execute("SELECT * FROM students WHERE student_id=?", (offer["student_id"],)).fetchone()
+        try:
+            offer_file = offer_record_file_path(offer)
+            if not offer_file or student is None:
+                raise ValueError("该 Offer 缺少可读取的附件。")
+            path = ensure_within(offer_file, nas.student_folder(student))
+            if not path.is_file():
+                raise ValueError("该 Offer 附件不可用。")
+            limit = 20 * 1024 * 1024
+            with path.open("rb") as stream:
+                payload = stream.read(limit + 1)
+            if len(payload) > limit:
+                raise ValueError("该 Offer 文件超过 20 MB。")
+        except (OSError, NasSafetyError):
+            raise ValueError("该 Offer 附件不可读取。") from None
+        return Upload("offer", path.name, mimetypes.guess_type(path.name)[0] or "application/octet-stream", payload)
+
+    def _institution_invoice_html_preview(self, payload, url, invoice_uid, pdf_kind):
+        from revenue.institution_commission_draft_views import render_invoice_preview
+
+        try:
+            current_page = int((self.query.get("page") or ["1"])[0])
+        except ValueError:
+            return self.error_page("请选择有效的发票页码。", HTTPStatus.BAD_REQUEST)
+        status = HTTPStatus.OK
+        image_uri = ""
+        page_count = 1
+        try:
+            page_count = pdf_page_count(payload, max_pages=None)
+            if not 1 <= current_page <= page_count:
+                return self.error_page("找不到该发票页码。", HTTPStatus.NOT_FOUND)
+            image = render_pdf_page(payload, current_page)
+            with io.BytesIO() as png:
+                image.save(png, format="PNG")
+                image_uri = "data:image/png;base64," + base64.b64encode(png.getvalue()).decode("ascii")
+        except (PreviewRenderError, OSError):
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+        body = render_invoice_preview(url, invoice_uid, pdf_kind, image_uri=image_uri,
+                                      page=current_page, page_count=page_count)
+        return self.send_html(page("发票草稿预览", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                              status, headers=[("Cache-Control", "private, no-store")],
+                              presentation_surface="desktop")
+
     def revenue_institution_commission_draft(self, method, draft_uid):
         from document_ocr import extract_pdf_pages
         from revenue.institution_commission_draft import InstitutionCommissionDraft
@@ -29868,6 +30083,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                          workflow_class, render_workflow, extract_pdf_pages):
         from revenue import vic_rcti
         from revenue.authority_formal import AuthorityInvoice, authority_payer, register_authority_payer
+        from revenue.institution_commission_draft import NSW_BLOCK_INVOICE, NSW_CLAIMS_ONLY
+        from revenue.institution_invoice import InstitutionInvoice
         from revenue.data_invoice_storage import configured_invoice_store
         from revenue.authority_settlement import AuthoritySettlement
         from revenue.money import aud_cents
@@ -29877,6 +30094,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         from revenue.uploads import stage_revenue_upload
 
         analysis = None
+        nsw_review = None
         workflow = None
         terms = None
         invoice = None
@@ -29898,11 +30116,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return extract_pdf_pages(pdf, indexes, data_root=STAGING.root, source_root=SOURCE_DIR,
                                      staging=pilot.simulation, diagnostics={})
 
+        def nsw_invoice_blocked(current_terms):
+            return (current_terms or {}).get("payment_mode") == NSW_CLAIMS_ONLY and (
+                requested or operation not in {None, "evidence", "nsw-enable"}
+            )
+
         try:
             repository = RevenueRepository(connection)
             workflow = workflow_class(repository, pilot, draft_uid, int(self.user["id"]))
             terms = workflow.terms()
             operation = self.form.get("operation") if method == "POST" else None
+            if nsw_invoice_blocked(terms):
+                return self.error_page(NSW_BLOCK_INVOICE, HTTPStatus.FORBIDDEN)
             if (terms or {}).get("payment_mode") == vic_rcti.PAYMENT and (
                 requested or operation in {"invoice", "payer-billing-details"} or
                 (isinstance(operation, str) and operation.startswith("authority-formal-"))
@@ -29912,6 +30137,19 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 invoice = workflow.invoice(requested)
                 if not invoice:
                     return self.error_page("找不到该合同的发票草稿。", HTTPStatus.NOT_FOUND)
+                if workflow.draft_needs_repreview(invoice, terms):
+                    if method == "POST" and operation == "invoice-repreview":
+                        self._begin_school_commission_write(connection, pilot, "contract-intake")
+                        workflow.repreview_invoice(requested, str(self.form.get("terms_revision") or ""),
+                                                   str(self.form.get("idempotency_key") or ""))
+                        connection.commit()
+                        return self.redirect(url + "?invoice=" + quote(requested, safe=""))
+                    if method == "POST" or self.query.get("pdf"):
+                        return self.error_page("合同条款已更新，请返回草稿重新预览。", HTTPStatus.CONFLICT)
+                    body = render_workflow(workflow, self.csrf, new_token(), terms=terms, invoice=invoice)
+                    return self.send_html(page("重新预览佣金发票草稿", body, self.user, self.csrf,
+                                               REVENUE_MODULE_KEY, nas.status()),
+                                          headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop")
                 if invoice["target"][0] == "authority":
                     if rehearsal:
                         settlement = AuthoritySettlement(repository, invoice, int(self.user["id"]), rehearsal=True)
@@ -29920,13 +30158,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             workflow, invoice, rehearsal=rehearsal, production=production_preview,
                             payer_mail=payer_mail_mode == "mock",
                         )
+                elif (invoice["target"][0] in {"school", "provider"} and (rehearsal or production_preview)
+                      and workflow._billing_payer()):
+                    formal_authority = InstitutionInvoice(
+                        workflow, invoice, rehearsal=rehearsal, production=production_preview,
+                        payer_mail=payer_mail_mode == "mock" or (formal_production and school_invoice_payer_mail_live()),
+                    )
             if operation == "discard":
                 self._begin_school_commission_write(connection, pilot, "contract-intake")
                 workflow.discard(str(self.form.get("idempotency_key") or ""))
                 connection.commit()
                 return self.flash_redirect(UPLOAD_ROOT, "已删除本次上传，请选择学校并上传正确的合同。", "success")
             if not terms:
-                analysis = workflow.analyse(ocr)
+                nsw_review = workflow.nsw_review()
+                analysis = nsw_review["analysis"] if nsw_review else workflow.analyse(ocr)
             if method == "POST" and operation == "authority-formal-dispatch":
                 if not rehearsal or not formal_authority or not formal_authority.issued_uid():
                     raise PermissionError("请选择已签发的隔离发票。")
@@ -29938,6 +30183,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 self._begin_school_commission_write(connection, pilot, "contract-intake")
                 workflow = workflow_class(repository, pilot, draft_uid, int(self.user["id"]))
                 terms = workflow.terms()
+                if nsw_invoice_blocked(terms):
+                    connection.rollback()
+                    return self.error_page(NSW_BLOCK_INVOICE, HTTPStatus.FORBIDDEN)
                 if (terms or {}).get("payment_mode") == vic_rcti.PAYMENT and operation in {"invoice", "payer-billing-details"}:
                     return self.error_page(vic_rcti.BLOCK_INVOICE, HTTPStatus.FORBIDDEN)
                 key = str(self.form.get("idempotency_key") or "")
@@ -29953,16 +30201,31 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 if operation == "payer-billing-details":
                     from revenue.invoice_billing_details import save_billing_details
 
-                    if (not terms or requested or workflow.target[0] != "authority"
-                            or terms != self._confirmed_authority_terms(connection, pilot, workflow.target[1])):
-                        raise PermissionError("请从最新已确认的教育局佣金合同保存开票资料。")
-                    payer = authority_payer(connection, workflow.target[1])
-                    if not payer:
-                        raise ValueError("请先登记该州教育局的法定付款主体。")
-                    save_billing_details(repository, payer["id"], int(self.user["id"]), key,
-                                         self.form, simulation=pilot.simulation)
+                    if not terms or requested:
+                        raise PermissionError("请从已确认的佣金合同填写开票资料。")
+                    if workflow.target[0] in {"school", "provider"}:
+                        workflow.save_invoice_billing(
+                            self.form, key, allow_auto_mail=(
+                                (rehearsal or formal_production) and payer_mail_mode in {"mock", "production"}
+                            ),
+                        )
+                    else:
+                        if (workflow.target[0] != "authority"
+                                or terms != self._confirmed_authority_terms(connection, pilot, workflow.target[1])):
+                            raise PermissionError("请从最新已确认的教育局佣金合同保存开票资料。")
+                        payer = authority_payer(connection, workflow.target[1])
+                        if not payer:
+                            raise ValueError("请先登记该州教育局的法定付款主体。")
+                        save_billing_details(repository, payer["id"], int(self.user["id"]), key,
+                                             self.form, simulation=pilot.simulation)
                     connection.commit()
-                    return self.redirect(confirmed_url(workflow.target) + "#school-invoice-mail-recipient")
+                    return self.redirect(billing_url(workflow.target))
+                if operation == "invoice-gst":
+                    if not invoice or not requested or contract_only:
+                        raise ValueError("请打开要修改的学校发票草稿。")
+                    workflow.save_invoice_gst(requested, self.form.get("gst_mode"), self.form.get("draft_revision"), key)
+                    connection.commit()
+                    return self.redirect(url + "?invoice=" + quote(requested, safe=""))
                 if isinstance(operation, str) and operation.startswith("authority-formal-"):
                     if not formal_authority or not (rehearsal or formal_production):
                         raise PermissionError("当前环境未开放教育局正式单据验收。")
@@ -30034,6 +30297,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         )
                 elif requested:
                     raise ValueError("请选择发票草稿支持的操作。")
+                elif operation == "nsw-review" and not terms and analysis:
+                    workflow.save_nsw_review(self.form, analysis, key)
+                    connection.commit()
+                    return self.redirect(CONFIRMED_ROOT)
+                elif operation == "nsw-enable":
+                    workflow.enable_nsw_claims(str(self.form.get("review_revision") or ""), key)
+                    connection.commit()
+                    return self.redirect(url)
                 elif operation == "terms" and not terms and analysis:
                     workflow.confirm(self.form, analysis, key)
                 elif not contract_only and terms and self.form.get("terms_revision") == terms["revision"]:
@@ -30051,6 +30322,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     elif operation == "invoice":
                         invoice = workflow.create_invoice_draft(
                             self.form.get("selection"), self.form.get("selection_revision"), terms, key,
+                            customer_note=self.form.get("customer_note", "")
+                            if workflow.target[0] in {"school", "provider"} else "",
                         )
                     else:
                         raise ValueError("请选择有效的佣金草稿操作。")
@@ -30058,14 +30331,27 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     raise ValueError("合同确认版本已更新，请刷新页面。")
                 connection.commit()
                 if contract_only or operation == "terms":
-                    return self.redirect(confirmed_url(workflow.target))
+                    next_url = (billing_url(workflow.target) if workflow.target[0] in {"school", "provider"}
+                                else confirmed_url(workflow.target))
+                    return self.redirect(next_url)
                 return self.redirect(url + ("?invoice=" + quote(invoice["uid"], safe="") if invoice else ""))
             if contract_only and terms:
-                return self.redirect(confirmed_url(workflow.target))
+                next_url = confirmed_url(workflow.target)
+                if (workflow.target[0] in {"school", "provider"}
+                        and not workflow.invoice_billing_settings()["revision"]):
+                    next_url = billing_url(workflow.target)
+                return self.redirect(next_url)
             pdf_requested = (self.query.get("pdf") or [""])[0]
-            if invoice and pdf_requested in {"1","formal","formal-preview"}:
+            if invoice and pdf_requested in {"1","formal","formal-preview","proof"}:
                 filename = "commission-invoice-draft.pdf"
-                if pdf_requested == "formal":
+                if pdf_requested == "proof":
+                    if not isinstance(formal_authority, InstitutionInvoice) or not formal_authority.issued_uid():
+                        raise PermissionError("找不到该学校发票的凭证。")
+                    payload = formal_authority.proof_pdf(
+                        formal_authority.issued_uid(), (self.query.get("document") or [""])[0],
+                    )
+                    filename = "commission-evidence.pdf"
+                elif pdf_requested == "formal":
                     if not formal_authority or not formal_authority.issued_uid():
                         raise PermissionError("找不到已签发的隔离发票。")
                     payload = formal_authority.pdf(formal_authority.issued_uid())
@@ -30075,12 +30361,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         raise PermissionError("当前环境未开放正式版式预览。")
                     payload = formal_authority.preview_pdf()
                 else:
-                    payload = workflow.render_pdf(invoice)
+                    payload = (formal_authority.preview_pdf() if isinstance(formal_authority, InstitutionInvoice)
+                               else workflow.render_pdf(invoice))
+                view = (self.query.get("view") or [""])[0]
+                if pdf_requested in {"1", "formal-preview"} and view == "html":
+                    return self._institution_invoice_html_preview(payload, url, invoice["uid"], pdf_requested)
+                disposition = "attachment" if pdf_requested in {"1", "formal-preview"} and view == "pdf" else "inline"
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "application/pdf")
-                self.send_header("Content-Disposition", f'inline; filename="{filename}"')
+                self.send_header("Content-Disposition", f'{disposition}; filename="{filename}"')
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 self.wfile.write(payload)
                 return
@@ -30099,9 +30391,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             error = detail if isinstance(problem, ValueError) and re.search(r"[\u4e00-\u9fff]", detail) else "无法保存，请检查已填写的字段后重试。"
             if workflow is None or (terms is None and analysis is None):
                 return self.error_page(error, HTTPStatus.BAD_REQUEST)
-        form = self.form if error and operation == "terms" and not terms else None
+        form = self.form if error and operation in ("terms", "nsw-review") and not terms else None
         body = render_workflow(workflow, self.csrf, new_token(), analysis=analysis, terms=terms,
                                invoice=invoice, error=error, form=form, contract_only=contract_only,
+                               nsw_review=nsw_review, edit_nsw=(
+                                   self.query.get("edit") == ["1"] or (bool(error) and operation == "nsw-review")
+                               ),
                                settlement=settlement.summary() if settlement and not formal_authority else None,
                                formal_authority=({**formal_authority.view(),
                                                   "can_issue": rehearsal or formal_production,
@@ -30378,9 +30673,25 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     return self.error_page("无权限访问该文件。",HTTPStatus.FORBIDDEN)
             finally:
                 db._release_connection(connection)
-        allowed_mime_types = {"application/pdf", "image/png", "image/jpeg"}
+        from revenue.first_year_tuition import COE_KIND, EVIDENCE_KINDS, OFFER_KIND, can_read_evidence
+        from revenue.uploads import MIME_BY_EXTENSION
+
+        extensions = {"application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg"}
+        if document["document_kind"] in EVIDENCE_KINDS:
+            required = "offers.manage" if document["document_kind"] == OFFER_KIND else (
+                "coe.manage" if document["document_kind"] == COE_KIND else None
+            )
+            if required and not allowed(self.user, required):
+                return self.error_page("无权限访问该学费原件。", HTTPStatus.FORBIDDEN)
+            connection = db.connect()
+            try:
+                if not can_read_evidence(connection, document["id"]):
+                    return self.error_page("无权限访问该学费凭证。", HTTPStatus.FORBIDDEN)
+            finally:
+                db._release_connection(connection)
+            extensions.update({MIME_BY_EXTENSION[ext]: ext for ext in (".docx", ".txt")})
         mime_type = str(document["mime_type"] or "")
-        if mime_type not in allowed_mime_types:
+        if mime_type not in extensions:
             return self.error_page("Revenue 文件类型不允许查看。", HTTPStatus.NOT_FOUND)
         from revenue.secure_storage import read_reference, StorageUnavailable
         from revenue.storage_locations import resolve_location
@@ -30395,6 +30706,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 payload = configured_contract_store().read(
                     storage_path, str(document["sha256"]), int(document["size_bytes"]),
                 )
+            elif document["document_kind"] in EVIDENCE_KINDS:
+                from revenue.tuition_storage import TuitionEvidenceStorage
+
+                payload = TuitionEvidenceStorage(Path(db.path).parent / "revenue_documents").read(
+                    storage_path, str(document["sha256"]), int(document["size_bytes"]),
+                )
             else:
                 payload = read_reference(
                     Path(db.path).parent/"revenue_documents",storage_path,
@@ -30403,14 +30720,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
         except (StorageUnavailable, OSError, ValueError, TypeError):
             return self.error_page("Revenue 文件不可用。", HTTPStatus.NOT_FOUND)
-        extension = {"application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg"}[mime_type]
+        extension = extensions[mime_type]
         filename = f"{document['document_kind']}-{document_uid}{extension}"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", mime_type)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "private, no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        response_disposition = "attachment" if disposition == "download" else "inline"
+        response_disposition = "attachment" if disposition == "download" or extension in {".docx", ".txt"} else "inline"
         self.send_header(
             "Content-Disposition",
             f"{response_disposition}; filename*=UTF-8''{quote(filename)}",
@@ -53613,7 +53930,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         invoice for invoice in invoice_overviews(issuer,settlement,entity_id,issued_by=owner_id)
                         if invoice["settlement"] and invoice["settlement"]["overdue_days"]
                     )
-            overdue.sort(key=lambda invoice: invoice["settlement"]["delivery"]["due_date"])
+            intake = school_commission_authority(self.user, "contract-intake")
+            if intake:
+                from revenue.institution_invoice import overdue_institution_invoices
+
+                overdue.extend(overdue_institution_invoices(RevenueRepository(connection), intake, owner_id))
+            overdue.sort(key=lambda invoice: invoice["settlement"]["due_date"])
             return render_school_reminder_center(overdue)
         finally:
             db._release_connection(connection)
@@ -60012,6 +60334,42 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
         return branch_id
 
+    def _can_correct_student_tuition(self):
+        return (can_workflow_module_save(self.user, "Offer")
+                and can_perform_revenue_action(self.user, "cases/tuition"))
+
+    def student_intake_tuition_panel(self, student_id):
+        if not self._can_correct_student_tuition():
+            return ""
+        from revenue.first_year_tuition import COE_KIND, OFFER_KIND
+        from revenue.student_intake_tuition import render_student_tuition, student_tuition_details
+
+        connection = db.connect()
+        try:
+            details = student_tuition_details(connection, str(student_id))
+        finally:
+            db._release_connection(connection)
+        if not details:
+            return ""
+        permission = {OFFER_KIND:"offers.manage", COE_KIND:"coe.manage"}.get(details["record"]["document_kind"])
+        return render_student_tuition(details, str(student_id), self.csrf, new_token(),
+                                      show_original=not permission or allowed(self.user, permission))
+
+    def student_first_year_tuition_update(self, method, student_id):
+        if method != "POST":
+            return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
+        if not self._can_correct_student_tuition():
+            return self.error_page("无权限修改首年学费。", HTTPStatus.FORBIDDEN)
+        from revenue.student_intake_tuition import correct_first_year_tuition
+
+        try:
+            with db.transaction() as connection:
+                correct_first_year_tuition(connection, str(student_id), self.form, int(self.user["id"]))
+        except ValueError as error:
+            return self.error_page(str(error), HTTPStatus.BAD_REQUEST)
+        return self.flash_redirect(f"/students/{student_id}?tab=offer#student-intake-tuition",
+                                   "已保存首年学费。")
+
     def offer_panel(self, student_id, offers):
         lifecycle_contexts = getattr(self, "_student_lifecycle_record_contexts", {})
         status_options = ("received", "sent_to_parent", "signed", "signed_received", "cancelled", "rejected", "expired")
@@ -60229,6 +60587,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="offer_status" value="received">
             {transfer_branch_field}<input type="file" name="file" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" required><button class="primary">上传 Offer 并自动识别</button>
           </form>
+          {self.student_intake_tuition_panel(student_id)}
           <div class="student-file-list offer-file-list">{offer_cards}</div>
           <div class="offer-acceptance-live" data-offer-acceptance-live aria-live="polite"></div>
           <p class="offer-coe-warning-copy" hidden>已有 COE：更换已接受 Offer 可能影响现有 COE，请确认风险后继续。</p>
@@ -68924,6 +69283,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         optional_note = ""
         if module == "COE + OSHC":
             optional_note = '<p class="optional-document-note upload-review-warning">Letter of Confirmation 是可选文件：不是每个学生都有，没有就不用上传，不影响 COE/OSHC 完整性和当前流程。</p>'
+        from revenue.student_intake_tuition import accepted_offer_context, render_review_fields
+
+        intake_context = None
+        if module == "COE + OSHC":
+            connection = db.connect()
+            try:
+                intake_context = accepted_offer_context(connection, student_id)
+            finally:
+                db._release_connection(connection)
+        intake_review = module in {"Offer", "COE + OSHC"}
         target_label = config.get("target_label")
         cards = []
         for file_meta in metadata["files"]:
@@ -68958,6 +69327,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 'class="extraction-review-box upload-review-extraction ',
                 1,
             )
+            intake_html = render_review_fields(index, module, suggested_type, intake_context) if intake_review else ""
             target_field = ""
             if target_label:
                 target_field = (
@@ -68975,6 +69345,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     <label>DocumentType / 文件类型 <span class="required">(*)</span><select name="document_type_{index}" aria-required="true" data-document-type-select data-optional-document-types="{esc(optional_types)}"><option value="">请选择 DocumentType</option>{option_html_for_file}</select><small data-document-type-help>保存当前上传文件时必须选择 DocumentType，用于命名；不是说所有文件类型都必须上传。</small></label>
                     {target_field}
                     {extraction_html}
+                    {intake_html}
                     <label>Notes<textarea name="notes_{index}" rows="2" placeholder="可选"></textarea></label>
                   </section>
                   <section class="review-preview-workspace upload-review-preview-panel" data-review-preview-root data-preview-src="{preview_src}?size=large" data-download-url="{preview_src}/download" data-preview-title="{esc(file_meta["original_name"])}">
@@ -69032,6 +69403,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           </form>
           {preview_dialog_html()}
           <script src="/assets/local-document-review.js" defer></script>
+          {'<script src="/assets/student-intake-tuition.js" defer></script>' if intake_review else ''}
         </section>"""
         return self.send_html(page("Upload Review", body, self.user, self.csrf, active="students", nas=nas.status()))
 
@@ -69301,6 +69673,35 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 "请先为所有文件选择文件类型。",
                 "error",
             )
+        from revenue.student_intake_tuition import (
+            accepted_offer_context, choose_coe, read_review_fields, review_source,
+            save_source, sync_tuition, validate_tuition_update,
+        )
+
+        intake_entries = {}
+        if module in {"Offer", "COE + OSHC"}:
+            connection = db.connect()
+            try:
+                for item in selected_files:
+                    index = str(item["index"])
+                    kind = review_source(module, (self.form.get(f"document_type_{index}") or "").strip())
+                    values = read_review_fields(self.form, index) if kind else None
+                    if values is None:
+                        continue
+                    if kind == "coe":
+                        provider = (extraction_form_value(self.form, "coe_provider", index)
+                                    or stored_form.get("coe_provider") or stored_form.get("school_name"))
+                        context = accepted_offer_context(connection, student_id)
+                        decision = choose_coe(context, provider, self.form.get(f"intake_acceptance_{index}"),
+                                              values, self.form.get(f"intake_choice_{index}", ""))
+                        validate_tuition_update(connection, context, values if decision == "coe" else context["offer"]["values"])
+                        intake_entries[index] = (values, context["acceptance_id"], decision)
+                    else:
+                        intake_entries[index] = (values, None, None)
+            except ValueError as error:
+                return self.error_page(str(error), HTTPStatus.BAD_REQUEST)
+            finally:
+                db._release_connection(connection)
         signed_forms_contract = None
         if module == "Forms" and any(
             (self.form.get(f"document_type_{item['index']}") or "").strip()
@@ -69357,6 +69758,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             target_name = (self.form.get(f"target_name_{index}") or "").strip()
             notes = (self.form.get(f"notes_{index}") or "").strip()
             upload = upload_from_review(folder, file_meta)
+            intake = intake_entries.get(index)
+            intake_upload = None
+            if intake:
+                from revenue.first_year_tuition import OFFER_EXTENSIONS
+                from revenue.tuition_storage import TuitionEvidenceStorage
+
+                intake_upload = TuitionEvidenceStorage(Path(db.path).parent / "revenue_documents").stage(
+                    upload, OFFER_EXTENSIONS if module == "Offer" else OFFER_EXTENSIONS - {".txt"},
+                )
             business_record_id = None
             if module == "Visa":
                 visa_review_case,case_error=self.visa_lodgement_resolve_target_case(student_id,stored_form.get('visa_case_id'),True)
@@ -69457,6 +69867,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     offer_classification = apply_offer_classification(
                         connection,business_record_id,school_name
                     )
+                    if intake:
+                        save_source(connection, "offer", business_record_id, student_id,
+                                    offer_classification.school_id, intake[0], intake_upload,
+                                    int(self.user["id"]), source_school=school_name)
                 db.audit(
                     self.user, "extraction_review_confirmed", "offer", business_record_id, str(destination),
                     new_value=json.dumps({
@@ -69552,6 +69966,27 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         connection, business_record_id, int(self.user["id"]),
                         lifecycle_stamp,
                     )
+                    if intake:
+                        values, acceptance_id, prior_decision = intake
+                        context = accepted_offer_context(connection, student_id)
+                        bound = connection.execute(
+                            "SELECT application_cycle_id FROM coe_oshc WHERE id=? AND student_id=?",
+                            (business_record_id, student_id),
+                        ).fetchone()
+                        decision = choose_coe(context, coe_provider, acceptance_id, values,
+                                              self.form.get(f"intake_choice_{index}", ""))
+                        if bound[0] != context["application_cycle_id"] or decision != prior_decision:
+                            raise ValueError("当前录取已更新，请重新打开 CoE 核对页。")
+                        source = save_source(
+                            connection, "coe", business_record_id, student_id, context["school_id"],
+                            values, intake_upload, int(self.user["id"]), acceptance_id=acceptance_id,
+                            decision=decision, source_school=coe_provider,
+                        )
+                        sync_tuition(
+                            connection, context, source if decision == "coe" else context["offer"],
+                            int(self.user["id"]), coe_id=business_record_id,
+                            keep_existing=decision == "offer" and not self.form.get(f"intake_choice_{index}"),
+                        )
                 db.audit(
                     self.user, "extraction_review_confirmed", "coe_oshc", business_record_id, str(destination),
                     new_value=json.dumps({
@@ -81568,7 +82003,12 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
                         scope = school_pilot_scope(connection, current, entity_id=event["entity_id"])
                         if scope and scope.enabled and scope.stage in {"invoicing", "settlement"}:
                             return payer_matches(scope, connection)
-                        if not current.contract_intake or not current.education_authorities:
+                        if not current.contract_intake:
+                            return False
+                        if event.get("institution_draft"):
+                            # The approval check above requires the immutable school issuance and active payer link.
+                            return True
+                        if not current.education_authorities:
                             return False
                         from revenue.authority_formal import authority_payer
                         return any(payer and payer["id"] == event["entity_id"]

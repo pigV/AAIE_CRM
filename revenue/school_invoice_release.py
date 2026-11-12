@@ -26,6 +26,20 @@ def payer_mail_addresses(raw, *, simulation):
     return addresses
 
 
+def payer_copy_addresses(recipient, cc, bcc, *, simulation):
+    """The finance copy is mandatory. Bcc is used only in the SMTP envelope."""
+    seen = {FINANCE_COPY_ADDRESS, *map(str.casefold, payer_mail_addresses(recipient, simulation=simulation))}
+    result = []
+    for raw in (cc, bcc):
+        addresses = []
+        for address in payer_mail_addresses(raw, simulation=simulation) if raw else ():
+            if address.casefold() not in seen:
+                addresses.append(address)
+                seen.add(address.casefold())
+        result.append(addresses)
+    return tuple(result)
+
+
 def release_values(current, stage, recipient, evidence, approval, claims, simulation):
     mode = "candidate" if simulation else "production"
     values = dict(transport=mode, stage=stage, enabled=False, verified=False, recipient="",

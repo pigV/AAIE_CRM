@@ -42,6 +42,22 @@ class CommissionMailRoutingTests(unittest.TestCase):
                              transport.submit(addresses, email.as_bytes(), lambda: True))
             server.data.assert_not_called()
 
+            server.reset_mock()
+            server.rcpt.side_effect = None
+            cc = f"{FINANCE_COPY_ADDRESS}, copy@school.example.org"
+            bcc = "blind@school.example.org"
+            email.replace_header("Cc", cc)
+            content = email.as_bytes()
+            self.assertNotIn(b"Bcc:", content)
+            self.assertEqual(("sent", None, 250), transport.submit(
+                addresses, content, lambda: True, cc=cc, bcc=bcc,
+            ))
+            self.assertEqual(
+                [call("ap@school.example.org"), call("finance@school.example.org"), call(FINANCE_COPY_ADDRESS),
+                 call("copy@school.example.org"), call(bcc)],
+                server.rcpt.call_args_list,
+            )
+
     def test_payer_worker_configuration_has_no_fixed_recipient(self):
         from pathlib import Path
         from tempfile import TemporaryDirectory

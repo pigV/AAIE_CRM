@@ -5,6 +5,8 @@ from datetime import date
 from html import escape
 from io import BytesIO
 
+from revenue.money import commission_gst_indicator
+
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import LETTER
@@ -166,7 +168,8 @@ def render_invoice_1762(snapshot, layout, canvas_class):
         quantity=int(item.get("quantity",1))
         row={"product":"School recruitment commission","description":item["description"],
              "quantity":quantity,"rate":_number(item["net_cents"] // quantity),
-             "gst":"GST" if item["gst_cents"] else "—","amount":_number(item["net_cents"])}
+             "gst":commission_gst_indicator(item["gst_cents"], item.get("gst_mode") or snapshot.get("gst_mode")),
+             "amount":_number(item["net_cents"])}
         grid.append([Paragraph(plain(row[f["key"]]),right_style if f["key"] in right_columns else left)
                      for f in fields])
     table=Table(grid,colWidths=[area*weights[f["key"]] for f in fields],repeatRows=1,style=TableStyle([
@@ -208,6 +211,9 @@ def render_invoice_1762(snapshot, layout, canvas_class):
     if layout["footer"]:
         thanks=ParagraphStyle("ReferenceThanks",parent=right_style,textColor=blue)
         y=p(plain(layout["footer"]),total_x,y-spacing,total_w,thanks)
+
+    if note := snapshot.get("customer_note"):
+        y = p("Customer note: " + plain(note), margin, y - spacing, area, left)
 
     payment=block["payment"]
     bank_top=max(108,margin+len(payment["fields"])*(size+2)+25)
