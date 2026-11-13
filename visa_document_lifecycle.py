@@ -117,6 +117,12 @@ def safe_text(conn, case, doc):
     return ''
 
 
+class DuplicateVisaUpload(ValueError):
+    def __init__(self, document):
+        super().__init__('File already exists / 文件已存在')
+        self.document = document
+
+
 def check_upload(conn, case_id, digest, category=None, *, read_bytes=None, exclude_source_id=None, exclude_document_id=None):
     for doc in active_documents(conn, case_id):
         if exclude_document_id and doc.get('id')==exclude_document_id:continue
@@ -126,7 +132,7 @@ def check_upload(conn, case_id, digest, category=None, *, read_bytes=None, exclu
         if not existing_hash and read_bytes:
             existing_hash = hashlib.sha256(read_bytes(doc)).hexdigest()
         if digest and existing_hash and existing_hash == digest:
-            raise ValueError('File already exists / 文件已存在')
+            raise DuplicateVisaUpload(doc)
         if category in SINGLE_ACTIVE and doc['authority_category'] == category:
             raise ValueError('Current Visa Case already has this document; soft-delete the old file first.')
 

@@ -276,6 +276,23 @@ class VisaDocumentsCandidateTests(unittest.TestCase):
         for table in ('visa_letter_reviews','visa_case_confirmed_decisions','visas','visa_decision_events'):
             self.assertEqual(0,self.conn.execute('SELECT COUNT(*) FROM '+table).fetchone()[0])
 
+    def test_retired_extraction_is_hidden_and_cannot_be_confirmed(self):
+        extraction = self.extract()
+        self.conn.execute("""CREATE TABLE audit_logs(
+            username TEXT, action_type TEXT, module_name TEXT, record_id TEXT,
+            student_id TEXT, old_value TEXT, new_value TEXT, created_at TEXT
+        )""")
+        self.service.retire_letter_extraction(
+            self.conn, 1, extraction["id"], reason="School offer misclassified", occurred_at=STAMP
+        )
+        self.assertEqual(self.service.active_letter_extractions(self.conn, 1), [])
+        with self.assertRaisesRegex(ValueError, "retired"):
+            self.service.confirm_letter(
+                self.conn, 1, extraction["id"], values=json.loads(extraction["proposed_json"]), **self.actor
+            )
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM visa_letter_extractions").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM visa_letter_reviews").fetchone()[0], 0)
+
     def test_archive_prevents_confirmation_and_submission_even_when_extraction_exists(self):
         extraction=self.extract()
         self.service.set_document_archived(self.conn,1,extraction['document_id'],archived=True,**self.actor)

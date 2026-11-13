@@ -15425,6 +15425,30 @@ class CoreTests(unittest.TestCase):
             finally:
                 app_module.db = old_db
 
+    def test_visa_batch_suggestion_distinguishes_prepared_materials_from_immi_outcomes(self):
+        handler = object.__new__(app_module.CRMHandler)
+        handler.query = {"visa_tab": ["visa_result"]}
+        handler.form = {}
+        titles = ["Draft", "Offer", "IELTS", "A-Level Completion", "Transcript", "Receipt",
+                  "IMMI Acknowledgment Letter", "IMMI Grant Letter / IMMI Refusal Letter"]
+        items = [{"id": index, "title": title} for index, title in enumerate(titles, 1)]
+        handler._visa_read_text = lambda *_: "Previous visa grant date: 01 Jan 2020"
+        for filename, title in (
+            ("Test-application draft.pdf", "Draft"),
+            ("Test-Offer_UNSW.pdf", "Offer"),
+            ("Test-IELTS.pdf", "IELTS"),
+            ("Test-Completion of A-level.pdf", "A-Level Completion"),
+            ("Test-Transcript Year 10-11.pdf", "Transcript"),
+            ("Test-IMMI Receipt.pdf", "Receipt"),
+            ("Test-IMMI Acknowledgement of Application Received.pdf", "IMMI Acknowledgment Letter"),
+            ("Unknown.pdf", ""),
+        ):
+            with self.subTest(filename=filename):
+                self.assertEqual(handler._visa_batch_suggestion({}, {"original_name": filename}, items)["item_title"], title)
+        self.assertEqual(handler._visa_batch_suggestion({}, {"original_name": "Test-IELTS.pdf"}, [])["item_id"], "")
+        handler._visa_read_text = lambda *_: "Visa Grant Notification\nDate of grant: 01 Jan 2026"
+        self.assertEqual(handler._visa_batch_suggestion({}, {"original_name": "Unknown.pdf"}, items)["item_title"], titles[-1])
+
     def test_visa_smart_batch_upload_review_confirm_and_security_boundaries(self):
         old_db = app_module.db
         old_nas = app_module.nas
@@ -15581,6 +15605,56 @@ class CoreTests(unittest.TestCase):
                 self.assertNotIn("Unknown Upload.pdf", material_html)
                 self.assertIn(f"/documents/{pending_docs[0]['id']}/preview?size=large", material_html)
                 self.assertIn(f"/documents/{pending_docs[0]['id']}/download", material_html)
+
+                authority_sql = Path("migrations/20260907_035_visa_management_authorities.sql").read_text()
+                with db.transaction() as connection:
+                    for table in ("visa_case_documents", "visa_document_audit"):
+                        ddl = authority_sql.split(f"CREATE TABLE {table}(", 1)[1].split(";", 1)[0]
+                        connection.execute(f"CREATE TABLE {table}(" + ddl)
+
+                declaration = db.one(
+                    "SELECT * FROM visa_checklist_items WHERE visa_case_id=? AND title='Declaration'",
+                    (case_one,),
+                )
+                handler.form = {"csrf": "csrf"}
+                handler.files = [
+                    Upload("files", "Family Declaration.pdf", "application/pdf", b"%PDF-1.4\nfamily"),
+                    Upload("files", "Unknown Upload.pdf", "application/pdf", b"%PDF-1.4\nunknown"),
+                ]
+                retry = {}
+                handler.send_html = lambda html, *args, **kwargs: retry.update(html=html)
+                handler.student_visa_case_material_batch_upload("POST", "260941", str(case_one))
+                self.assertIn(f'value="{pending_docs[2]["id"]}"', retry["html"])
+                self.assertEqual(db.one("SELECT COUNT(*) n FROM student_documents")["n"], 4)
+                declaration_doc = db.one("SELECT * FROM student_documents WHERE original_name='Family Declaration.pdf'")
+                handler.form = {
+                    "document_ids": [str(declaration_doc["id"])],
+                    f"final_item_{declaration_doc['id']}": str(declaration["id"]),
+                }
+                with mock.patch.object(handler, "_visa_register_uploaded_document", side_effect=ValueError("registration failed")):
+                    handler.student_visa_case_material_batch_confirm("POST", "260941", str(case_one))
+                self.assertIn("registration failed", retry["html"])
+                self.assertIn(f'name="final_item_{declaration_doc["id"]}"', retry["html"])
+                self.assertEqual(
+                    db.one("SELECT document_status FROM student_documents WHERE id=?", (declaration_doc["id"],))[0],
+                    "pending",
+                )
+                self.assertEqual(handler.visa_material_linked_file_rows(case_one, declaration["id"]), [])
+                handler.student_visa_case_material_batch_confirm("POST", "260941", str(case_one))
+                self.assertIn("成功挂载 1 个文件", redirects[-1][1])
+                self.assertIsNotNone(db.one(
+                    "SELECT id FROM visa_case_documents WHERE visa_case_id=? AND student_document_id=?",
+                    (case_one, declaration_doc["id"]),
+                ))
+                handler.student_visa_case_detail("GET", "260941", str(case_one))
+                material_panel = retry["html"].split('id="material-checklist"', 1)[1].split('id="visa-result-s56"', 1)[0]
+                self.assertIn("Family Declaration.pdf", material_panel)
+                handler.form = {"csrf": "csrf"}
+                handler.files = [Upload("files", "Family Declaration.pdf", "application/pdf", b"%PDF-1.4\nfamily")]
+                handler.student_visa_case_material_batch_upload("POST", "260941", str(case_one))
+                self.assertIn("File already exists", retry["html"])
+                self.assertIn("已挂载至", retry["html"])
+                self.assertEqual(db.one("SELECT COUNT(*) n FROM student_documents")["n"], 4)
 
                 tamper_doc = pending_docs[2]
                 handler.form = {

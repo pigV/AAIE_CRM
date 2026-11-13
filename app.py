@@ -27950,9 +27950,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
         return self.error_page("无权限访问该功能。", HTTPStatus.FORBIDDEN)
 
+    def reminder_popup_quiet_cookie_name(self):
+        return f"aaie_reminder_quiet_{self.user['id']}"
+
     def global_reminder_popup_html(self, actionable_rows=None):
         if not self.user or not can_access_module(self.user, "reminders"):
             return ""
+        quiet_cookie = SimpleCookie(self.headers.get("Cookie", "")).get(
+            self.reminder_popup_quiet_cookie_name()
+        )
+        if quiet_cookie and quiet_cookie.value.isascii() and quiet_cookie.value.isdecimal():
+            if len(quiet_cookie.value) <= 13 and int(quiet_cookie.value) > time.time() * 1000:
+                return ""
         try:
             rows = actionable_rows if actionable_rows is not None else list_actionable_canonical_reminders(
                 db, self.user, limit=50
@@ -28024,7 +28033,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         self, content, status=200, headers=None, *, presentation_surface=None
     ):
         if self.user and '<div class="app-shell">' in content and "</body>" in content:
-            content = content.replace("</body>", self.global_reminder_popup_html() + self.assistant_widget_html() + "</body>", 1)
+            reminder_sync = ""
+            if can_access_module(self.user, "reminders"):
+                cookie_name = esc(self.reminder_popup_quiet_cookie_name())
+                reminder_sync = f'<span hidden data-reminder-sync-enabled="{cookie_name}"></span>'
+            content = content.replace(
+                "</body>",
+                reminder_sync + self.global_reminder_popup_html() + self.assistant_widget_html() + "</body>",
+                1,
+            )
         content = self.prepare_html_content(
             content, presentation_surface=presentation_surface
         )
@@ -60925,7 +60942,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return "s56_response" if ("response" in filename_text or "回复" in filename_text) else "s56_request"
         if title == "receipt":
             return "lodgement_receipt"
-        if "acknowledgment" in title:
+        if "acknowledgment" in title or "acknowledgement" in title:
             return "immi_acknowledgment"
         if "bridging visa" in title:
             return "bridging_visa"
@@ -66447,14 +66464,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 return document
         return None
 
-    def visa_material_insert_document_link(self, case, item, document_id, source="Visa Material Checklist", notes=""):
+    def visa_material_saved_item_category(self, case, item):
+        category = self.visa_material_record_value(item, "category")
+        if category:
+            return category
+        return next(
+            (entry["category"] for entry in self.visa_material_template(case)
+             if entry["item_key"] == self.visa_material_record_value(item, "item_key")),
+            "",
+        )
+
+    def visa_material_insert_document_link(self, case, item, document_id, source="Visa Material Checklist", notes="", *, connection=None):
         columns = self.visa_material_link_columns()
         stamp = now_iso()
         data = {
             "visa_case_id": case["id"],
             "document_id": document_id,
             "student_document_id": document_id,
-            "document_category": item["category"] if "category" in item.keys() else "",
+            "document_category": self.visa_material_saved_item_category(case, item),
             "document_type": item["document_type"] if "document_type" in item.keys() else (item["title"] if "title" in item.keys() else item["material_name"]),
             "link_purpose": "Visa Material Checklist",
             "used_in_this_case": 1,
@@ -66486,12 +66513,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         insert_columns = [column for column in ordered if column in columns]
         placeholders = ",".join("?" for _ in insert_columns)
-        db.execute(
+        execute = db.execute if connection is None else connection.execute
+        execute(
             f"INSERT OR IGNORE INTO visa_case_document_links({','.join(insert_columns)}) VALUES({placeholders})",
             [data[column] for column in insert_columns],
         )
 
-    def visa_material_mark_item_uploaded_if_missing(self, case_id, item_id):
+    def visa_material_mark_item_uploaded_if_missing(self, case_id, item_id, *, connection=None):
         stamp = now_iso()
         columns = {row["name"] for row in db.all("PRAGMA table_info(visa_checklist_items)")}
         set_parts = []
@@ -66514,7 +66542,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         else:
             return
         params.extend([item_id, case_id])
-        db.execute(
+        execute = db.execute if connection is None else connection.execute
+        execute(
             f"""UPDATE visa_checklist_items
                 SET {','.join(set_parts)}
                 WHERE id=? AND visa_case_id=?
@@ -66779,17 +66808,26 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             self.visa_material_initialize_checklist(case)
         rows = self.visa_material_checklist_rows(case)
         excluded_categories = set(exclude_categories or ())
+        def visible_in_material_tab(row):
+            if not self.visa_material_row_excluded_from_material_tab(row, excluded_categories):
+                return True
+            return (
+                row["category"] in {"Declaration", "Visa Information Form"}
+                and row["id"]
+                and bool(self.visa_material_linked_file_rows(case["id"], row["id"]))
+            )
+
         if category_filter:
             rows = [row for row in rows if row["category"] == category_filter]
         elif excluded_categories:
-            rows = [row for row in rows if not self.visa_material_row_excluded_from_material_tab(row, excluded_categories)]
+            rows = [row for row in rows if visible_in_material_tab(row)]
         initialized_rows = [row for row in rows if row["is_initialized"]]
         if initialized_rows:
             rows = self.visa_material_effective_rows(student_id, case, rows)
             if category_filter:
                 rows = [row for row in rows if row["category"] == category_filter]
             elif excluded_categories:
-                rows = [row for row in rows if not self.visa_material_row_excluded_from_material_tab(row, excluded_categories)]
+                rows = [row for row in rows if visible_in_material_tab(row)]
             initialized_rows = [row for row in rows if row["is_initialized"]]
         initialized = bool(initialized_rows)
         summary = self.visa_material_summary_counts(initialized_rows)
@@ -67653,11 +67691,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
 
     def visa_material_find_available_item(self, available_items, *titles):
-        wanted = {self.visa_material_normalized_text(title) for title in titles if str(title or "").strip()}
+        def normalized_title(value):
+            return "".join(char for char in str(value or "").casefold() if char.isalnum())
+
+        wanted = {normalized_title(title) for title in titles} - {""}
         for item in available_items:
             item_title = self.visa_material_item_title(item)
             item_doc_type = self.visa_material_record_value(item, "document_type")
-            if self.visa_material_normalized_text(item_title) in wanted or self.visa_material_normalized_text(item_doc_type) in wanted:
+            if normalized_title(item_title) in wanted or normalized_title(item_doc_type) in wanted:
                 return item
         return None
 
@@ -67685,6 +67726,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if not item:
                 return self.visa_material_batch_suggestion(None, "Unmatched", f"{reason}; target item is not in current checklist")
             return self.visa_material_batch_suggestion(item, confidence, reason)
+
+        academic_rules = (
+            (r"\bielts\b", ("IELTS", "IELTS Test Report", "English Language Test")),
+            (r"\b(?:completion of a level|a level completion)\b", ("A-Level Completion", "Completion of A-Level")),
+            (r"\btranscripts?\b", ("Transcript", "Transcripts", "Academic Transcript")),
+        )
+        for marker, titles in academic_rules:
+            if re.search(marker, text):
+                matches = [item for item in available_items if self.visa_material_find_available_item([item], *titles)]
+                if len(matches) == 1:
+                    return self.visa_material_batch_suggestion(matches[0], "High", "matched academic document filename")
+                return self.visa_material_batch_suggestion(None, "Unmatched", "No unique matching academic checklist item")
 
         if has_any("form 956", "form956", "956a", "956"):
             return self.visa_material_batch_suggestion(None, "Unmatched", "Form 956 is not configured in current checklist; please choose manually")
@@ -67722,7 +67775,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             (("Certificate of Deposit",), ("certificate of deposit", "bank deposit certificate", "deposit certificate", "存款证明"), "Certificate of Deposit"),
             (("CAAW / Welfare / Accommodation",), ("caaw", "welfare", "accommodation", "homestay confirmation", "homestay"), "CAAW / Welfare / Accommodation"),
             (("IMMI Grant Letter / IMMI Refusal Letter",), ("immi grant letter", "grant letter", "visa grant", "下签信", "immi refusal letter", "refusal letter", "visa refusal", "拒签信"), "IMMI Grant Letter / IMMI Refusal Letter"),
-            (("IMMI Acknowledgment Letter",), ("immi acknowledgment letter", "immi acknowledgement letter", "acknowledgement", "acknowledgment", "immi confirmation"), "IMMI Acknowledgment Letter"),
+            (("IMMI Acknowledgment Letter", "IMMI Acknowledgement Letter"), ("immi acknowledgment letter", "immi acknowledgement letter", "acknowledgement", "acknowledgment", "immi confirmation"), "IMMI Acknowledgment Letter"),
             (("Supplement",), ("s56 request", "s56 response", "s56", "supplement", "补料"), "Supplement"),
             (("Business License",), ("business license", "business licence", "company business license", "营业执照"), "Business License"),
             (("Certificate of Shareholder",), ("certificate of shareholder", "shareholder certificate", "股东证明"), "Certificate of Shareholder"),
@@ -67807,13 +67860,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             options.append(f'<option value="{esc(item_id)}"{selected}>{esc(self.visa_material_name_label(title))}</option>')
         return "".join(options)
 
-    def visa_material_batch_review_html(self, student_id, case, documents):
+    def visa_material_batch_review_html(self, student_id, case, documents, *, selected_items=None):
         available_items = self.visa_material_batch_available_items(case["id"])
         rows = []
         for doc in documents:
             suggestion = self._visa_batch_suggestion(case, doc, available_items)
             suggested_label = suggestion.get("chinese_label") or "Unmatched / 待确认"
             selected_id = suggestion.get("item_id") if suggestion["confidence"] in {"High", "Medium"} else ""
+            selected_id = (selected_items or {}).get(doc["id"], selected_id)
             rows.append(f"""
               <tr class="visa-material-batch-review-row">
                 <td class="visa-material-batch-review-file"><strong>{esc(doc['original_name'])}</strong><input type="hidden" name="document_ids" value="{esc(doc['id'])}"></td>
@@ -67930,18 +67984,65 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         folder = self.visa_material_batch_file_folder(student, case_id)
         stamp = now_iso()
         uploaded_by = (self.user or {}).get("id")
+        from visa_document_lifecycle import DuplicateVisaUpload
+
         documents = []
         skipped = []
         seen_hashes = set()
+        pending_by_hash = {}
+        for doc in db.all(
+            """SELECT * FROM student_documents WHERE student_id=? AND is_active=1
+               AND folder_category='Visa Management' AND document_type='VisaBatchUploadPending'
+               AND document_status='pending' ORDER BY id""",
+            (student_id,),
+        ):
+            path = Path(doc["file_path"])
+            if path.parent.resolve() != folder.resolve():
+                continue
+            try:
+                pending_data = self._visa_document_path(dict(case), dict(doc)).read_bytes()
+            except (ValueError, OSError):
+                continue
+            pending_by_hash.setdefault(hashlib.sha256(pending_data).hexdigest(), doc)
+
         for upload in uploads:
             try:
-                if not self.visa_material_file_allowed(upload):raise ValueError('Unsupported file type')
-                digest=hashlib.sha256(upload.data).hexdigest()
-                if digest in seen_hashes:raise ValueError('File already exists / 文件已存在')
-                self._visa_check_upload(dict(case),upload.data)
+                if not self.visa_material_file_allowed(upload):
+                    raise ValueError("Unsupported file type")
+                digest = hashlib.sha256(upload.data).hexdigest()
+                if digest in seen_hashes:
+                    raise ValueError("File already exists in this batch / 批次内重复文件")
                 seen_hashes.add(digest)
-            except (ValueError,OSError) as exc:
-                skipped.append(upload.filename+': '+str(exc));continue
+                self._visa_check_upload(dict(case), upload.data)
+            except DuplicateVisaUpload as exc:
+                source_id = exc.document.get("student_document_id")
+                titles = []
+                if source_id:
+                    document_expr = self.visa_material_link_document_expr("l")
+                    items = db.all(
+                        f"""SELECT i.* FROM visa_case_document_links l
+                            JOIN visa_checklist_items i ON i.visa_case_id=l.visa_case_id
+                                AND l.document_role='material_item:' || i.id
+                            WHERE l.visa_case_id=? AND {document_expr}=? AND l.status='Linked'
+                            ORDER BY i.id""",
+                        (case_id, source_id),
+                    )
+                    for item in items:
+                        category = self.visa_material_saved_item_category(case, item)
+                        tab = "Visa Result" if category == "Visa Result / S56" else "Material Checklist"
+                        titles.append(f"{tab} / {self.visa_material_item_title(item)}")
+                location = (
+                    f"。已挂载至：{'、'.join(dict.fromkeys(titles))}" if titles
+                    else "。已保存于当前 Visa Case 的文件工作区"
+                )
+                skipped.append(f"{upload.filename}: {exc}{location}")
+                continue
+            except (ValueError, OSError) as exc:
+                skipped.append(f"{upload.filename}: {exc}")
+                continue
+            if digest in pending_by_hash:
+                documents.append(pending_by_hash[digest])
+                continue
             destination, version = next_version_path(folder, upload.filename)
             destination.write_bytes(upload.data)
             document_id = db.execute(
@@ -68008,10 +68109,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if form is None:
             form, files = parse_request_body(self)
             self.form, self.files = form, files
-        stamp = now_iso()
         linked_count = 0
         skipped_count = 0
         skipped_messages = []
+        linked_messages = []
+        pending_documents = []
+        selected_items = {}
         for document_id_text in self.visa_material_batch_form_values("document_ids"):
             try:
                 document_id = int(document_id_text)
@@ -68024,37 +68127,83 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             final_item_id = (getattr(self, "form", {}).get(f"final_item_{document_id}") or "").strip()
             if not final_item_id:
                 skipped_count += 1
+                skipped_messages.append(f"{doc['original_name']}：未选择材料项，仍待确认")
                 continue
             item = db.one("SELECT * FROM visa_checklist_items WHERE id=? AND visa_case_id=?", (final_item_id, case_id))
             if not item:
                 return self.error_page("材料项不存在或不属于当前 Visa Case。", HTTPStatus.BAD_REQUEST)
             try:
                 data=self._visa_document_path(dict(case),dict(doc)).read_bytes()
-                file_type=self._visa_result_type(item,doc['original_name'],data)
+                file_type=self._visa_result_type(item,doc['original_name'],data,batch=True)
                 manual_type=form_text_value(getattr(self,'form',{}) or {},f'result_type_{document_id}')
                 title=self.visa_material_item_title(item).lower()
                 if manual_type:
                     if manual_type not in {'grant_letter','refusal_letter'} or not ('grant' in title and 'refusal' in title):raise ValueError('Confirm Grant/Refusal only for the corresponding result item.')
                     file_type=manual_type
                 if file_type=='other' and ('grant' in title and 'refusal' in title):raise ValueError('Confirm the unknown document as Grant or Refusal.')
-                self._visa_check_upload(dict(case),data,file_type,exclude_source_id=document_id)
-            except (ValueError,OSError) as exc:
-                skipped_count+=1;skipped_messages.append(doc['original_name']+': '+str(exc));continue
-            self.visa_material_insert_document_link(case, item, document_id, source="VISA Upload", notes="Smart Batch Upload confirmed by staff.")
-            db.execute(
-                "UPDATE student_documents SET document_type=?,document_status=? WHERE id=?",
-                (self.visa_lodgement_document_type(file_type) if file_type != "other" else "VisaMaterialChecklist", "active", document_id),
-            )
-            self._visa_register_uploaded_document(case,document_id)
-            self.visa_material_mark_item_uploaded_if_missing(case_id, item["id"])
+                from visa_document_lifecycle import check_upload
+
+                with db.transaction() as connection:
+                    current = connection.execute(
+                        "SELECT document_type, document_status, is_active FROM student_documents WHERE id=?", (document_id,)
+                    ).fetchone()
+                    if (not current or current["document_type"] != "VisaBatchUploadPending"
+                            or current["document_status"] != "pending" or not current["is_active"]):
+                        raise ValueError("文件已经处理，请刷新后查看。")
+                    check_upload(
+                        connection, int(case_id), hashlib.sha256(data).hexdigest(), file_type,
+                        read_bytes=lambda row: self._visa_document_path(dict(case), row).read_bytes(),
+                        exclude_source_id=document_id,
+                    )
+                    self.visa_material_insert_document_link(
+                        case, item, document_id, source="VISA Upload",
+                        notes="Smart Batch Upload confirmed by staff.", connection=connection,
+                    )
+                    document_expr = self.visa_material_link_document_expr("l")
+                    used_filter = "AND l.used_in_this_case=1" if "used_in_this_case" in self.visa_material_link_columns() else ""
+                    link = connection.execute(
+                        f"""SELECT 1 FROM visa_case_document_links l
+                            WHERE l.visa_case_id=? AND {document_expr}=? AND l.document_role=?
+                              AND COALESCE(l.status,'Linked')='Linked' {used_filter}""",
+                        (case_id, document_id, f"material_item:{item['id']}"),
+                    ).fetchone()
+                    if not link:
+                        raise ValueError("材料挂载未保存，文件仍待确认。")
+                    connection.execute(
+                        "UPDATE student_documents SET document_type=?,document_status='active' WHERE id=?",
+                        (self.visa_lodgement_document_type(file_type) if file_type != "other" else "VisaMaterialChecklist", document_id),
+                    )
+                    self._visa_register_uploaded_document(
+                        case, document_id, connection=connection, extract_letter=file_type != "other",
+                    )
+                    self.visa_material_mark_item_uploaded_if_missing(case_id, item["id"], connection=connection)
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                skipped_count += 1
+                skipped_messages.append(f"{doc['original_name']}：{exc}")
+                pending_documents.append(doc)
+                selected_items[document_id] = final_item_id
+                continue
             linked_count += 1
+            title = self.visa_material_item_title(item)
+            category = self.visa_material_saved_item_category(case, item)
+            tab_label = "Visa Result" if category == "Visa Result / S56" else "Material Checklist"
+            linked_messages.append(f"{doc['original_name']} → {tab_label} / {title}")
         try:
             db.audit(self.user, "visa_material_batch_confirmed", "visa_management", case_id, new_value=f"linked={linked_count}; skipped={skipped_count}", student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"))
         except Exception:
             pass
+        results = "；".join(skipped_messages + linked_messages)
+        if pending_documents or len(quote(results)) > 3000:
+            details = "".join(f"<li>{esc(message)}</li>" for message in skipped_messages + linked_messages)
+            review = self.visa_material_batch_review_html(student_id, case, pending_documents, selected_items=selected_items)
+            return self.send_html(page(
+                "Smart Batch Upload Review", f'<div class="notice" role="status"><ul>{details}</ul></div>' + review,
+                self.user, self.csrf, "visa", nas.status(),
+            ))
         return self.flash_redirect(
             self.visa_case_return_path(student_id, case_id, form_text_value(getattr(self,"form",{}) or {},"return_tab") or "material_checklist"),
-            f"成功挂载 {linked_count} 个文件，跳过 {skipped_count} 个文件。"+"; ".join(skipped_messages),
+            f"成功挂载 {linked_count} 个文件，跳过 {skipped_count} 个文件。"
+            + results,
         )
 
     def student_visa_case_material_file_upload(self, method, student_id, case_id, item_id):

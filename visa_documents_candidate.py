@@ -293,6 +293,48 @@ def save_extraction(conn, case_id, document_id, *, text, actor_user_id, occurred
     return result
 
 
+def _retired_extraction_ids(conn, case_id):
+    if not _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_logs'"):
+        return set()
+    return {
+        int(row["record_id"])
+        for row in _rows(conn, """SELECT record_id FROM audit_logs
+            WHERE module_name='visa_management' AND action_type='visa_letter_extraction_retired'
+              AND json_extract(new_value,'$.visa_case_id')=?""", (case_id,))
+    }
+
+
+def active_letter_extractions(conn, case_id):
+    from visa_document_lifecycle import active_documents
+
+    active_ids = {doc["id"] for doc in active_documents(conn, case_id)}
+    retired_ids = _retired_extraction_ids(conn, case_id)
+    rows = _rows(conn, """SELECT * FROM visa_letter_extractions
+        WHERE visa_case_id=? ORDER BY id DESC""", (case_id,))
+    return [row for row in rows if row["document_id"] in active_ids and row["id"] not in retired_ids]
+
+
+def retire_letter_extraction(conn, case_id, extraction_id, *, reason, occurred_at):
+    case = _case(conn, case_id)
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("A retirement reason is required")
+    with _atomic(conn):
+        extraction = _row(conn, "SELECT * FROM visa_letter_extractions WHERE id=? AND visa_case_id=?", (extraction_id, case_id))
+        if not extraction:
+            raise ValueError("Extraction does not belong to this case")
+        if extraction_id in _retired_extraction_ids(conn, case_id):
+            return
+        if (_row(conn, "SELECT 1 FROM visa_letter_reviews WHERE extraction_id=?", (extraction_id,))
+                or _row(conn, "SELECT 1 FROM visa_case_confirmed_decisions WHERE extraction_id=?", (extraction_id,))):
+            raise ValueError("A reviewed extraction requires the decision correction workflow")
+        conn.execute("""INSERT INTO audit_logs(
+            username,action_type,module_name,record_id,student_id,old_value,new_value,created_at
+            ) VALUES('Codex','visa_letter_extraction_retired','visa_management',?,?,?,?,?)""",
+            (str(extraction_id), case["student_id"], _json(extraction),
+             _json({"visa_case_id": case_id, "extraction_id": extraction_id, "reason": reason}), occurred_at))
+
+
 def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occurred_at):
     """Append a staff review, then decide through canonical authority atomically.
 
@@ -305,6 +347,8 @@ def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occur
     extraction = _row(conn, 'SELECT * FROM visa_letter_extractions WHERE id=? AND visa_case_id=?', (extraction_id, case_id))
     if extraction is None:
         raise ValueError('Extraction does not belong to this case')
+    if extraction_id in _retired_extraction_ids(conn, case_id):
+        raise ValueError('This letter extraction was retired and cannot be confirmed')
     document = _document(conn, case_id, extraction['document_id'])
     allowed = set(propose_letter('').keys())
     if not isinstance(values, dict) or set(values) - allowed:

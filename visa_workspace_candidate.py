@@ -90,7 +90,22 @@ class VisaWorkspaceCandidateMixin:
             check_upload(conn,int(case['id']),hashlib.sha256(data).hexdigest(),category,
                          read_bytes=lambda d:self._visa_document_path(case,d).read_bytes(),exclude_source_id=exclude_source_id)
 
-    def _visa_result_type(self, item, filename, data):
+    @staticmethod
+    def _visa_batch_letter_kind(text):
+        from visa_documents_candidate import propose_letter
+
+        kind = propose_letter(text)['document_kind']
+        headings = {
+            'grant': r'(?:immi )?(?:visa )?grant notification|notification of (?:a |the )?(?:visa )?grant',
+            'refusal': r'(?:immi )?(?:visa )?refusal notification|notification of (?:a |the )?refusal|decision to refuse',
+        }
+        if kind in headings and not re.search(
+            rf'^\s*(?:{headings[kind]})\b', text, re.IGNORECASE | re.MULTILINE
+        ):
+            return 'unknown'
+        return kind
+
+    def _visa_result_type(self, item, filename, data, *, batch=False):
         from visa_documents_candidate import propose_letter
         from visa_document_lifecycle import KIND_CATEGORY
         from pypdf.errors import PdfReadError
@@ -98,33 +113,49 @@ class VisaWorkspaceCandidateMixin:
         if self.visa_material_item_title(item).strip().lower() == 'draft':
             return 'other'
         selected=self.visa_lodgement_file_type_from_material_item(item,filename)
+        title = self.visa_material_item_title(item).lower()
+        is_result_slot = 'grant' in title and 'refusal' in title
+        if batch and not is_result_slot:
+            return selected
         text=''
         try:
             if Path(filename).suffix.lower()=='.txt':text=data.decode('utf-8')
             elif Path(filename).suffix.lower()=='.pdf':
                 g=self._visa_runtime();text='\n'.join(p.extract_text() or '' for p in g['PdfReader'](g['io'].BytesIO(data)).pages)
         except (PdfReadError,ValueError,OSError,UnicodeError):pass
-        kind=propose_letter(text)['document_kind']
+        kind = self._visa_batch_letter_kind(text) if batch else propose_letter(text)['document_kind']
         if kind=='medical' and not re.search(r'health examination|medical examination|examination request',text,re.I):kind='unknown'
         detected=KIND_CATEGORY.get(kind)
-        title=self.visa_material_item_title(item).lower()
-        return (detected or selected) if ('grant' in title and 'refusal' in title) or selected=='other' else selected
+        return (detected or selected) if is_result_slot or selected == 'other' else selected
 
-    def visa_material_batch_review_html(self,student_id,case,documents):
-        self._visa_batch_case=dict(case)
-        return super().visa_material_batch_review_html(student_id,case,documents)
+    def _visa_batch_suggestion(self, case, document, available_items):
+        filename = document['original_name']
+        suggestion = self.suggest_visa_material_item_for_filename(filename, available_items)
+        if suggestion['item_id'] and suggestion['confidence'] in {'High', 'Medium'}:
+            if suggestion['item_title'] != 'IMMI Grant Letter / IMMI Refusal Letter':
+                return suggestion
+        if 'target item is not in current checklist' in suggestion['matched_reason'] or (
+            suggestion['matched_reason'] == 'No unique matching academic checklist item'
+        ):
+            return suggestion
 
-    def _visa_batch_suggestion(self,case,document,available_items):
-        from visa_documents_candidate import propose_letter
-        text=self._visa_read_text(dict(case),dict(document));kind=propose_letter(text)['document_kind']
-        names={'grant':('IMMI Grant Letter / IMMI Refusal Letter',),'refusal':('IMMI Grant Letter / IMMI Refusal Letter',),'lodgement_receipt':('IMMI Acknowledgment Letter',),'medical':('Health Examination',)}
-        reliable = kind != 'medical' or bool(re.search(r'health examination|medical examination|examination request',text,re.I))
-        if kind in names and reliable:
-            item=self.visa_material_find_available_item(available_items,*names[kind])
-            if item:return self.visa_material_batch_suggestion(item,'High','Recognized official document content')
-        if self.visa_case_active_tab()=='visa_result' or getattr(self,'form',{}).get('return_tab')=='visa_result':
-            return self.visa_material_batch_suggestion(None,'Unmatched','Manual confirmation required; no reliable document content')
-        return self.suggest_visa_material_item_for_filename(document['original_name'],available_items)
+        text = self._visa_read_text(dict(case), dict(document))
+        kind = self._visa_batch_letter_kind(text)
+        names = {
+            'grant': ('IMMI Grant Letter / IMMI Refusal Letter',),
+            'refusal': ('IMMI Grant Letter / IMMI Refusal Letter',),
+            'lodgement_receipt': ('IMMI Acknowledgment Letter', 'IMMI Acknowledgement Letter'),
+            'medical': ('Health Examination',),
+        }
+        if kind == 'medical' and not re.search(r'health examination|medical examination|examination request', text, re.I):
+            kind = 'unknown'
+        if kind in names:
+            item = self.visa_material_find_available_item(available_items, *names[kind])
+            if item:
+                return self.visa_material_batch_suggestion(item, 'High', 'Recognized official document content')
+        if suggestion['item_title'] == 'IMMI Grant Letter / IMMI Refusal Letter':
+            return self.visa_material_batch_suggestion(None, 'Low', 'Official decision requires manual confirmation')
+        return suggestion
 
     def _visa_runtime(self):
         # Use the actual legacy method globals without importing app at module load.
@@ -477,9 +508,9 @@ class VisaWorkspaceCandidateMixin:
                     from visa_document_lifecycle import case_projection
                     processing=case_projection(conn,int(case_id),read_text=lambda d:self._visa_read_text(dict(case),d))['processing']
         submitted=[dict(d) for d in db.all('SELECT * FROM visa_immi_submissions WHERE visa_case_id=? ORDER BY id DESC',(case_id,))]
-        from visa_document_lifecycle import active_documents
-        with db.transaction() as conn:active_ids={d.get('id') for d in active_documents(conn,int(case_id))}
-        extractions=[dict(d) for d in db.all('SELECT * FROM visa_letter_extractions WHERE visa_case_id=? ORDER BY id DESC',(case_id,)) if d['document_id'] in active_ids]
+        from visa_documents_candidate import active_letter_extractions
+        with db.transaction() as conn:
+            extractions = active_letter_extractions(conn, int(case_id))
         for extraction in extractions:
             source=next((doc for doc in documents if doc['id']==extraction['document_id']),None)
             extraction['document_label']=f"{source.get('display_name') or source['original_name']} · Version {source['version']}" if source else f"Document #{extraction['document_id']}"
@@ -595,20 +626,24 @@ class VisaWorkspaceCandidateMixin:
         archived={r['student_document_id'] for r in db.all('SELECT student_document_id FROM visa_case_documents WHERE visa_case_id=? AND archived_at IS NOT NULL',(case_id,))}
         return [row for row in rows if row['id'] not in archived]
 
-    def _visa_register_uploaded_document(self,case,document_id):
+    def _visa_register_uploaded_document(self,case,document_id,*,connection=None,extract_letter=True):
+        from contextlib import nullcontext
         g=self._visa_runtime();db=g['db']
-        if not db.one("SELECT 1 FROM sqlite_master WHERE name='visa_case_documents'"):return
-        raw=db.one('SELECT * FROM student_documents WHERE id=? AND student_id=?',(document_id,case['student_id']))
+        read_one = db.one if connection is None else lambda sql, params=(): connection.execute(sql, params).fetchone()
+        if not read_one("SELECT 1 FROM sqlite_master WHERE name='visa_case_documents'"):return
+        raw=read_one('SELECT * FROM student_documents WHERE id=? AND student_id=?',(document_id,case['student_id']))
         if not raw:return
         from visa_documents_candidate import register_document,save_extraction
         from visa_document_metadata import LEGACY
         path=self._visa_document_path(dict(case),dict(raw));data=path.read_bytes()
-        with db.transaction() as conn:
+        with (db.transaction() if connection is None else nullcontext(connection)) as conn:
             doc=register_document(conn,int(case['id']),student_document_id=int(document_id),file_path=str(path),original_name=raw['original_name'],version=int(dict(raw).get('version') or 1),sha256=hashlib.sha256(data).hexdigest(),category=LEGACY.get(dict(raw).get('document_type'),'other'),actor_user_id=self.user['id'],occurred_at=g['now_iso']())
+            if not extract_letter:
+                return
             # Keep the prepared file registered without extracting an official result from Draft answers.
-            if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_case_document_links'"):
+            if read_one("SELECT 1 FROM sqlite_master WHERE name='visa_case_document_links'"):
                 link_document = self.visa_material_link_document_expr('l')
-                draft = db.one(f"""SELECT 1 FROM visa_case_document_links l
+                draft = read_one(f"""SELECT 1 FROM visa_case_document_links l
                     WHERE l.visa_case_id=? AND {link_document}=?
                       AND l.document_category='Visa Result / S56' AND l.document_type='Draft'
                       AND l.used_in_this_case=1 AND COALESCE(l.status,'Linked')='Linked'""",

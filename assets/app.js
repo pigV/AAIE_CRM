@@ -1004,28 +1004,49 @@
     syncFeatureTags();
   });
 
-  qa("[data-reminder-toast-close]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const toast = button.closest("[data-reminder-toast]");
-      if (toast) toast.hidden = true;
-    });
-  });
+  const reminderQuietCookie = q("[data-reminder-sync-enabled]")?.dataset.reminderSyncEnabled;
+  const reminderToastChannel = reminderQuietCookie && typeof BroadcastChannel === "function"
+    ? new BroadcastChannel(reminderQuietCookie)
+    : null;
+  const reminderQuietDuration = 2 * 60 * 60 * 1000;
+  let reminderQuietUntil = 0;
+  let reminderQuietTimer;
+  let reminderToastSyncing = null;
+  let reminderToastSyncGeneration = 0;
+
+  const reminderQuietRemaining = () => {
+    const prefix = reminderQuietCookie + "=";
+    const cookie = document.cookie.split("; ").find((item) => item.startsWith(prefix));
+    const expiry = cookie?.slice(prefix.length);
+    const storedUntil = /^\d{1,13}$/.test(expiry || "") ? Number(expiry) : 0;
+    return Math.max(storedUntil, reminderQuietUntil) - Date.now();
+  };
+
+  const suppressQuietReminderToast = () => {
+    const remaining = reminderQuietRemaining();
+    clearTimeout(reminderQuietTimer);
+    if (remaining <= 0) return false;
+    q("[data-reminder-toast]")?.remove();
+    reminderQuietTimer = setTimeout(() => syncReminderToast(true), Math.min(remaining, reminderQuietDuration));
+    return true;
+  };
+
   document.addEventListener("click", (event) => {
     const button = event.target.closest?.("[data-reminder-toast-close]");
     if (!button) return;
     const toast = button.closest("[data-reminder-toast]");
-    if (toast) toast.hidden = true;
+    if (!toast) return;
+    toast.remove();
+    if (!reminderQuietCookie) return;
+    reminderQuietUntil = Date.now() + reminderQuietDuration;
+    const secure = window.location.protocol === "https:" ? "; Secure" : "";
+    document.cookie = reminderQuietCookie + "=" + reminderQuietUntil + "; Path=/; SameSite=Lax; Max-Age=7200" + secure;
+    suppressQuietReminderToast();
+    reminderToastChannel?.postMessage({ type: "quiet", until: reminderQuietUntil });
   });
 
-  const reminderSyncEnabled = Boolean(q("[data-reminder-sync-enabled]"));
-  const reminderToastChannel = reminderSyncEnabled && typeof BroadcastChannel === "function"
-    ? new BroadcastChannel("aaie-reminder-actionable-v1")
-    : null;
-  let reminderToastSyncing = null;
-  let reminderToastSyncGeneration = 0;
-
   const applyReminderToastState = (state) => {
-    if (!state?.ok) return;
+    if (!state?.ok || suppressQuietReminderToast()) return;
     const current = q("[data-reminder-toast]");
     const template = document.createElement("template");
     template.innerHTML = String(state.toast_html || "").trim();
@@ -1051,6 +1072,7 @@
   };
 
   const syncReminderToast = (force = false) => {
+    if (suppressQuietReminderToast()) return Promise.resolve(null);
     if (!force && reminderToastSyncing) return reminderToastSyncing;
     const generation = ++reminderToastSyncGeneration;
     let request = null;
@@ -1067,8 +1089,13 @@
     return request;
   };
 
-  if (reminderSyncEnabled) {
-    reminderToastChannel?.addEventListener("message", () => syncReminderToast());
+  if (reminderQuietCookie) {
+    reminderToastChannel?.addEventListener("message", ({ data }) => {
+      if (data?.type === "quiet" && Number.isSafeInteger(data.until)) {
+        reminderQuietUntil = Math.max(reminderQuietUntil, data.until);
+      }
+      syncReminderToast();
+    });
     window.addEventListener("pageshow", () => syncReminderToast());
     window.addEventListener("focus", () => syncReminderToast());
     document.addEventListener("visibilitychange", () => {
