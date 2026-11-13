@@ -18419,7 +18419,7 @@ class CoreTests(unittest.TestCase):
                 self.assertIn('href="/reminders"', page_html)
                 self.assertIn("自动提醒规则只读取 CRM 数据库字段", page_html)
                 self.assertEqual(page_html.count(">已生效</span>"), 4)
-                self.assertIn("目前仅记录重复间隔", page_html)
+                self.assertIn("关闭或打开待签弹窗后，按此间隔再次提醒。", page_html)
                 self.assertIn("当前只使用第一个天数", page_html)
                 self.assertIn("当前仅保存设置，尚未接入自动生成", page_html)
                 self.assertIn("面试提醒 MVP 通过自定义提醒创建", page_html)

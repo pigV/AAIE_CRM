@@ -7,6 +7,29 @@ from datetime import datetime
 from typing import Any, Iterable
 
 
+CONTRACT_SIGNED_SQL = """(
+    lower(trim(c.contract_status)) IN ('signed','parentsigned','fullyexecuted')
+    OR trim(COALESCE(c.signed_at,'')) <> ''
+    OR trim(COALESCE(c.fully_executed_at,'')) <> ''
+    OR trim(COALESCE(c.signed_file_path,'')) <> ''
+    OR trim(COALESCE(c.final_signed_file_path,'')) <> ''
+    OR EXISTS (SELECT 1 FROM contract_signatures cs
+               WHERE cs.contract_id=c.id AND cs.status='signed')
+)"""
+
+CONTRACT_WAITING_SQL = f"""(
+    lower(trim(c.contract_status)) IN ('sent','published')
+    AND c.deleted_at IS NULL AND c.voided_at IS NULL
+    AND NOT {CONTRACT_SIGNED_SQL}
+)"""
+
+SILENT_CONTRACT_ARCHIVE_SQL = """(
+    reminder_type='contract.completed' AND COALESCE(source_type,'')='business_event:contract'
+    AND CASE WHEN json_valid(notes)
+             THEN COALESCE(json_extract(notes,'$.metadata.silent_archive'),0)
+             ELSE 0 END = 1
+)"""
+
 TERMINAL_STATUSES = frozenset({"Completed", "Dismissed", "Cancelled"})
 
 
@@ -112,6 +135,21 @@ def create_from_event(database, payload: dict[str, Any]) -> dict[str, Any]:
     due_date = str(payload.get("due_date") or due_datetime[:10])
 
     with database.transaction() as connection:
+        if source_type == "contract" and reminder_type == "contract_sent":
+            existing = connection.execute(
+                """SELECT * FROM reminders
+                   WHERE source_type='contract' AND source_record_id=?
+                     AND reminder_type='contract_sent' AND auto_generated=1
+                   ORDER BY id LIMIT 1""",
+                (source_record_id,),
+            ).fetchone()
+            if existing is not None:
+                return {**_row_dict(existing), "_created": False}
+            if not connection.execute(
+                f"SELECT 1 FROM contracts c WHERE c.id=? AND {CONTRACT_WAITING_SQL}",
+                (source_record_id,),
+            ).fetchone():
+                return {"_created": False}
         if not _has_canonical_schema(connection):
             return _create_from_event_legacy(connection, payload)
         created = False
@@ -321,7 +359,7 @@ def mark_opened(database, reminder_id: int, actor_id: int, now: str) -> dict[str
         return _row_dict(_require_row(connection, reminder_id))
 
 
-def list_actionable(database, user, now: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+def list_actionable(database, user, now: str | None = None, limit: int = 50, *, validate_contracts: bool = False) -> list[dict[str, Any]]:
     now = now or datetime.now().astimezone().isoformat(timespec="seconds")
     params: list[Any] = [now, now]
     where = [
@@ -329,6 +367,22 @@ def list_actionable(database, user, now: str | None = None, limit: int = 50) -> 
         "(status<>'Snoozed' OR COALESCE(snooze_until,'')<=?)",
         "COALESCE(reminder_datetime,due_datetime,due_date)<=?",
     ]
+    if validate_contracts:
+        where.extend([
+            "reminder_type<>'contract.signed'",
+            f"NOT {SILENT_CONTRACT_ARCHIVE_SQL}",
+            f"""(reminder_type<>'contract_sent' OR COALESCE(source_type,'')<>'contract'
+                 OR EXISTS (SELECT 1 FROM contracts c
+                            WHERE c.id=CAST(reminders.source_record_id AS INTEGER)
+                              AND {CONTRACT_WAITING_SQL}
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM reminders completed
+                                  WHERE completed.source_type='contract'
+                                    AND completed.reminder_type='contract_sent'
+                                    AND completed.source_record_id=reminders.source_record_id
+                                    AND completed.status='Completed'
+                              )))""",
+        ])
     if user and str(user.get("role_name") or "") not in {"Admin", "Manager"}:
         where.append("(assigned_to_user_id=? OR created_by=?)")
         params.extend([user.get("id"), user.get("id")])

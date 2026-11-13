@@ -4,7 +4,7 @@ import json
 import re
 from datetime import datetime
 
-from reminder_center import create_from_event
+from reminder_center import SILENT_CONTRACT_ARCHIVE_SQL, create_from_event
 
 
 SUPPORTED_EVENT_TYPES = frozenset({
@@ -90,6 +90,9 @@ def emit_business_event(
         canonical_event_type = "contract.parent_engaged"
         dedupe_key = f"contract:{contract_id}:parent_engaged:{link_id}"
         source_record_id = dedupe_key
+    if entity_type == "contract" and event_type == "contract.signed":
+        dedupe_key = f"contract:{entity_id}:signed"
+        source_record_id = dedupe_key
     notes = json.dumps(
         {
             "event_type": event_type,
@@ -131,20 +134,28 @@ def emit_business_event(
     })
 
 
-def business_event_notifications(database, since, limit=60, now=None):
+def business_event_notifications(database, since, limit=60, now=None, *, include_contract_signed=False):
     """Return adapter-backed reminders in the existing live-toast shape."""
     rows = database.all(
-        """SELECT id,student_id,reminder_type,title,description,created_at,
+        f"""SELECT id,student_id,reminder_type,title,description,created_at,
                   suggested_action,notes,status
              FROM reminders
             WHERE source_type LIKE 'business_event:%'
+              AND (reminder_type<>'contract.signed' OR (
+                  source_record_id='contract:' || related_record_id || ':signed' AND ?
+              ))
+              AND NOT {SILENT_CONTRACT_ARCHIVE_SQL}
               AND created_at>?
               AND status NOT IN ('Completed','Dismissed','Cancelled')
               AND (status<>'Snoozed' OR COALESCE(snooze_until,'')<=?)
             ORDER BY created_at ASC,id ASC
             LIMIT ?""",
-        (since, str(now or datetime.now().astimezone().isoformat()), int(limit)),
+        (include_contract_signed, since, str(now or datetime.now().astimezone().isoformat()), int(limit)),
     )
+    return _notification_events(rows)
+
+
+def _notification_events(rows):
     events = []
     for row in rows:
         try:

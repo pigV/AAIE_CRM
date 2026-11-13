@@ -1055,6 +1055,7 @@
       current?.remove();
       return;
     }
+    if (current && !current.hidden && current.isEqualNode(next)) return;
     if (current) current.replaceWith(next);
     else document.body.append(next);
   };
@@ -1137,6 +1138,10 @@
       if (!response.ok || data.ok === false) throw new Error(data.error || data.message || "操作失败");
       if (toast) toast.hidden = true;
       reminderToastChannel?.postMessage({ type: "refresh", reminderId });
+      if (data.redirect) {
+        window.location.assign(data.redirect);
+        return;
+      }
       await syncReminderToast(true);
     } catch (error) {
       const message = q("[data-reminder-toast-error]", toast || form);
@@ -1495,7 +1500,20 @@
       (events || []).forEach((event) => {
         if (!event?.id || seen.has(event.id)) return;
         seen.add(event.id);
-        showCrmToast(event);
+        if (event.type === "contract.signed") {
+          const key = "aaie-contract-signed:" + event.id;
+          const showOnce = () => {
+            try {
+              if (localStorage.getItem(key)) return;
+            } catch (_) {}
+            showCrmToast(event);
+            try { localStorage.setItem(key, "1"); } catch (_) {}
+          };
+          if (navigator.locks?.request) navigator.locks.request(key, showOnce).catch(showOnce);
+          else showOnce();
+        } else {
+          showCrmToast(event);
+        }
         if ((event.refresh || []).includes("contracts")) refreshContractsLive();
         if ((event.refresh || []).includes("school_plan")) refreshSchoolPlanDetail();
         if ((event.refresh || []).includes("visa_information_collection")) {
@@ -1506,7 +1524,7 @@
     };
 
     const poll = async () => {
-      if (polling) return;
+      if (polling || document.hidden) return;
       polling = true;
       try {
         const url = cursor ? `/api/parent-activity-notifications?since=${encodeURIComponent(cursor)}` : "/api/parent-activity-notifications";
@@ -1517,7 +1535,11 @@
         });
         if (!response.ok) return;
         const data = await response.json();
+        if (document.hidden) return;
         handleEvents(data.events || []);
+        if (q('[data-reminder-toast][data-reminder-type="contract_sent"]')) {
+          syncReminderToast();
+        }
         if (data.cursor) {
           cursor = data.cursor;
           try { sessionStorage.setItem(cursorKey, cursor); } catch (_) {}

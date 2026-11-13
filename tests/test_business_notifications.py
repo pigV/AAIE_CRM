@@ -218,7 +218,7 @@ class BusinessNotificationAdapterTests(unittest.TestCase):
         block = source.split("    def api_parent_activity_notifications(self, method):", 1)[1].split(
             "\n    def api_assistant_query", 1
         )[0]
-        self.assertIn("business_event_notifications(db, since)", block)
+        self.assertIn("include_contract_signed=can_view_contract_center(self.user)", block)
 
     def test_contract_boundaries_emit_all_required_standard_events(self):
         source = Path("app.py").read_text(encoding="utf-8")

@@ -203,6 +203,9 @@ from fields import DATE_FIELDS, FIELD_MAP, REQUIRED_FIELDS, SECTIONS, display_da
 from nas import STANDARD_FOLDERS, NasManager, NasSafetyError, ensure_within, sanitize_component
 from notification_adapter import business_event_notifications, emit_business_event
 from reminder_center import (
+    CONTRACT_SIGNED_SQL,
+    CONTRACT_WAITING_SQL,
+    SILENT_CONTRACT_ARCHIVE_SQL,
     canonical_dedupe_key,
     complete as complete_canonical_reminder,
     create_from_event as create_canonical_reminder,
@@ -10955,7 +10958,7 @@ def emit_contract_business_event(
         "contract.created": "合同已创建",
         "contract.opened": "家长已打开合同链接",
         "contract.viewed": "家长已查看合同",
-        "contract.signed": "家长已签署合同",
+        "contract.signed": "家长合同已签署",
         "contract.completed": "合同已完成并归档",
         "contract.expired": "合同签署链接已过期",
     }
@@ -11098,7 +11101,7 @@ def create_auto_reminder(payload):
     source_record_id = str(payload.get("source_record_id") or "")
     reminder_type = payload.get("reminder_type")
     reminder_datetime = payload.get("reminder_datetime") or payload.get("due_datetime") or now_iso()
-    if not canonical_reminder_schema_available():
+    if not canonical_reminder_schema_available() and reminder_type != "contract_sent":
         if active_reminder_exists(
             source_type, source_record_id, reminder_type, reminder_datetime
         ):
@@ -11122,7 +11125,11 @@ def create_auto_reminder(payload):
         )
         return reminder_id
     identity_parts = ["auto", source_type, source_record_id, reminder_type]
-    if not source_record_id.endswith(":missing_expiry") and not str(reminder_type).endswith("_missing_expiry"):
+    if (
+        reminder_type != "contract_sent"
+        and not source_record_id.endswith(":missing_expiry")
+        and not str(reminder_type).endswith("_missing_expiry")
+    ):
         identity_parts.append(reminder_datetime)
     result = create_canonical_reminder(db, {
         **payload,
@@ -11179,8 +11186,64 @@ def close_related_auto_reminders(reminder_id, status, user_id=None, note=""):
         )
 
 
+def resolve_signed_contract_waiting_reminders(timestamp, contract_id=None):
+    db.execute(
+        f"""UPDATE reminders SET status='Completed',completed_at=?,updated_at=?,snooze_until=NULL
+            WHERE reminder_type='contract_sent' AND source_type='contract'
+              AND status NOT IN ('Completed','Dismissed','Cancelled')
+              AND (? IS NULL OR source_record_id=CAST(? AS TEXT))
+              AND EXISTS (
+                  SELECT 1 FROM contracts c
+                  WHERE c.id=CAST(reminders.source_record_id AS INTEGER) AND {CONTRACT_SIGNED_SQL}
+              )""",
+        (timestamp, timestamp, contract_id, contract_id),
+    )
+
+
+def notify_recorded_contract_signature(previous, stamp):
+    contract_id = previous["id"]
+    resolve_signed_contract_waiting_reminders(stamp, contract_id)
+    previous_status = normalize_contract_status(previous["contract_status"])
+    if not previous["student_id"] or previous_status in {"ParentSigned", "FullyExecuted"}:
+        return
+    if any(previous[field] for field in ("signed_at", "fully_executed_at", "signed_file_path", "final_signed_file_path")):
+        return
+    if db.one("SELECT 1 FROM contract_signatures WHERE contract_id=? AND status='signed' LIMIT 1", (contract_id,)):
+        return
+    student_id = previous["student_id"]
+    reference = previous["contract_uid"] or f"CONTRACT-{contract_id}"
+    emit_business_event(
+        db, event_type="contract.signed", student_id=student_id, entity_type="contract",
+        entity_id=contract_id, occurred_at=stamp, actor_type="staff",
+        idempotency_key=f"contract:{contract_id}:signed", title="家长合同已签署",
+        message=f"家长合同已签署：学生 {student_id} / {reference}",
+        href=f"/students/{quote(str(student_id))}?tab=contracts#contracts-section",
+    )
+
+
+def defer_contract_waiting_reminder(row, user_id, now_value):
+    if row["reminder_type"] != "contract_sent" or row["source_type"] != "contract":
+        return None
+    configured = db.setting("reminder_contract_repeat_every_days", "2")
+    try:
+        repeat_days = min(3650, max(1, int(configured)))
+    except (ValueError, TypeError):
+        repeat_days = 2
+    stamp = now_value.isoformat()
+    until = (now_value + timedelta(days=repeat_days)).isoformat()
+    with db.transaction() as connection:
+        cursor = connection.execute(
+            """UPDATE reminders SET status='Snoozed',snooze_until=?,updated_by=?,updated_at=?
+               WHERE reminder_type='contract_sent' AND source_type='contract'
+                 AND source_record_id=? AND status NOT IN ('Completed','Dismissed','Cancelled')""",
+            (until, user_id, stamp, row["source_record_id"]),
+        )
+        return {"_changed": cursor.rowcount > 0, "status": "Snoozed"}
+
+
 def resolve_completed_auto_reminders():
     timestamp = now_iso()
+    resolve_signed_contract_waiting_reminders(timestamp)
     completed_statuses = ("Completed", "Dismissed", "Cancelled")
     status_clause = ",".join("?" for _ in completed_statuses)
     params = [timestamp, timestamp, *completed_statuses]
@@ -11258,9 +11321,14 @@ def run_reminder_engine():
     if bool_setting("reminder_contract_enabled", True):
         days_after = int(db.setting("reminder_contract_days_after_sent", "3") or 3)
         for row in db.all(
-            """SELECT c.*,s.passport_first_name,s.passport_last_name,s.consultant_id
-               FROM contracts c LEFT JOIN students s ON s.student_id=c.student_id
-               WHERE c.contract_status='Sent' AND c.student_id IS NOT NULL"""
+            f"""SELECT c.*,s.passport_first_name,s.passport_last_name,s.consultant_id
+                FROM contracts c LEFT JOIN students s ON s.student_id=c.student_id
+                WHERE c.student_id IS NOT NULL AND {CONTRACT_WAITING_SQL}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM reminders r WHERE r.source_type='contract'
+                        AND r.source_record_id=CAST(c.id AS TEXT)
+                        AND r.reminder_type='contract_sent' AND r.auto_generated=1
+                  )"""
         ):
             if not reminder_source_on_or_after_baseline(row, "updated_at", "generated_at", "contract_date"):
                 continue
@@ -27500,7 +27568,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/content/staging/(\d+)$", self.content_staging_detail),
                 (r"^/reminders$", self.reminders),
                 (r"^/reminders/settings$", self.reminder_settings),
-                (r"^/reminders/(\d+)/(complete|dismiss|snooze|cancel|copy-to-mine|open)$", self.reminder_action),
+                (r"^/reminders/(\d+)/(complete|dismiss|snooze|cancel|copy-to-mine|open|defer)$", self.reminder_action),
                 (r"^/students$", self.students),
                 (r"^/students/external-transfer/new$", self.student_external_intake),
                 (r"^/students/external-progression/new$", self.student_external_intake),
@@ -27964,7 +28032,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 return ""
         try:
             rows = actionable_rows if actionable_rows is not None else list_actionable_canonical_reminders(
-                db, self.user, limit=50
+                db, self.user, limit=50, validate_contracts=True
             )
         except Exception:
             return ""
@@ -27978,12 +28046,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         related_link = reminder_related_link(row) or "/reminders"
         count = len(rows)
         count_text = f"还有 {count - 1} 条待处理提醒" if count > 1 else "当前只有这一条待处理提醒"
+        waiting_contract = row.get("reminder_type") == "contract_sent" and row.get("source_type") == "contract"
+        if waiting_contract:
+            close_form = f'''<form method="post" action="/reminders/{row["id"]}/defer" data-reminder-toast-action>
+              <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+              <button class="icon-button" aria-label="关闭提醒弹窗">×</button>
+            </form>'''
+        else:
+            close_form = '<button type="button" class="icon-button" data-reminder-toast-close aria-label="关闭提醒弹窗">×</button>'
         return f"""
-        <aside class="global-reminder-toast reminder-status-{esc(effective.lower())}" data-reminder-toast data-reminder-id="{esc(row['id'])}" data-reminder-event-id="{esc(row['source_event_id'] or row['source_record_id'] or row['id'])}" role="alert" aria-live="assertive">
+        <aside class="global-reminder-toast reminder-status-{esc(effective.lower())}" data-reminder-toast data-reminder-id="{esc(row['id'])}" data-reminder-type="{esc(row.get('reminder_type') or '')}" data-reminder-event-id="{esc(row['source_event_id'] or row['source_record_id'] or row['id'])}" role="alert" aria-live="assertive">
           <div class="global-reminder-accent"></div>
           <div class="global-reminder-head">
             <span class="status {esc(effective.lower())}">{esc(reminder_status_label(effective))}</span>
-            <button type="button" class="icon-button" data-reminder-toast-close aria-label="关闭提醒弹窗">×</button>
+            {close_form}
           </div>
           <h2>{esc(row["title"] or reminder_type_label(row["reminder_type"]))}</h2>
           <p>{esc(description)}</p>
@@ -31169,15 +31245,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.json_response({"ok": False, "error": "login_required"}, HTTPStatus.UNAUTHORIZED)
         since = str((self.query.get("since") or [""])[0]).strip()
         latest = self.parent_activity_latest_cursor()
-        if not since:
-            return self.json_response({"ok": True, "events": [], "cursor": latest})
         events = (
             self.parent_activity_contract_events(since)
             + self.parent_activity_school_plan_events(since)
             + self.parent_activity_visa_information_events(since)
             + parent_form_activity_notifications(db, since)
-            + business_event_notifications(db, since)
-        )
+            + business_event_notifications(
+                db, since, include_contract_signed=can_view_contract_center(self.user)
+            )
+        ) if since else []
         events.sort(key=lambda item: (item.get("event_at") or "", item.get("id") or ""))
         events = events[:40]
         cursor = max([latest] + [event.get("event_at") or "" for event in events])
@@ -31191,7 +31267,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
         if not can_reminder_action(self.user, "view"):
             return self.deny_module_access("reminders", "无权限查看提醒。")
-        rows = list_actionable_canonical_reminders(db, self.user, limit=50)
+        rows = list_actionable_canonical_reminders(db, self.user, limit=50, validate_contracts=True)
         return self.json_response({
             "ok": True,
             "reminder_ids": [row["id"] for row in rows],
@@ -40635,7 +40711,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         body = f"""
         <div data-live-school-plan-detail>
         <section class="dashboard-hero panel">
-          <div><span class="eyebrow">学校方案报告详情</span><h2>{esc(self.school_plan_student_name(student))} · v{esc(report['report_version'])}</h2><p>{esc(school_report_title_label(report['report_title']))} · {esc(display_datetime(report['created_at']))}</p></div>
+          <div><span class="eyebrow">学校方案报告详情</span><h2><a class="student-name-link" href="{esc('/students/' + quote(str(report['student_id']), safe=''))}">{esc(self.school_plan_student_name(student))}</a> · v{esc(report['report_version'])}</h2><p>{esc(school_report_title_label(report['report_title']))} · {esc(display_datetime(report['created_at']))}</p></div>
           <div class="dashboard-actions"><a class="secondary button-link" href="/school-plan-reports">返回列表</a><a class="primary button-link" href="/school-plan-reports/create?student_id={quote(report['student_id'])}">创建新版本</a>{pdf_actions}</div>
         </section>
         <section class="metrics dashboard-metrics">
@@ -53895,13 +53971,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def reminder_query_rows(self):
         return db.all(
-            """SELECT r.*,s.passport_first_name,s.passport_last_name,
+            f"""SELECT r.*,s.passport_first_name,s.passport_last_name,
                       u.display_name assigned_name,creator.display_name created_by_name
                FROM reminders r
                LEFT JOIN students s ON s.student_id=r.student_id
                LEFT JOIN users u ON u.id=r.assigned_to_user_id
                LEFT JOIN users creator ON creator.id=r.created_by
               WHERE COALESCE(r.source_type,'')<>'student_followup_note_deleted'
+                 AND NOT {SILENT_CONTRACT_ARCHIVE_SQL}
                ORDER BY COALESCE(r.reminder_datetime,r.due_datetime,r.due_date) ASC, r.id DESC"""
         )
 
@@ -54082,7 +54159,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             for key, label in REMINDER_TABS
         )
         cards = "".join(self.reminder_card_html(row, effective) for row, effective in rows) or '<div class="empty">暂无提醒</div>'
-        popup = next(((row, effective) for row, effective in self.reminder_rows_for_user("today", base_rows) if effective in {"Due", "Overdue"}), None)
+        popup = next((
+            (row, effective) for row, effective in self.reminder_rows_for_user("today", base_rows)
+            if effective in {"Due", "Overdue"} and row["reminder_type"] not in {"contract.signed", "contract_sent"}
+        ), None)
         popup_html = ""
         if popup:
             row, effective = popup
@@ -54149,12 +54229,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if action == "open":
             stamp = now_iso()
             mark_opened_canonical_reminder(db, reminder_id, self.user["id"], stamp)
+            defer_contract_waiting_reminder(row, self.user["id"], parse_local_datetime(stamp))
             target = reminder_related_link(row) or "/reminders"
             db.audit(
                 self.user, "reminder_opened", "reminders", reminder_id,
                 old_value=row["status"], new_value=target, student_id=row["student_id"],
                 ip=self.client_address[0], device=self.headers.get("User-Agent"),
             )
+            if self.headers.get("X-Requested-With") == "fetch":
+                return self.json_response({"ok": True, "redirect": target})
             return self.redirect(target)
         if action == "copy-to-mine":
             if not can_reminder_action(self.user, "create"):
@@ -54216,6 +54299,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 close_related_auto_reminders(reminder_id, "Cancelled", self.user["id"], "Manually cancelled related automatic reminder.")
             result = {"status": "Cancelled" if changed else row["status"]}
             audit_action, msg = "reminder_cancelled", "提醒已取消。"
+        elif action == "defer":
+            result = defer_contract_waiting_reminder(row, self.user["id"], datetime.now().astimezone())
+            if result is None:
+                return self.error_page("未知提醒操作", 400)
+            changed = bool(result.pop("_changed", False))
+            audit_action, msg = "reminder_snoozed", "已稍后提醒。"
         elif action == "snooze":
             if not can_reminder_action(self.user, "complete"):
                 return self.deny_module_access("reminders")
@@ -54274,7 +54363,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         <section class="panel"><div class="panel-head"><div><h2>提醒规则设置</h2><p>自动提醒规则只读取 CRM 数据库字段，不扫描学生文件夹。</p></div><a class="secondary button-link" href="/reminders">返回提醒中心</a></div>
           <form method="post" class="settings-grid">
             <input type="hidden" name="csrf" value="{esc(self.csrf)}">
-            <div class="reminder-settings-section panel"><div class="reminder-settings-section-header"><h2>签约提醒</h2><span class="reminder-settings-note">已生效</span></div><label class="reminder-settings-enabled choice wide"><input type="checkbox" name="reminder_contract_enabled" value="true" {checked("reminder_contract_enabled")}><span>启用</span></label><label class="reminder-settings-field">发送后几天提醒<input name="reminder_contract_days_after_sent" value="{esc(db.setting("reminder_contract_days_after_sent", "3"))}"></label><label class="reminder-settings-field">每几天重复<input name="reminder_contract_repeat_every_days" value="{esc(db.setting("reminder_contract_repeat_every_days", "2"))}"><span class="reminder-settings-note">目前仅记录重复间隔，尚未接入重复调度。</span></label></div>
+            <div class="reminder-settings-section panel"><div class="reminder-settings-section-header"><h2>签约提醒</h2><span class="reminder-settings-note">已生效</span></div><label class="reminder-settings-enabled choice wide"><input type="checkbox" name="reminder_contract_enabled" value="true" {checked("reminder_contract_enabled")}><span>启用</span></label><label class="reminder-settings-field">发送后几天提醒<input name="reminder_contract_days_after_sent" value="{esc(db.setting("reminder_contract_days_after_sent", "3"))}"></label><label class="reminder-settings-field">每几天重复<input name="reminder_contract_repeat_every_days" value="{esc(db.setting("reminder_contract_repeat_every_days", "2"))}"><span class="reminder-settings-note">关闭或打开待签弹窗后，按此间隔再次提醒。</span></label></div>
             <div class="reminder-settings-section panel"><div class="reminder-settings-section-header"><h2>Offer 过期提醒</h2><span class="reminder-settings-note">已生效</span></div><label class="reminder-settings-enabled choice wide"><input type="checkbox" name="reminder_offer_enabled" value="true" {checked("reminder_offer_enabled")}><span>启用</span></label><label class="reminder-settings-field">到期前天数<input name="reminder_offer_days_before_expiry" value="{esc(db.setting("reminder_offer_days_before_expiry", "14,7,3,1"))}"></label></div>
             <div class="reminder-settings-section panel"><div class="reminder-settings-section-header"><h2>OSHC 到期提醒</h2><span class="reminder-settings-note">已生效</span></div><label class="reminder-settings-enabled choice wide"><input type="checkbox" name="reminder_oshc_enabled" value="true" {checked("reminder_oshc_enabled")}><span>启用</span></label><label class="reminder-settings-field">到期前天数<input name="reminder_oshc_days_before_expiry" value="{esc(db.setting("reminder_oshc_days_before_expiry", "30"))}"><span class="reminder-settings-note">当前只使用第一个天数。</span></label></div>
             <div class="reminder-settings-section panel"><div class="reminder-settings-section-header"><h2>签证到期提醒</h2><span class="reminder-settings-note">已生效</span></div><label class="reminder-settings-enabled choice wide"><input type="checkbox" name="reminder_visa_enabled" value="true" {checked("reminder_visa_enabled")}><span>启用</span></label><label class="reminder-settings-field">到期前天数<input name="reminder_visa_days_before_expiry" value="{esc(db.setting("reminder_visa_days_before_expiry", "180,90,30,14"))}"></label></div>
@@ -70308,17 +70397,21 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         (student_id,),
                     )
                 if latest_contract and doc_type == "SignedStudyAbroadContract":
+                    stamp = now_iso()
                     db.execute(
                         "UPDATE contracts SET signed_file_path=?,contract_status='ParentSigned',signed_at=?,updated_at=? WHERE id=?",
-                        (str(destination), now_iso(), now_iso(), latest_contract["id"]),
+                        (str(destination), stamp, stamp, latest_contract["id"]),
                     )
+                    notify_recorded_contract_signature(latest_contract, stamp)
                     db.audit(self.user, "parent_signed_contract_uploaded", "contracts", latest_contract["id"], file_path=str(destination), new_value=destination.name, student_id=student_id)
                 elif latest_contract and doc_type == "FinalSignedStudyAbroadContract":
                     db.execute(
                         "UPDATE contracts SET final_signed_file_path=?,contract_status='FullyExecuted',fully_executed_at=?,updated_at=? WHERE id=?",
                         (str(destination), now_iso(), now_iso(), latest_contract["id"]),
                     )
-                    record_contract_completion_fact(latest_contract["id"], now_iso(), self.user["id"])
+                    stamp = now_iso()
+                    notify_recorded_contract_signature(latest_contract, stamp)
+                    record_contract_completion_fact(latest_contract["id"], stamp, self.user["id"])
                     db.audit(self.user, "final_contract_uploaded", "contracts", latest_contract["id"], file_path=str(destination), new_value=destination.name, student_id=student_id)
             try:
                 upload_review_confirmation_coordinator.coordinate_confirmed_upload(
@@ -73145,7 +73238,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         db.execute("UPDATE contract_signatures SET confirmation_pdf_path=?,updated_at=? WHERE id=?", (str(target), now_iso(), signature_id))
         return target
 
-    def contract_signing_archive_documents(self, signature_id, user=None):
+    def contract_signing_archive_documents(self, signature_id, user=None, *, silent_archive=False):
         signature = db.one("SELECT * FROM contract_signatures WHERE id=?", (signature_id,))
         if not signature:
             raise ValueError("合同签署记录不存在。")
@@ -73263,6 +73356,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             {
                 "signature_id": signature_id,
                 "final_document_id": final_doc["document_id"],
+                "silent_archive": silent_archive,
             },
         )
         return {
@@ -73624,6 +73718,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                      AND deleted_at IS NULL AND voided_at IS NULL""",
                 (stamp, stamp, link["contract_id"]),
             )
+            resolve_signed_contract_waiting_reminders(stamp, link["contract_id"])
             emit_contract_business_event(
                 db.one("SELECT * FROM contracts WHERE id=?", (link["contract_id"],)),
                 event_type="contract.signed",
@@ -73632,7 +73727,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 event_key=f"signed:{signature_id}",
                 metadata={"signature_id": signature_id, "link_id": link["id"]},
             )
-            archive = self.contract_signing_archive_documents(signature_id, user=None)
+            archive = self.contract_signing_archive_documents(signature_id, user=None, silent_archive=True)
             self.contract_signing_mark_link_signed(link["id"], stamp, signature_id)
             self.contract_signing_record_log(
                 self.contract_signing_row_by_id(link["id"]),
@@ -73773,6 +73868,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "UPDATE contracts SET signed_file_path=?,contract_status='ParentSigned',signed_at=?,updated_at=? WHERE id=?",
             (str(target), now, now, contract_id),
         )
+        notify_recorded_contract_signature(contract, now)
         db.audit(
             self.user, "parent_signed_contract_uploaded", "contracts", contract_id, file_path=str(target),
             old_value=old_status, new_value=json.dumps({"new_status": "ParentSigned", "document_id": document_id}, ensure_ascii=False),
@@ -73799,6 +73895,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "UPDATE contracts SET contract_status=?,signed_at=COALESCE(?,signed_at),fully_executed_at=COALESCE(?,fully_executed_at),updated_at=? WHERE id=?",
             (status, now if status == "ParentSigned" else None, now if status == "FullyExecuted" else None, now, contract_id),
         )
+        if status in {"ParentSigned", "FullyExecuted"}:
+            notify_recorded_contract_signature(contract, now)
         if status == "FullyExecuted" and contract["student_id"]:
             record_contract_completion_fact(contract_id, now, self.user["id"])
         action = "contract_sent_status_marked" if status == "Sent" else ("contract_cancelled" if status == "Cancelled" else "contract_status_updated")
@@ -74453,10 +74551,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 str(target), version, target.stat().st_size, self.user["id"], now_iso(), "",
             ),
         )
+        stamp = now_iso()
         db.execute(
             "UPDATE contracts SET signed_file_path=?,contract_status='ParentSigned',signed_at=?,updated_at=? WHERE id=?",
-            (str(target), now_iso(), now_iso(), contract_id),
+            (str(target), stamp, stamp, contract_id),
         )
+        notify_recorded_contract_signature(contract, stamp)
         db.audit(self.user, "upload_signed", "contracts", contract_id, file_path=str(target), new_value=str(document_id))
         return self.flash_redirect(f"/students/{student_id}?tab=contracts", "已上传家长签署版合同，状态已更新为 ParentSigned")
 
@@ -74804,6 +74904,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "UPDATE contracts SET contract_status=?,signed_at=COALESCE(?,signed_at),fully_executed_at=COALESCE(?,fully_executed_at),updated_at=? WHERE id=? AND student_id=?",
             (status, signed_at, fully_executed_at, now_iso(), contract_id, student_id),
         )
+        if status in {"ParentSigned", "FullyExecuted"}:
+            notify_recorded_contract_signature(old, signed_at or fully_executed_at)
         if status == "FullyExecuted":
             record_contract_completion_fact(contract_id, fully_executed_at, self.user["id"])
         db.audit(self.user, "status_change", "contracts", contract_id, old_value=old["contract_status"], new_value=status)

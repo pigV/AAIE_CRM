@@ -234,7 +234,19 @@ class ParentSubmissionTests(ParentCompletionFixture):
     def test_submit_generates_full_pdf_and_reopen_downloads_same_bytes(self):
         self.prepare_submission()
         original=self.source.read_bytes()
+        waiting = app.create_auto_reminder({
+            "student_id": "SIGNTEST", "source_type": "contract", "source_record_id": self.cid,
+            "reminder_type": "contract_sent", "title": "家长合同待签署",
+            "due_datetime": app.now_iso(),
+        })
         self.h.contract_signing_submit('POST',self.token)
+        self.assertEqual(self.db.one("SELECT status FROM reminders WHERE id=?", (waiting,))["status"], "Completed")
+        from notification_adapter import business_event_notifications
+        notifications = business_event_notifications(
+            self.db, "2026-10-29T14:29:59+00:00", include_contract_signed=True
+        )
+        self.assertEqual([event["title"] for event in notifications], ["家长合同已签署"])
+        self.assertEqual(self.db.one("SELECT COUNT(*) n FROM reminders WHERE reminder_type='contract.completed'")["n"], 1)
         self.assertIn('下载完整合同 PDF',self.output.get('html',''))
         contract=self.db.one('SELECT * FROM contracts WHERE id=?',(self.cid,))
         self.assertEqual(contract['contract_status'],'FullyExecuted')
