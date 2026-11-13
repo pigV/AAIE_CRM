@@ -14,6 +14,10 @@ import sys
 import uuid
 
 
+_DATA_MOUNT = Path('/Volumes/Data')
+_PRODUCTION_REVENUE_ROOT = _DATA_MOUNT / 'AAIE_CRM/runtime/production/revenue_documents'
+
+
 class StorageUnavailable(ValueError):
     message = '安全文件存储未配置或不满足权限要求，操作已停止。'
     def __init__(self):
@@ -87,8 +91,14 @@ def _directory(fd, *, managed=False, writable_mount=False):
 @contextmanager
 def _open_directory(value, *, create=False, writable_mount=None):
     path = _path(value)
-    if writable_mount is not None and writable_mount != Path("/Volumes/Data"):
+    if writable_mount is not None and writable_mount != _DATA_MOUNT:
         raise StorageUnavailable()
+    private_root = None
+    if writable_mount is None and path.is_relative_to(_PRODUCTION_REVENUE_ROOT):
+        # The Data volume is shared. Only the existing private Revenue root
+        # may anchor this exception, and it must pass the managed checks.
+        writable_mount = _DATA_MOUNT
+        private_root = _PRODUCTION_REVENUE_ROOT
     fd = -1
     try:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -100,12 +110,14 @@ def _open_directory(value, *, create=False, writable_mount=None):
             try:
                 child = os.open(part, flags, dir_fd=fd)
             except FileNotFoundError:
-                if not create: raise
+                if not create or (private_root is not None and
+                                  (current == private_root or not current.is_relative_to(private_root))):
+                    raise
                 os.mkdir(part, 0o700, dir_fd=fd)
                 child = os.open(part, flags, dir_fd=fd)
             os.close(fd)
             fd = child
-            _directory(fd, writable_mount=current==writable_mount)
+            _directory(fd, managed=current == private_root, writable_mount=current == writable_mount)
         _directory(fd, managed=True)
         yield path, fd
     except (OSError, UnicodeError, TypeError) as exc:

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import app
 from revenue.client_fee_rules import FeeRuleAuthorityService
@@ -18,7 +19,7 @@ from revenue.ui_actions import RevenueUIActions
 from revenue.uploads import parse_statement_csv, stage_revenue_upload
 from tests.revenue_test_support import RevenueDatabaseFixture
 from tests.revenue_secure_test_support import secure_directory
-from revenue.secure_storage import StorageUnavailable
+from revenue.secure_storage import StorageUnavailable, read_reference
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,11 @@ class RevenueUIActionTests(RevenueDatabaseFixture, unittest.TestCase):
 
     def test_authorized_operator_payment_evidence_and_receipt_keep_actual_actor(self):
         document_root = secure_directory(self)
+        if document_root.is_relative_to("/Volumes/Data"):
+            mount_fixture = patch("revenue.secure_storage._PRODUCTION_REVENUE_ROOT", document_root)
+            mount_fixture.start()
+            self.addCleanup(mount_fixture.stop)
+        payload = b"\xff\xd8\xff\xe0synthetic proof\xff\xd9"
         with self.connect() as connection:
             FeeRuleAuthorityService(RevenueRepository(connection)).initialize_2026(
                 actor_user_id=1, actor_role="Admin",
@@ -174,23 +180,27 @@ class RevenueUIActionTests(RevenueDatabaseFixture, unittest.TestCase):
                 "Manager + Student Cases", actor_has_revenue_access=True)
             payment = actions.record_client_payment({
                 "fee_item_uid": fee["uid"],
-                "payment_method_code": "wechat",
+                "payment_method_code": "alipay",
                 "actual_currency_code": "CNY",
                 "actual_amount_cents": "1135000",
                 "allocated_base_cents": "240000",
                 "received_date": "2026-08-31",
                 "external_reference": "OPERATOR-PAYMENT",
                 "idempotency_key": "operator-payment",
-            }, FakeUpload(
-                "payment.png", "image/png", b"\x89PNG\r\n\x1a\nproof"
-            ))
+            }, FakeUpload("payment.jpg", "image/jpeg", payload))
             receipt = actions.issue_client_receipt({
                 "payment_uid": payment["payment"]["uid"],
                 "idempotency_key": "operator-receipt",
             }, issuer_name="AAIE Education Services Pty Ltd", issuer_abn="12 345 678 901")
 
             self.assertEqual(2, payment["payment"]["confirmed_by"])
-            self.assertEqual(2, payment["evidence_document"]["created_by"])
+            evidence = payment["evidence_document"]
+            self.assertEqual(2, evidence["created_by"])
+            self.assertEqual(payload, read_reference(
+                self.database_path.parent / "revenue_documents",
+                evidence["storage_path"], evidence["sha256"], evidence["size_bytes"],
+                secure_root=document_root,
+            ))
             self.assertEqual(2, receipt["receipt"]["issued_by"])
             self.assertEqual(0, connection.execute(
                 "SELECT COUNT(*) FROM revenue_invoices"

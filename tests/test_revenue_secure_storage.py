@@ -6,9 +6,11 @@ import tempfile
 import unittest
 import subprocess
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from revenue.secure_storage import StorageUnavailable, configured_root, write_immutable, read_secure
+from revenue.secure_storage import StorageUnavailable, configured_root, read_reference, read_secure, write_immutable
+from revenue.uploads import stage_revenue_upload
 
 class SecureStorageConfigurationTests(unittest.TestCase):
     def test_missing_configuration_has_no_legacy_fallback(self):
@@ -28,6 +30,38 @@ class ActualPosixStorageTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(prefix='secure-test-',dir=os.environ['REVENUE_POSIX_TEST_ROOT'])
         self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name);self.payload=b'%PDF-SYNTHETIC'
+    def test_configured_private_root_under_group_writable_data_mount(self):
+        mount = Path('/Volumes/Data')
+        if not self.root.is_relative_to(mount) or not mount.stat().st_mode & 0o022:
+            self.skipTest('requires a fixture on the group-writable Data mount')
+        root = self.root / 'revenue_documents'
+        root.mkdir(mode=0o700)
+        other = self.root / 'unapproved'
+        other.mkdir(mode=0o700)
+        configuration = {'REVENUE_SECURE_STORAGE_ROOT': str(root)}
+        payload = b'\xff\xd8\xff\xe0synthetic proof\xff\xd9'
+        upload = SimpleNamespace(filename='proof.jpg', content_type='image/jpeg', data=payload)
+        with patch('revenue.secure_storage._PRODUCTION_REVENUE_ROOT', root):
+            self.assertEqual(root, configured_root(configuration))
+            staged = stage_revenue_upload(root / 'client-payments', upload, {'.jpg'})
+            self.assertEqual(0o600, staged.path.stat().st_mode & 0o777)
+            self.assertEqual(payload, read_reference(
+                self.root / 'legacy', staged.path, staged.sha256, staged.size_bytes,
+                secure_root=root,
+            ))
+            with self.assertRaises(StorageUnavailable):
+                configured_root({'REVENUE_SECURE_STORAGE_ROOT': str(other)})
+            root.chmod(0o750)
+            with self.assertRaises(StorageUnavailable):
+                write_immutable(root / 'client-payments', 'blocked.jpg', payload)
+            with self.assertRaises(StorageUnavailable):
+                read_reference(self.root / 'legacy', staged.path, staged.sha256,
+                               staged.size_bytes, secure_root=root)
+        missing = self.root / 'missing'
+        with patch('revenue.secure_storage._PRODUCTION_REVENUE_ROOT', missing):
+            with self.assertRaises(StorageUnavailable):
+                write_immutable(missing / 'client-payments', 'blocked.jpg', payload)
+        self.assertFalse(missing.exists())
     @unittest.skipUnless(sys.platform == 'darwin', 'Darwin extended ACL integration')
     def test_actual_allow_acl_rejected_and_deny_only_accepted(self):
         path,_=write_immutable(self.root,'acl.pdf',self.payload)
