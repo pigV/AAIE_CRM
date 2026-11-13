@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import inspect
+from io import BytesIO
 import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+
+from PIL import Image
 
 import app
 from revenue.client_fee_rules import FeeRuleAuthorityService
@@ -16,7 +19,7 @@ from revenue.read_models import RevenueReadModels
 from revenue.repository import RevenueRepository
 from revenue.services import RevenueService
 from revenue.ui_actions import RevenueUIActions
-from revenue.uploads import parse_statement_csv, stage_revenue_upload
+from revenue.uploads import _validate_upload_identity, parse_statement_csv, stage_revenue_upload
 from tests.revenue_test_support import RevenueDatabaseFixture
 from tests.revenue_secure_test_support import secure_directory
 from revenue.secure_storage import StorageUnavailable, read_reference
@@ -118,6 +121,18 @@ class RevenueUploadTests(unittest.TestCase):
             parse_statement_csv(
                 b"gross_commission_cents\n1100.50\n"
             )
+
+
+class JPEGValidationTests(unittest.TestCase):
+    def test_decodable_jpeg_with_trailing_data_is_accepted(self):
+        with Image.new("RGB", (32, 32)) as image, BytesIO() as stream:
+            image.save(stream, format="JPEG")
+            jpeg = stream.getvalue()
+        _validate_upload_identity(".jpg", "image/jpeg", jpeg + b"trailing metadata")
+        with self.assertRaises(ValueError):
+            _validate_upload_identity(".jpg", "image/jpeg", jpeg[:-2])
+        with self.assertRaises(ValueError):
+            _validate_upload_identity(".jpg", "image/jpeg", b"\xff\xd8\xffnot-a-jpeg")
 
 
 class RevenueUIActionTests(RevenueDatabaseFixture, unittest.TestCase):

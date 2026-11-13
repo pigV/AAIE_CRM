@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Iterable
 import zipfile
 
+from PIL import Image
+
 
 MIME_BY_EXTENSION = {
     ".pdf": "application/pdf",
@@ -55,10 +57,19 @@ def _validate_upload_identity(extension: str, content_type: str, payload: bytes)
         raise ValueError("PDF 文件签名无效。")
     if extension == ".png" and not payload.startswith(b"\x89PNG\r\n\x1a\n"):
         raise ValueError("PNG 文件签名无效。")
-    if extension in {".jpg", ".jpeg"} and not (
-        payload.startswith(b"\xff\xd8\xff") and payload.endswith(b"\xff\xd9")
-    ):
-        raise ValueError("JPEG 文件签名无效。")
+    if extension in {".jpg", ".jpeg"}:
+        if not payload.startswith(b"\xff\xd8\xff"):
+            raise ValueError("JPEG 文件签名无效。")
+        if not payload.endswith(b"\xff\xd9"):
+            # Some exporters append metadata after the JPEG end marker.
+            # Decode these files before accepting the original evidence bytes.
+            try:
+                with Image.open(io.BytesIO(payload), formats=("JPEG",)) as image:
+                    if image.width * image.height > 25_000_000:
+                        raise ValueError("JPEG 图片尺寸超过校验限制。")
+                    image.load()
+            except (OSError, Image.DecompressionBombError) as exc:
+                raise ValueError("JPEG 文件签名无效。") from exc
     if extension == ".docx":
         try:
             with zipfile.ZipFile(io.BytesIO(payload)) as archive:
