@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import socket
 import sqlite3
+import stat
 
 PRODUCTION_PORTS = frozenset({8780, 8781, 8790, 8792, 8793})
 LEGACY_PRODUCTION = Path("/Users/faqiang/Downloads/AAIE_CRM_Test_5985902_20261030")
@@ -28,10 +29,15 @@ def canonical(path):
     if not p.is_absolute() or ".." in p.parts:
         raise RuntimeConfigurationError("absolute_canonical_path_required")
     for part in (p, *p.parents):
-        if part.is_symlink():
+        try:
+            metadata = part.lstat()
+        except FileNotFoundError:
+            # SQLite sidecars can disappear when the last connection closes.
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
             raise RuntimeConfigurationError("symlink_path_rejected")
-    if p.exists() and p.is_file() and p.stat().st_nlink != 1:
-        raise RuntimeConfigurationError("hardlink_path_rejected")
+        if part == p and stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1:
+            raise RuntimeConfigurationError("hardlink_path_rejected")
     return p.resolve()
 
 
