@@ -31108,9 +31108,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         finally:
             db._release_connection(stage_connection)
         stage_chart_html = dashboard_workflow_distribution_chart_html(application_stage_students)
-        transfer_v2_stage_cards_html = dashboard_transfer_v2_stage_cards_html(
-            application_stage_students
-        )
         recent = db.all(
             """SELECT s.student_id,s.passport_first_name,s.passport_last_name,s.created_date
                FROM students s
@@ -31167,7 +31164,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         </section>
         {kpi_cards_html}
         {signed_institution_structure_html}
-        {transfer_v2_stage_cards_html}
         <div class="dashboard-chart-grid">
           <section class="panel dashboard-recent-panel"><div class="panel-head"><div><h2>最近学生</h2><p>按建档时间显示</p></div><a class="secondary button-link" href="/students">查看全部</a></div>
           <div class="table-wrap"><table class="dashboard-recent-table"><thead><tr><th>Student ID</th><th>学生</th><th>申请阶段</th><th>最终确认学校</th><th>申请年级</th><th>创建日期</th></tr></thead><tbody>{rows}</tbody></table></div></section>
