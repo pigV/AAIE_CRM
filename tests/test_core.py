@@ -2736,7 +2736,7 @@ class CoreTests(unittest.TestCase):
             finally:
                 app_module.db = old_db
 
-    def test_dashboard_keeps_six_kpi_cards_with_confirmed_titles(self):
+    def test_dashboard_keeps_five_kpi_cards_with_confirmed_titles(self):
         kpis = app_module.DashboardKpis(
             in_progress_students=52,
             signed_this_week=3,
@@ -2753,15 +2753,15 @@ class CoreTests(unittest.TestCase):
         html = app_module.dashboard_kpi_cards_html(kpis)
 
         self.assertIn('<section class="metrics dashboard-metrics dashboard-kpi-grid">', html)
-        self.assertEqual(html.count('<div class="metric">'), 6)
-        for title in ("在办流程", "本周签约学生", "本月签约学生", "本周下签", "本月下签", "本周 OFFER"):
+        self.assertEqual(html.count('<div class="metric">'), 5)
+        for title in ("本周签约学生", "本月签约学生", "本周下签", "本月下签", "本周 OFFER"):
             self.assertIn(f"<span>{title}</span>", html)
         self.assertNotIn("在办学生", html)
         for retired in ("本周新增", "材料待审核", "等待家长", "本月获签"):
             self.assertNotIn(f"<span>{retired}</span>", html)
-        for value in (52, 3, 5, 1, 2, 4):
+        for value in (3, 5, 1, 2, 4):
             self.assertIn(f"<strong>{value}</strong>", html)
-        self.assertIn('#dashboard-workflow-distribution-chart', html)
+        self.assertNotIn("在办流程", html)
         self.assertEqual(html.count('/contracts?view=list'), 2)
         self.assertEqual(html.count('/students?sort=visa_expiry'), 2)
         self.assertIn('/students?sort=offer_expiry', html)
@@ -4206,6 +4206,7 @@ class CoreTests(unittest.TestCase):
         html = app_module.dashboard_workflow_distribution_chart_html(students)
 
         self.assertIn('id="dashboard-workflow-distribution-chart"', html)
+        self.assertIn("共 2 个在办周期", html)
         self.assertIn('class="dashboard-workflow-distribution-chart__list"', html)
         self.assertEqual(html.count('<details class="dashboard-workflow-distribution-chart__row'), 9)
         self.assertEqual(html.count('class="dashboard-workflow-distribution-chart__count"'), 9)
@@ -4216,7 +4217,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn('/students/S%261', html)
         self.assertIn('/students/S2?tab=school_plans', html)
         self.assertEqual(html.count('class="dashboard-workflow-distribution-chart__student"'), 2)
-        self.assertIn('aria-label="展开等待家长填写表单学生名单，共 1 人"', html)
+        self.assertIn('aria-label="展开等待家长填写表单明细，共 1 个申请周期"', html)
 
     def test_dashboard_figma_premium_chart_css_uses_design_system_tokens(self):
         signed_css = Path("assets/dashboard-signed-institution-structure-chart-v1.css").read_text(encoding="utf-8")

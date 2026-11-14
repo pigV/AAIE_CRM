@@ -8730,7 +8730,6 @@ def dashboard_kpi_cards_html(kpis, *, metric_details=False):
 
     return f"""
         <section class="metrics dashboard-metrics dashboard-kpi-grid">
-          <div class="metric"><span>在办流程</span><strong>{kpis.in_progress_students}</strong><small>当前 ACTIVE Application Cycles</small><div class="metric-links"><a href="#dashboard-workflow-distribution-chart">查看在办流程</a></div></div>
           <div class="metric"><span>本周签约学生</span><strong>{kpis.signed_this_week}</strong><small>本周完成签署的学生人数</small><div class="metric-links"><a href="{detail_link("signing", "week", "/contracts?view=list")}">查看合同</a></div></div>
           <div class="metric"><span>本月签约学生</span><strong>{kpis.signed_this_month}</strong><small>本月完成签署的学生人数</small><div class="metric-links"><a href="{detail_link("signing", "month", "/contracts?view=list")}">查看合同</a></div></div>
           <div class="metric"><span>本周下签</span><strong>{kpis.visa_granted_this_week}</strong><small>本周按获签日期去重统计</small><div class="metric-links"><a href="{detail_link("grants", "week", "/students?sort=visa_expiry")}">查看签证学生</a></div></div>
@@ -10277,6 +10276,7 @@ def dashboard_workflow_distribution_chart_html(stage_students):
         if student.stage.key in stage_map:
             stage_map[student.stage.key].append(student)
     max_count = max((len(items) for items in stage_map.values()), default=0)
+    total_count = sum(len(items) for items in stage_map.values())
     rows = []
     for index, (key, label) in enumerate(definitions):
         students = stage_map[key]
@@ -10307,7 +10307,7 @@ def dashboard_workflow_distribution_chart_html(stage_students):
       <link rel="stylesheet" href="/assets/student-lifecycle-phase6.css?v=1">
       <script defer src="/assets/student-lifecycle-phase6.js?v=2"></script>
       <section id="dashboard-workflow-distribution-chart" class="dashboard-workflow-distribution-chart" aria-label="学生申请阶段分布横向条形图" data-lifecycle-stage-distribution>
-        <header class="dashboard-workflow-distribution-chart__header"><div><h2>学生申请阶段分布</h2><p>按正式业务记录自动判断；按申请周期计数，点击阶段查看对应流程和待办原因。</p></div>
+        <header class="dashboard-workflow-distribution-chart__header"><div><h2>学生申请阶段分布</h2><p>共 {total_count} 个在办周期 · 点击阶段查看对应流程和待办原因。</p></div>
           <div class="lifecycle-stage-filters" role="group" aria-label="Lifecycle Type filter">{''.join(f'<button type="button" class="secondary compact{" active" if key == "all" else ""}" data-lifecycle-stage-filter="{key}" aria-pressed="{"true" if key == "all" else "false"}">{label}</button>' for key, label in (("all", "ALL"), ("initial", "INITIAL"), ("transfer", "TRANSFER"), ("progression", "PROGRESSION")))}</div>
         </header>
         <div class="dashboard-lifecycle-active-cards" aria-label="当前转学与升学业务">

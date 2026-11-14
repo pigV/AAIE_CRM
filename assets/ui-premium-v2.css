@@ -9348,7 +9348,7 @@
 }
 
 .ui-premium-v2 .main:has(.dashboard-recent-table):has(#dashboard-workflow-distribution-chart) .dashboard-metrics.dashboard-kpi-grid {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .ui-premium-v2 .main:has(.dashboard-recent-table):has(#dashboard-workflow-distribution-chart) .dashboard-metrics .metric {
