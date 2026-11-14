@@ -319,6 +319,31 @@ def load_workflow_facts(
         if int(row[0]) not in progression_cycle_ids:
             state[int(row[0])]["coe_exists"] = int(row[1]) > 0
 
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='final_school_coe_confirmations' AND type='table'"
+    ).fetchone():
+        from final_school_coe import eligibility_reason, evidence_snapshot, school_coe_rows
+
+        school_cycles = tuple(
+            int(row[0]) for row in conn.execute(
+                f"""SELECT id FROM application_cycles WHERE id IN ({marks})
+                     AND cycle_type='initial' AND education_stream='school_education'""", ids
+            )
+        )
+        for cycle_id in school_cycles:
+            values = state[cycle_id]
+            values["final_school_coe_confirmed"] = False
+            if values["coe_exists"]:
+                values["final_school_coe_issue"] = (
+                    "请核对 CoE 与当前最终学校" if values["final_acceptance_selected"]
+                    else "已有 CoE，待确认最终学校"
+                )
+        for record in school_coe_rows(conn, school_cycles):
+            values = state[record["application_cycle_id"]]
+            if not eligibility_reason(record) and record["evidence_snapshot"] == evidence_snapshot(record):
+                values["final_school_coe_confirmed"] = True
+                values["final_school_coe_issue"] = None
+
     for row in conn.execute(
         f"""
         SELECT application_cycle_id,count(*) FROM visa_cases

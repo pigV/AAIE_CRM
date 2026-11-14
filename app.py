@@ -27721,6 +27721,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/(\d+)/offer/(\d+)/withdraw-acceptance$", self.offer_acceptance_withdraw),
                 (r"^/students/(\d+)/coe$", self.coe_create),
                 (r"^/students/(\d+)/coe/(\d+)/update$", self.coe_update),
+                (r"^/students/(\d+)/coe/(\d+)/confirm-final-school$", self.confirm_final_school_coe),
+                (r"^/students/(\d+)/offer/final-school-submission$", self.confirm_final_school_submission),
                 (r"^/students/(\d+)/visa$", self.visa_create),
                 (r"^/students/(\d+)/visa/(\d+)/update$", self.visa_update),
                 (r"^/students/(\d+)/payment$", self.payment_create),
@@ -60646,6 +60648,81 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return self.flash_redirect(f"/students/{student_id}?tab=offer#student-intake-tuition",
                                    "已保存首年学费。")
 
+    def final_school_submission_panel(self, student_id):
+        if not is_workflow_v2_active(db) or not db.one(
+            "SELECT 1 FROM sqlite_master WHERE name='final_school_coe_confirmations'"
+        ):
+            return ""
+        rows = db.all(
+            """SELECT a.id,a.school_name_snapshot,a.signed_offer_completed_at,a.payment_completed_at,
+                      event.submitted_at
+                 FROM cycle_final_acceptances a
+                 JOIN application_cycles c ON c.id=a.application_cycle_id AND c.student_id=a.student_id
+                 LEFT JOIN final_school_submission_events event ON event.final_acceptance_id=a.id
+                WHERE a.student_id=? AND a.acceptance_status='active'
+                  AND c.status='active' AND c.cycle_type='initial'
+                  AND c.education_stream='school_education'""", (student_id,)
+        )
+        panels = []
+        for row in rows:
+            school = esc(row["school_name_snapshot"])
+            if row["submitted_at"]:
+                panel = f'<p>{school} · 已确认递交 {esc(row["submitted_at"])}</p>'
+            elif not row["signed_offer_completed_at"] or not row["payment_completed_at"]:
+                panel = f'<p>{school} · 待确认 Signed Offer 和付款</p>'
+            elif can_workflow_module_save(self.user, "Offer"):
+                panel = f"""
+                <form method="post" action="/students/{student_id}/offer/final-school-submission">
+                  <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                  <input type="hidden" name="acceptance_id" value="{row['id']}">
+                  <label>最终学校<strong>{school}</strong></label>
+                  <label>实际递交日期<input type="date" name="submitted_at" required></label>
+                  <label>递交方式<select name="channel" required>
+                    <option value="email">邮件</option><option value="portal">学校平台</option>
+                    <option value="other">其他</option></select></label>
+                  <button class="secondary">确认已递交给最终学校</button>
+                </form>"""
+            else:
+                continue
+            panels.append(panel)
+        return "".join(panels)
+
+    def final_school_coe_panel_rows(self, student_id):
+        from final_school_coe import school_coe_rows
+
+        with db.read_snapshot() as conn:
+            if not is_workflow_v2_active(conn) or not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='final_school_coe_confirmations'"
+            ).fetchone():
+                return {}
+            ids = tuple(row[0] for row in conn.execute(
+                "SELECT id FROM application_cycles WHERE student_id=? AND status='active'", (student_id,)
+            ))
+            return {row["coe_id"]: row for row in school_coe_rows(conn, ids)}
+
+    def final_school_coe_panel(self, student_id, row):
+        from final_school_coe import eligibility_reason, evidence_snapshot
+
+        if row is None:
+            return ""
+        school = esc(row["school_name_snapshot"])
+        reason = eligibility_reason(row)
+        if reason:
+            return f'<p>{school} · {esc(reason)}</p>'
+        if row["evidence_snapshot"] == evidence_snapshot(row):
+            return f'<p>已确认主课 CoE · {school}</p>'
+        if not can_workflow_module_save(self.user, "COE + OSHC"):
+            return f'<p>待核对主课 CoE · {school}</p>'
+        return f"""
+          <form method="post" action="/students/{student_id}/coe/{row['coe_id']}/confirm-final-school">
+            <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+            <input type="hidden" name="acceptance_id" value="{row['acceptance_id']}">
+            <label><input type="checkbox" name="reviewed" value="yes" required>
+              已查阅原件，并确认此 CoE 是 {school} 当前申请的主课 CoE
+            </label>
+            <button class="secondary">确认最终学校 CoE</button>
+          </form>"""
+
     def offer_panel(self, student_id, offers):
         lifecycle_contexts = getattr(self, "_student_lifecycle_record_contexts", {})
         status_options = ("received", "sent_to_parent", "signed", "signed_received", "cancelled", "rejected", "expired")
@@ -60863,6 +60940,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="offer_status" value="received">
             {transfer_branch_field}<input type="file" name="file" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" required><button class="primary">上传 Offer 并自动识别</button>
           </form>
+          {self.final_school_submission_panel(student_id)}
           {self.student_intake_tuition_panel(student_id)}
           <div class="student-file-list offer-file-list">{offer_cards}</div>
           <div class="offer-acceptance-live" data-offer-acceptance-live aria-live="polite"></div>
@@ -60948,6 +61026,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
     def coe_panel(self, student_id, records):
         lifecycle_contexts = getattr(self, "_student_lifecycle_record_contexts", {})
         records = [self.backfill_coe_record(student_id, record) for record in records]
+        final_coe_rows = self.final_school_coe_panel_rows(student_id)
 
         def file_cell(record):
             if not record["file_path"]:
@@ -60986,6 +61065,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         <div class="coe-record-main">
                           <div class="coe-record-head"><div><span class="status ok">已上传</span><strong>{esc(record["document_kind"])}</strong></div><small>{esc(display_datetime(record["created_at"]) if "created_at" in record.keys() else "")}</small></div>
                           <form id="{form_id}" class="coe-fields" data-ajax-student-tab-form data-refresh-tab="coe" data-refresh-panel="false" method="post" action="/students/{student_id}/coe/{record["id"]}/update">{"".join(controls)}<div class="coe-save-row"><button class="secondary">保存修改</button><small class="inline-save-status" data-save-status></small></div></form>
+                          {self.final_school_coe_panel(student_id, final_coe_rows.get(record["id"]))}
                         </div>
                         <aside class="coe-record-file">{file_cell(record)}</aside>
                       </div>
@@ -71034,6 +71114,59 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "withdrawn_offer_id": withdrawal.offer_id,
             "restored_status": withdrawal.restored_status,
         })
+
+    def confirm_final_school_submission(self, method, student_id):
+        from workflow_offer_events import record_final_school_submission, WorkflowEventConflictError
+
+        if method != "POST":
+            return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
+        if not can_workflow_module_save(self.user, "Offer"):
+            return self.deny_module_access("offer")
+        try:
+            submitted = date.fromisoformat(self.form.get("submitted_at", ""))
+            channel = self.form.get("channel", "")
+            if submitted > datetime.now(ZoneInfo("Australia/Melbourne")).date() or channel not in {"email","portal","other"}:
+                raise ValueError("请填写实际递交日期和方式")
+            acceptance_id = int(self.form.get("acceptance_id", ""))
+            with db.transaction() as conn:
+                active = conn.execute(
+                    """SELECT 1 FROM cycle_final_acceptances a JOIN application_cycles c
+                         ON c.id=a.application_cycle_id AND c.student_id=a.student_id
+                        WHERE a.id=? AND a.student_id=? AND a.acceptance_status='active'
+                          AND c.cycle_type='initial' AND c.education_stream='school_education'
+                          AND c.status='active'""", (acceptance_id, student_id)
+                ).fetchone()
+                if not is_workflow_v2_active(conn) or active is None:
+                    raise ValueError("最终学校接受记录已变更，请刷新后重试")
+                record_final_school_submission(
+                    conn, acceptance_id, submitted_at=submitted.isoformat(),
+                    submission_channel=channel, submission_reference=None,
+                    actor_user_id=self.user["id"], actor_name=self.user.get("display_name"),
+                )
+        except (ValueError, WorkflowEventConflictError) as exc:
+            return self.flash_redirect(f"/students/{student_id}?tab=offer", str(exc), "error")
+        return self.flash_redirect(f"/students/{student_id}?tab=offer", "已确认递交给最终学校")
+
+    def confirm_final_school_coe(self, method, student_id, record_id):
+        from final_school_coe import confirm_school_coe
+
+        if method != "POST":
+            return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
+        if not can_workflow_module_save(self.user, "COE + OSHC"):
+            return self.deny_module_access("coe_oshc")
+        try:
+            if self.form.get("reviewed") != "yes":
+                raise ValueError("请先核对当前最终学校与主课 CoE")
+            with db.transaction() as conn:
+                if not is_workflow_v2_active(conn) or not conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='final_school_coe_confirmations'"
+                ).fetchone():
+                    raise ValueError("CoE 确认功能尚未启用")
+                confirm_school_coe(conn, student_id, int(self.form.get("acceptance_id", "")),
+                                   int(record_id), self.user["id"], now_iso())
+        except ValueError as exc:
+            return self.flash_redirect(f"/students/{student_id}?tab=coe", str(exc), "error")
+        return self.flash_redirect(f"/students/{student_id}?tab=coe", "已确认最终学校主课 CoE")
 
     def coe_create(self, method, student_id):
         if method != "POST":

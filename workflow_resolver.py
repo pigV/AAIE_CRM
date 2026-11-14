@@ -59,6 +59,8 @@ class WorkflowFacts:
     source_case_id: int | None = None
     contract_gate_status: str | None = None
     contract_execution_pending: bool = False
+    final_school_coe_confirmed: bool | None = None
+    final_school_coe_issue: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +100,7 @@ def _issue_codes(facts: WorkflowFacts) -> tuple[str, ...]:
         and facts.payment_completed
     ):
         issues.append("FINAL_SCHOOL_SUBMISSION_WITHOUT_ACCEPTANCE_EVIDENCE")
-    if facts.coe_exists and not facts.submitted_back_to_final_school:
+    if facts.coe_exists and not facts.submitted_back_to_final_school and not facts.final_school_coe_confirmed:
         issues.append("COE_WITHOUT_FINAL_SCHOOL_SUBMISSION")
     if facts.visa_submitted and not facts.coe_exists:
         issues.append("VISA_SUBMITTED_WITHOUT_COE")
@@ -210,19 +212,20 @@ def resolve_workflow_stage(facts: WorkflowFacts) -> WorkflowStageResult:
         )
     if facts.visa_submitted:
         return _active_result(facts, 11, "等待有效 Visa Grant 或 Refusal Letter", issues)
-    if facts.coe_exists and facts.submitted_back_to_final_school:
+    confirmed_coe = facts.final_school_coe_confirmed
+    if confirmed_coe or (confirmed_coe is None and facts.coe_exists and facts.submitted_back_to_final_school):
         return _active_result(facts, 10, "等待正式递交 Visa", issues)
     if facts.submitted_back_to_final_school:
-        return _active_result(facts, 9, "等待最终学校出具 COE", issues)
+        return _active_result(facts, 9, facts.final_school_coe_issue or "等待最终学校出具 COE", issues)
     if facts.actionable_offer_count:
         pending = None
         blocker = "等待选择最终学校并完成 Signed Offer 与 Payment"
         if facts.final_acceptance_selected and facts.signed_offer_completed and facts.payment_completed:
             pending = "PENDING_FINAL_SCHOOL_SUBMISSION"
             blocker = "待递交 Signed Offer + Payment 给最终学校"
-        return _active_result(facts, 8, blocker, issues, pending_action=pending)
+        return _active_result(facts, 8, facts.final_school_coe_issue or blocker, issues, pending_action=pending)
     if facts.submitted_application_count:
-        return _active_result(facts, 7, "等待 Public Group / Private Application 学校回复", issues)
+        return _active_result(facts, 7, facts.final_school_coe_issue or "等待 Public Group / Private Application 学校回复", issues)
     if facts.plan_confirmed:
         return _active_result(facts, 6, "等待正式递交学校申请", issues)
     if facts.plan_sent:
