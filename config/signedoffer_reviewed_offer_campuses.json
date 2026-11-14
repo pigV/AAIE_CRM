@@ -1,0 +1,56 @@
+{
+  "5": {
+    "cycle_id": 8,
+    "school_name": "Melbourne Girls College",
+    "campus_city": "Melbourne",
+    "school_id": 74
+  },
+  "7": {
+    "cycle_id": 32,
+    "school_name": "Doncaster Secondary College",
+    "campus_city": "Melbourne",
+    "school_id": 40
+  },
+  "10": {
+    "cycle_id": 39,
+    "school_name": "Brighton Secondary College",
+    "campus_city": "Melbourne",
+    "school_id": 22
+  },
+  "12": {
+    "cycle_id": 42,
+    "school_name": "Presbyterian Ladies’ College",
+    "campus_city": "Melbourne",
+    "school_id": 4
+  },
+  "14": {
+    "cycle_id": 45,
+    "school_name": "Serpell Primary School",
+    "campus_city": "Melbourne",
+    "school_id": 187
+  },
+  "16": {
+    "cycle_id": 51,
+    "school_name": "La Trobe University",
+    "campus_city": "Bendigo",
+    "provider_id": 17
+  },
+  "17": {
+    "cycle_id": 55,
+    "school_name": "Brighton Secondary College",
+    "campus_city": "Melbourne",
+    "school_id": 22
+  },
+  "18": {
+    "cycle_id": 73,
+    "school_name": "Unsw College",
+    "campus_city": "Sydney",
+    "provider_id": 44
+  },
+  "2": {
+    "cycle_id": 75,
+    "school_name": "Melbourne Girls College",
+    "campus_city": "Melbourne",
+    "school_id": 74
+  }
+}

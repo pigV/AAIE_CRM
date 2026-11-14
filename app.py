@@ -9525,11 +9525,14 @@ def dashboard_signed_institution_structure_data(mapping_path=SIGNEDOFFER_MAPPING
     mapping = load_signedoffer_institution_mapping_baseline(mapping_path)
     institution_mappings = mapping["institution_mappings"]
     if is_workflow_v2_active(db):
+        reviewed_path = SOURCE_DIR / "config" / "signedoffer_reviewed_offer_campuses.json"
+        reviewed_offers = json.loads(reviewed_path.read_text(encoding="utf-8"))
         connection = db.connect()
         try:
             data = load_dashboard_institution_metrics(
                 connection,
                 fallback_mappings=institution_mappings,
+                reviewed_offers=reviewed_offers,
             )
         finally:
             db._release_connection(connection)
@@ -9682,6 +9685,7 @@ def signedoffer_institution_mapping_review_data(mapping_path=SIGNEDOFFER_MAPPING
         "coverage_percent": round((mapped_count / total_events * 100), 2) if total_events else 0,
         "mapping_sha256": signedoffer_mapping_file_sha256(mapping_path),
         "groups": groups,
+        "offer_state_conflicts": dashboard_data.get("offer_state_conflicts", []),
     }
 
 
@@ -10039,6 +10043,15 @@ def signedoffer_institution_mapping_review_html(data, csrf):
           {confirmation_html}
         </article>""")
     cards_html = "".join(review_cards) or '<div class="empty">当前没有未匹配 SignedOffer 院校。</div>'
+    conflicts = data.get("offer_state_conflicts", [])
+    conflict_rows = "".join(
+        f'<li>申请周期 #{esc(row["application_cycle_id"])} · Offer 事件 #{esc(row["offer_event_id"])} · {esc(row["offer_state"])}</li>'
+        for row in conflicts
+    )
+    conflict_html = (
+        f'<section class="panel"><h3>最终接受有效但 Offer 已失效</h3><ul>{conflict_rows}</ul></section>'
+        if conflicts else ""
+    )
     return f"""
     <div class="signedoffer-institution-mapping-review-page">
       <section class="panel signedoffer-institution-mapping-review-page__hero">
@@ -10055,6 +10068,7 @@ def signedoffer_institution_mapping_review_html(data, csrf):
       <section class="signedoffer-institution-mapping-review-page__reviews" aria-label="Unmatched SignedOffer institutions">
         {cards_html}
       </section>
+      {conflict_html}
     </div>"""
 
 

@@ -60,7 +60,7 @@ class DashboardInstitutionMetricsTests(unittest.TestCase):
               (100,1,'S1','private',10,'Historical School Name',NULL),
               (200,2,'S2','higher_education',NULL,'Old University Name',50),
               (300,3,'S3','private',NULL,'Legacy College',NULL),
-              (400,4,'S1','public',20,'New School',NULL);
+              (400,1,'S1','public',20,'New School',NULL);
             INSERT INTO cycle_final_acceptances VALUES
               (1000,1,'S1',100,10,'Historical School Name','2026-08-01','active'),
               (2000,2,'S2',200,NULL,'Old University Name','2026-08-02','active'),
@@ -130,6 +130,26 @@ class DashboardInstitutionMetricsTests(unittest.TestCase):
         self.assertEqual("k12_public", event["institution_type"])
         self.assertEqual("Sydney", event["metropolitan_area"])
         self.assertEqual(3, data["total_events"])
+
+    def test_latest_invalid_offer_is_excluded_even_with_active_acceptance(self):
+        self.conn.executescript("""
+            CREATE TABLE offer_received_event_state_events(
+              id INTEGER PRIMARY KEY,offer_received_event_id INTEGER,state TEXT,occurred_at TEXT
+            );
+            INSERT INTO offer_received_event_state_events VALUES
+              (1,100,'ACTIVE','2026-08-01'),(2,100,'VOID','2026-08-02');
+        """)
+        data = self.load()
+        self.assertEqual(2, data["total_events"])
+        self.assertEqual([{"application_cycle_id": 1, "offer_event_id": 100,
+                           "offer_state": "VOID"}], data["offer_state_conflicts"])
+        self.assertEqual("active", self.conn.execute(
+            "SELECT acceptance_status FROM cycle_final_acceptances WHERE id=1000"
+        ).fetchone()[0])
+        self.conn.execute(
+            "INSERT INTO offer_received_event_state_events VALUES(3,100,'ACTIVE','2026-08-02')"
+        )
+        self.assertEqual(3, self.load()["total_events"])
 
     def test_unresolved_fallback_is_auditable_not_silent(self):
         data = self.load()

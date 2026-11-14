@@ -50,6 +50,7 @@ def load_dashboard_institution_metrics(
     connection,
     *,
     fallback_mappings: dict[str, dict] | None = None,
+    reviewed_offers: dict | None = None,
 ) -> dict:
     """Recalculate structure from current master rows on every read.
 
@@ -62,10 +63,26 @@ def load_dashboard_institution_metrics(
     fallback_by_key = {_normalized(key): value for key, value in fallback.items()}
     student_columns = {row[1] for row in connection.execute("PRAGMA table_info(students)")}
     current_student = "AND COALESCE(student.deleted_at,'')=''" if "deleted_at" in student_columns else ""
+    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    reviewed_offers = reviewed_offers or {}
+    latest_state = "'ACTIVE'"
+    if "offer_received_event_state_events" in tables:
+        latest_state = """coalesce((SELECT state FROM offer_received_event_state_events
+            WHERE offer_received_event_id=offer.id ORDER BY occurred_at DESC,id DESC LIMIT 1),'ACTIVE')"""
+    legacy_join = ""
+    legacy_city = "NULL"
+    if "offers" in tables:
+        legacy_join = """LEFT JOIN offers AS legacy ON legacy.id=offer.legacy_offer_id
+             AND legacy.student_id=acceptance.student_id
+             AND legacy.application_cycle_id=acceptance.application_cycle_id
+             AND lower(trim(legacy.school_name))=lower(trim(acceptance.school_name_snapshot))
+             LEFT JOIN school_cities AS offer_city ON offer_city.id=legacy.city_id"""
+        legacy_city = "coalesce(offer_city.city_name,nullif(trim(legacy.city_name_snapshot),''))"
     rows = connection.execute(
         f"""SELECT acceptance.id,acceptance.application_cycle_id,
                   acceptance.student_id,acceptance.school_name_snapshot,
-                  acceptance.selected_at,
+                  acceptance.selected_at,offer.id AS event_id,{latest_state} AS offer_state,
+                  {legacy_city} AS offer_city,
                   COALESCE(acceptance.school_id,offer.school_id) AS school_id,
                   school.school_name AS master_school_name,
                   school.sector_key AS master_sector_key,
@@ -78,6 +95,9 @@ def load_dashboard_institution_metrics(
              FROM cycle_final_acceptances AS acceptance
              JOIN offer_received_events AS offer
                ON offer.id=acceptance.offer_received_event_id
+              AND offer.application_cycle_id=acceptance.application_cycle_id
+              AND offer.student_id=acceptance.student_id
+             {legacy_join}
              LEFT JOIN schools AS school
                ON school.id=COALESCE(acceptance.school_id,offer.school_id)
              LEFT JOIN school_cities AS city ON city.id=school.city_id
@@ -105,8 +125,19 @@ def load_dashboard_institution_metrics(
     fallback_events = []
     unmapped_events = []
     student_ids = set()
+    conflicts = []
+    schools = {row[0]: row[1:] for row in connection.execute(
+        "SELECT id,school_name,sector_key,school_type FROM schools"
+    )} if reviewed_offers else {}
+    providers = {row[0]: row[1:] for row in connection.execute(
+        "SELECT id,provider_name,provider_type FROM higher_education_providers"
+    )} if reviewed_offers else {}
 
     for row in rows:
+        if row["offer_state"] != "ACTIVE":
+            conflicts.append({"application_cycle_id": row["application_cycle_id"],
+                              "offer_event_id": row["event_id"], "offer_state": row["offer_state"]})
+            continue
         student_ids.add(str(row["student_id"]))
         snapshot_name = str(row["school_name_snapshot"] or "").strip()
         mapping_entry = None
@@ -141,6 +172,34 @@ def load_dashboard_institution_metrics(
                 metro = "unmapped_city"
                 provenance = "unresolved"
                 match_method = "unmapped"
+
+        review = reviewed_offers.get(str(row["event_id"]), {})
+        if (review.get("cycle_id") == row["application_cycle_id"]
+                and review.get("school_name") == snapshot_name):
+            school = schools.get(review.get("school_id"))
+            provider = providers.get(review.get("provider_id"))
+            if provenance != "canonical_master" and (school or provider):
+                if school:
+                    school_name = school[0]
+                    category = _school_category(school[1], school[2])
+                else:
+                    school_name = provider[0]
+                    category = "university" if provider[1] == "University" else "other_education"
+                provenance = "canonical_master"
+                match_method = "reviewed_offer_master"
+                mapping_entry = None
+            matching_school = school and (
+                row["school_id"] is None or review["school_id"] == row["school_id"]
+            )
+            matching_provider = provider and (
+                row["provider_id"] is None or review["provider_id"] == row["provider_id"]
+            )
+            if review.get("campus_city") and (
+                matching_provider or (matching_school and metro == "unmapped_city" and not row["offer_city"])
+            ):
+                metro = _metro(review["campus_city"])
+        if metro == "unmapped_city" and row["offer_city"]:
+            metro = _metro(row["offer_city"])
 
         if category not in category_counts:
             category = "unmapped"
@@ -183,6 +242,7 @@ def load_dashboard_institution_metrics(
     recognized_events = total_events - category_counts["unmapped"]
     city_known_events = total_events - metro_counts["unmapped_city"]
     return {
+        "offer_state_conflicts": conflicts,
         "total_events": total_events,
         "involved_student_count": len(student_ids),
         "recognized_events": recognized_events,
