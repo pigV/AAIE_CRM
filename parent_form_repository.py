@@ -184,6 +184,12 @@ class ParentFormRepository:
                     ),
                 )
             if is_workflow_v2_active(conn):
+                conn.execute(
+                    """UPDATE application_cycles SET parent_form_token=?, updated_at=?, updated_by_user_id=?
+                        WHERE parent_form_token=? AND status='active'
+                          AND cycle_type='initial' AND student_id IS NULL""",
+                    (new_token, stamp, created_by, old_token),
+                )
                 record_application_lifecycle_event(
                     conn,
                     "PARENT_FORM_CREATED",

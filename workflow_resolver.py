@@ -217,7 +217,7 @@ def resolve_workflow_stage(facts: WorkflowFacts) -> WorkflowStageResult:
         return _active_result(facts, 10, "等待正式递交 Visa", issues)
     if facts.submitted_back_to_final_school:
         return _active_result(facts, 9, facts.final_school_coe_issue or "等待最终学校出具 COE", issues)
-    if facts.actionable_offer_count:
+    if facts.actionable_offer_count or facts.final_acceptance_selected:
         pending = None
         blocker = "等待选择最终学校并完成 Signed Offer 与 Payment"
         if facts.final_acceptance_selected and facts.signed_offer_completed and facts.payment_completed:
@@ -230,6 +230,8 @@ def resolve_workflow_stage(facts: WorkflowFacts) -> WorkflowStageResult:
         return _active_result(facts, 6, "等待正式递交学校申请", issues)
     if facts.plan_sent:
         return _active_result(facts, 5, "等待家长最终确认学校方案", issues)
+    if facts.plan_exists:
+        return _active_result(facts, 4, "已有方案，待重新发送", issues)
     if facts.contract_execution_pending:
         return _active_result(
             facts, 3, "家长已签署，等待 AAIE 完成签章及完整合同归档", issues,

@@ -19,7 +19,7 @@ def _rows(conn, sql):
     return [dict(zip(keys, row)) for row in cursor.fetchall()]
 
 
-def _student_case(case):
+def is_student_visa_case(case):
     # Legacy cases often have no visa_subclass: case_type must also be checked.
     labels = " ".join(str(case.get(key) or "") for key in
                       ("visa_subclass", "visa_type", "case_type", "relationship_to_student")).lower()
@@ -57,7 +57,7 @@ def load_student_visa_grant_records(conn: sqlite3.Connection, *, today: date):
     week_records, month_records = [], []
     for case in cases:
         student_id = str(case.get("student_id") or "").strip()
-        if not student_id or student_id not in students or not _student_case(case):
+        if not student_id or student_id not in students or not is_student_visa_case(case):
             continue
         cycle_id = case.get("application_cycle_id")
         if cycle_id is not None and cycle_students.get(cycle_id) != student_id:

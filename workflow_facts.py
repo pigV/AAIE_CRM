@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Iterable
 
+from dashboard_visa_metrics import is_student_visa_case
 from workflow_resolver import WorkflowFacts
 
 
@@ -14,6 +15,60 @@ def _ids(values: Iterable[int]) -> tuple[int, ...]:
 
 def _placeholders(values: tuple[int, ...]) -> str:
     return ",".join("?" for _ in values)
+
+
+def _columns(conn, table):
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _load_student_visa_facts(conn, ids, state):
+    marks = _placeholders(ids)
+    columns = _columns(conn, "visa_cases")
+    decisions = {
+        (row[0], row[1]): row[2] for row in conn.execute(
+            f"""SELECT application_cycle_id, visa_case_id, decision_type
+                  FROM visa_decision_events WHERE application_cycle_id IN ({marks})""", ids
+        )
+    }
+    current = {}
+    if _columns(conn, "visa_result_status_current"):
+        current = dict(conn.execute(
+            f"""SELECT result.visa_case_id, result.effective_result
+                  FROM visa_result_status_current result JOIN visa_cases visa ON visa.id=result.visa_case_id
+                 WHERE visa.application_cycle_id IN ({marks})""", ids
+        ))
+    cursor = conn.execute(
+        f"SELECT * FROM visa_cases WHERE application_cycle_id IN ({marks}) ORDER BY id DESC", ids
+    )
+    keys = tuple(column[0] for column in cursor.description)
+    selected = {}
+    for row in cursor:
+        case = dict(zip(keys, row))
+        cycle_id = case["application_cycle_id"]
+        if (str(case["student_id"]) != state[cycle_id]["student_id"] or case.get("archived_at")
+                or str(case.get("status") or "").strip().lower() in {"draft", "withdrawn", "cancelled"}
+                or not is_student_visa_case(case)):
+            continue
+        case_id = case["id"]
+        decision = decisions.get((cycle_id, case_id))
+        if case_id in current:
+            decision = {"Granted": "grant", "Refused": "refusal"}.get(current[case_id])
+        if current.get(case_id) == "Withdrawn":
+            continue
+        date = str(case.get("actual_lodgement_date") or "").strip()
+        lodged = bool(date) and (
+            "lodgement_recorded_at" not in columns
+            or bool(case.get("lodgement_recorded_at") and
+                    (case.get("lodged_by_user_id") or str(case.get("lodged_by_name") or "").strip()))
+        )
+        if not (lodged or decision):
+            continue
+        # A new draft must not displace the student's latest evidenced application.
+        rank = (date if lodged else "", case_id)
+        if cycle_id not in selected or rank > selected[cycle_id]:
+            selected[cycle_id] = rank
+            state[cycle_id]["visa_submitted"] = lodged
+            state[cycle_id]["visa_decision"] = decision
 
 
 def load_workflow_facts(
@@ -201,12 +256,21 @@ def load_workflow_facts(
                 gate_status = "waiting_parent_signature"
             values["contract_gate_status"] = gate_status
 
+    link_columns = _columns(conn, "school_plan_report_links")
+    live_link = ["link.status='active'"]
+    if "expires_at" in link_columns:
+        live_link.append("julianday(link.expires_at)>julianday('now')")
+    if "invalidated_at" in link_columns:
+        live_link.append("coalesce(link.invalidated_at,'')=''")
+    confirmed = "confirmation.id IS NOT NULL"
+    if "status" in _columns(conn, "school_plan_report_confirmations"):
+        confirmed += " AND confirmation.status='confirmed'"
     for row in conn.execute(
         f"""
         SELECT report.application_cycle_id,
                count(*),
-               max(CASE WHEN link.id IS NOT NULL THEN 1 ELSE 0 END),
-               max(CASE WHEN confirmation.id IS NOT NULL THEN 1 ELSE 0 END)
+               max(CASE WHEN {" AND ".join(live_link)} THEN 1 ELSE 0 END),
+               max(CASE WHEN {confirmed} THEN 1 ELSE 0 END)
         FROM school_plan_reports AS report
         LEFT JOIN school_plan_report_links AS link ON link.report_id=report.id
         LEFT JOIN school_plan_report_confirmations AS confirmation
@@ -236,15 +300,23 @@ def load_workflow_facts(
     ).fetchall():
         state[int(row[0])]["submitted_application_count"] = int(row[1])
 
-    for row in conn.execute(
-        f"""
-        SELECT application_cycle_id,count(*) FROM offer_received_events
-        WHERE application_cycle_id IN ({marks})
-        GROUP BY application_cycle_id
-        """,
-        ids,
-    ).fetchall():
-        state[int(row[0])]["actionable_offer_count"] = int(row[1])
+    offer_columns = _columns(conn, "offers")
+    event_columns = _columns(conn, "offer_received_events")
+    invalid = "'void','voided','cancelled','canceled','rejected','declined','withdrawn','expired','superseded'"
+    joins = ["LEFT JOIN offers legacy ON legacy.id=event.legacy_offer_id"]
+    eligible = []
+    if "offer_status" in offer_columns:
+        eligible.append(f"(legacy.id IS NULL OR lower(trim(coalesce(legacy.offer_status,''))) NOT IN ({invalid}))")
+    if "higher_education_offer_id" in event_columns and _columns(conn, "higher_education_offers"):
+        joins.append("LEFT JOIN higher_education_offers higher ON higher.id=event.higher_education_offer_id")
+        eligible.append(f"(higher.id IS NULL OR lower(trim(higher.status)) NOT IN ({invalid}))")
+    for cycle_id, count in conn.execute(
+        f"""SELECT event.application_cycle_id,count(*) FROM offer_received_events event
+             {" ".join(joins)}
+             WHERE event.application_cycle_id IN ({marks}) AND {" AND ".join(eligible) or "1"}
+             GROUP BY event.application_cycle_id""", ids
+    ):
+        state[cycle_id]["actionable_offer_count"] = count
 
     for row in conn.execute(
         f"""
@@ -344,46 +416,6 @@ def load_workflow_facts(
                 values["final_school_coe_confirmed"] = True
                 values["final_school_coe_issue"] = None
 
-    for row in conn.execute(
-        f"""
-        SELECT application_cycle_id,count(*) FROM visa_cases
-        WHERE application_cycle_id IN ({marks})
-          AND trim(coalesce(actual_lodgement_date,''))<>''
-        GROUP BY application_cycle_id
-        """,
-        ids,
-    ).fetchall():
-        state[int(row[0])]["visa_submitted"] = int(row[1]) > 0
-
-    for row in conn.execute(
-        f"""
-        SELECT application_cycle_id,decision_type FROM visa_decision_events
-        WHERE application_cycle_id IN ({marks})
-        """,
-        ids,
-    ).fetchall():
-        state[int(row[0])]["visa_decision"] = str(row[1])
-
-    # Migration 039 makes the audited current Result authority the source for
-    # automatic detections and Staff corrections. It deliberately does not
-    # invent an official decision date or rewrite canonical decision history.
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='visa_result_status_current'"
-    ).fetchone():
-        for row in conn.execute(
-            f"""
-            SELECT visa.application_cycle_id,current.effective_result
-            FROM visa_result_status_current AS current
-            JOIN visa_cases AS visa ON visa.id=current.visa_case_id
-            WHERE visa.application_cycle_id IN ({marks})
-            """,
-            ids,
-        ).fetchall():
-            state[int(row[0])]["visa_decision"] = {
-                "Granted": "grant",
-                "Refused": "refusal",
-                "Pending": None,
-                "Withdrawn": None,
-            }[str(row[1])]
+    _load_student_visa_facts(conn, ids, state)
 
     return {cycle_id: WorkflowFacts(**values) for cycle_id, values in state.items()}

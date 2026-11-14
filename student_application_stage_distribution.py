@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Mapping
 
+from security import is_expired
 from workflow_projection import load_current_workflow_projection
 from workflow_resolver import ACTIVE_WORKFLOW_STAGES
 from workflow_cutover import is_workflow_v2_active
@@ -23,6 +24,7 @@ APPLICATION_STAGE_DEFINITIONS = (
     ("waiting_visa_result", "等待签证结果"),
 )
 
+DASHBOARD_CONTRACT_STAGE_LABEL = "等待建立合同或准备签署"
 CANONICAL_APPLICATION_STAGE_DEFINITIONS = tuple(
     (stage.key, stage.title) for stage in ACTIVE_WORKFLOW_STAGES
 )
@@ -209,13 +211,85 @@ def _student_names(connection, student_ids: tuple[str, ...]) -> dict[str, str]:
     return names
 
 
+def _dashboard_stage_overrides(connection, projection):
+    """Resolve dashboard-only exceptions without changing lifecycle ownership."""
+    overrides = {}
+    form_ids = tuple(row.cycle_id for row in projection if row.stage_key == "01_parent_form")
+    if form_ids:
+        marks = ",".join("?" for _ in form_ids)
+        for cycle_id, token, submitted, revoked, expiry in connection.execute(
+            f"""SELECT cycle.id, form.token, form.submitted_at, form.invalidated_at, form.expires_at
+                  FROM application_cycles cycle
+                  LEFT JOIN parent_form_tokens form ON form.token=cycle.parent_form_token
+                 WHERE cycle.id IN ({marks})""", form_ids
+        ):
+            if not token or submitted or revoked:
+                overrides[cycle_id] = None
+            else:
+                try:
+                    expired = is_expired(expiry)
+                except (ValueError, TypeError):
+                    expired = True
+                if expired:
+                    overrides[cycle_id] = None
+
+    contract_ids = tuple(row.cycle_id for row in projection if row.stage_key == "02_contract_creation")
+    if not contract_ids:
+        return overrides
+
+    marks = ",".join("?" for _ in contract_ids)
+    contract_columns = _columns(connection, "contracts")
+    valid_contract = " AND ".join(
+        f"COALESCE(contract.{column},'')=''"
+        for column in ("deleted_at", "voided_at", "superseded_by_contract_id")
+        if column in contract_columns
+    ) or "1"
+    draft_ids = {
+        row[0] for row in connection.execute(
+            f"""SELECT DISTINCT application_cycle_id FROM contracts contract
+                 WHERE application_cycle_id IN ({marks})
+                   AND contract_status='Draft' AND {valid_contract}""", contract_ids
+        )
+    }
+    placeholders = set()
+    if _table_exists(connection, "higher_education_audit_log"):
+        evidence = [
+            f"NOT EXISTS (SELECT 1 FROM {table} evidence WHERE evidence.application_cycle_id=cycle.id)"
+            for table in ("higher_education_plans", "higher_education_applications", "higher_education_offers")
+            if _table_exists(connection, table)
+        ]
+        placeholders = {
+            row[0] for row in connection.execute(
+                f"""SELECT cycle.id FROM application_cycles cycle
+                     WHERE cycle.id IN ({marks}) AND cycle.cycle_type='initial'
+                       AND cycle.education_stream='higher_education' AND cycle.parent_form_token IS NULL
+                       AND EXISTS (SELECT 1 FROM higher_education_audit_log audit
+                                    WHERE audit.application_cycle_id=cycle.id AND audit.action='legacy_student_migrated')
+                       AND EXISTS (SELECT 1 FROM application_cycles school
+                                    WHERE school.student_id=cycle.student_id AND school.status='active'
+                                      AND school.cycle_type='initial' AND school.education_stream='school_education')
+                       AND NOT EXISTS (SELECT 1 FROM contracts contract
+                                        WHERE contract.application_cycle_id=cycle.id AND {valid_contract})
+                       AND {" AND ".join(evidence) or "1"}""", contract_ids
+            )
+        }
+    for cycle_id in contract_ids:
+        reason = "已有草稿，待生成签署链接" if cycle_id in draft_ids else "待建立合同"
+        overrides[cycle_id] = (
+            None if cycle_id in placeholders else ("02_contract_creation", DASHBOARD_CONTRACT_STAGE_LABEL, reason)
+        )
+    return overrides
+
+
 def _canonical_distribution(connection, *, read_context=None, cycles_only=False) -> tuple[ApplicationStageStudent, ...]:
     projection = (read_context.workflow(connection) if read_context is not None
                   else load_current_workflow_projection(connection))
+    stage_overrides = {}
     if cycles_only:
         from dashboard_workflow_metrics import dashboard_active_cycles
 
         projection = dashboard_active_cycles(connection, projection)
+        stage_overrides = _dashboard_stage_overrides(connection, projection)
         student_ids = tuple({str(row.student_id) for row in projection if row.student_id})
         student_workflow = {}
     else:
@@ -332,6 +406,12 @@ def _canonical_distribution(connection, *, read_context=None, cycles_only=False)
             )
         else:
             stage = _canonical_stage_result(row)
+            if row.cycle_id in stage_overrides:
+                override = stage_overrides[row.cycle_id]
+                if override is None:
+                    continue
+                key, label, blocker = override
+                stage = replace(stage, key=key, label=label, blocker=blocker)
         results.append(
             ApplicationStageStudent(
                 record_id,

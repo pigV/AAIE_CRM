@@ -328,6 +328,7 @@ from student_doc import (
 from student_application_stage_distribution import (
     APPLICATION_STAGE_DEFINITIONS,
     CANONICAL_APPLICATION_STAGE_DEFINITIONS,
+    DASHBOARD_CONTRACT_STAGE_LABEL,
     active_cycle_type_counts,
     load_application_stage_distribution,
 )
@@ -10257,6 +10258,10 @@ def dashboard_workflow_distribution_chart_html(stage_students):
         )
         else APPLICATION_STAGE_DEFINITIONS
     )
+    definitions = [
+        (key, DASHBOARD_CONTRACT_STAGE_LABEL if key == "02_contract_creation" else label)
+        for key, label in definitions
+    ]
     known = {key for key, _label in definitions}
     observed = {}
     for student in stage_students:
