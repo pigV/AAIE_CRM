@@ -31143,7 +31143,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         signed_institution_structure = dashboard_signed_institution_structure_data()
         signed_institution_structure_html = dashboard_signed_institution_structure_chart_html(signed_institution_structure)
         dashboard_workflow_chart_css = '<link rel="stylesheet" href="/assets/dashboard-workflow-distribution-chart-v1.css?v=11">'
-        dashboard_signed_institution_css = '<link rel="stylesheet" href="/assets/dashboard-signed-institution-structure-chart-v1.css?v=4">'
+        dashboard_signed_institution_css = '<link rel="stylesheet" href="/assets/dashboard-signed-institution-structure-chart-v1.css?v=5">'
         body = f"""
         {dashboard_workflow_chart_css}
         {dashboard_signed_institution_css}
