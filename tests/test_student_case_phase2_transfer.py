@@ -457,6 +457,19 @@ def apply_all_test_migrations_with_rebuild_backup(
         through="20260904_035",
     )
     complete_base_fixture_columns(database_path)
+    if through is None or through >= "20261115_047":
+        migration_runner.apply_migrations(
+            database_path, MIGRATIONS_DIR, applied_by="phase2-transfer-test",
+            source_commit="phase2-transfer-test", formal_database_path=None,
+            required_backup_metadata=rebuild_backup("035-visa"),
+            through="20261114_046",
+        )
+        return migration_runner.apply_migrations(
+            database_path, MIGRATIONS_DIR, applied_by="phase2-transfer-test",
+            source_commit="phase2-transfer-test", formal_database_path=None,
+            required_backup_metadata=rebuild_backup("047-offer"),
+            through=through,
+        )
     return migration_runner.apply_migrations(
         database_path,
         MIGRATIONS_DIR,

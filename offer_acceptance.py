@@ -8,6 +8,9 @@ import re
 import unicodedata
 from typing import Literal
 
+from dashboard_business_time import business_date_iso
+from zoneinfo import ZoneInfo
+
 from school_scope_resolver import ResolvedSchoolScope, resolve_school_scopes
 
 
@@ -465,6 +468,26 @@ def set_accepted_offer(
             coe_warning_acknowledged=bool(warning_acknowledged),
             accepted_at=current.accepted_at,
         )
+    expiry = str(_value(offer, "offer_expiry_date", "") or "").strip()
+    expiry_date = business_date_iso(expiry) if expiry else None
+    today = datetime.now(ZoneInfo("Australia/Melbourne")).date().isoformat()
+    status = str(_value(offer, "offer_status", "") or "").strip().lower()
+    if status in {"void", "voided", "cancelled", "canceled", "rejected", "declined",
+                  "withdrawn", "expired", "superseded", "invalid_record"} or (
+        expiry and (expiry_date is None or expiry_date < today)
+    ):
+        raise OfferAcceptanceError("offer_invalid", "该 Offer 已失效，无法设为最终接受。")
+    if _table_columns(connection, "offer_received_event_state_events"):
+        event_state = connection.execute(
+            """SELECT state.state FROM offer_received_event_state_events state
+                 JOIN offer_received_events receipt ON receipt.id=state.offer_received_event_id
+                WHERE receipt.legacy_offer_id=?
+                ORDER BY state.occurred_at DESC,state.id DESC LIMIT 1""",
+            (int(offer_id),),
+        ).fetchone()
+        if event_state and event_state[0] != "ACTIVE":
+            raise OfferAcceptanceError("offer_invalid", "该 Offer 已失效，无法设为最终接受。")
+
     if current and current.status_before_acceptance == "__legacy_status_unknown__":
         raise OfferAcceptanceError(
             "legacy_restore_status_required",
