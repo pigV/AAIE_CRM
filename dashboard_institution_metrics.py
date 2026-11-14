@@ -60,8 +60,10 @@ def load_dashboard_institution_metrics(
 
     fallback = fallback_mappings or {}
     fallback_by_key = {_normalized(key): value for key, value in fallback.items()}
+    student_columns = {row[1] for row in connection.execute("PRAGMA table_info(students)")}
+    current_student = "AND COALESCE(student.deleted_at,'')=''" if "deleted_at" in student_columns else ""
     rows = connection.execute(
-        """SELECT acceptance.id,acceptance.application_cycle_id,
+        f"""SELECT acceptance.id,acceptance.application_cycle_id,
                   acceptance.student_id,acceptance.school_name_snapshot,
                   acceptance.selected_at,
                   COALESCE(acceptance.school_id,offer.school_id) AS school_id,
@@ -88,6 +90,7 @@ def load_dashboard_institution_metrics(
              LEFT JOIN students AS student
                ON student.student_id=acceptance.student_id
             WHERE acceptance.acceptance_status='active'
+              {current_student}
             ORDER BY acceptance.id"""
     ).fetchall()
 

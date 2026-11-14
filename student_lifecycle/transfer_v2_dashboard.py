@@ -37,21 +37,20 @@ def is_active_transfer_stage(cycle_type: str | None, stage_key: str | None) -> b
     return cycle_type == "transfer" and stage_key in dict(TRANSFER_V2_DASHBOARD_STAGES)
 
 
+def transfer_dashboard_bucket(row) -> str | None:
+    if row.cycle_type != "transfer":
+        return None
+    return row.stage.key if is_active_transfer_stage(row.cycle_type, row.stage.key) else "other"
+
+
 def build_transfer_v2_dashboard(stage_students: Iterable[object]) -> TransferV2Dashboard:
-    counts = {key: 0 for key, _label in TRANSFER_V2_DASHBOARD_STAGES}
-    total = 0
-    for student in stage_students:
-        if getattr(student, "cycle_type", None) != "transfer":
-            continue
-        key = str(getattr(getattr(student, "stage", None), "key", "") or "")
-        if not is_active_transfer_stage(getattr(student, "cycle_type", None), key):
-            continue
-        total += 1
-        counts[key] += 1
+    stages = (*TRANSFER_V2_DASHBOARD_STAGES, ("other", "其他在办阶段"))
+    counts = dict.fromkeys((key for key, _ in stages), 0)
+    for row in stage_students:
+        bucket = transfer_dashboard_bucket(row)
+        if bucket is not None:
+            counts[bucket] += 1
     return TransferV2Dashboard(
-        active_total=total,
-        stages=tuple(
-            TransferV2StageCount(key, label, counts[key])
-            for key, label in TRANSFER_V2_DASHBOARD_STAGES
-        ),
+        active_total=sum(counts.values()),
+        stages=tuple(TransferV2StageCount(key, label, counts[key]) for key, label in stages),
     )

@@ -47,8 +47,21 @@ def _count(conn: sqlite3.Connection, sql: str, parameters: tuple[str, str]) -> i
     return int(row[0] if row else 0)
 
 
+def dashboard_active_cycles(conn, projection):
+    """Keep unregistered workflows and exclude cycles owned by deleted students."""
+    student_columns = {row[1] for row in conn.execute("PRAGMA table_info(students)")}
+    if "deleted_at" not in student_columns:
+        return projection
+    deleted = {
+        row[0] for row in conn.execute(
+            "SELECT student_id FROM students WHERE COALESCE(deleted_at,'')<>''"
+        )
+    }
+    return tuple(row for row in projection if row.student_id not in deleted)
+
+
 def load_dashboard_workflow_metrics(
-    conn: sqlite3.Connection, *, today: date, read_context=None
+    conn: sqlite3.Connection, *, today: date, read_context=None, desktop_dashboard=False
 ) -> DashboardWorkflowMetrics:
     """Load all Dashboard values from canonical cycle facts and source events."""
 
@@ -67,6 +80,8 @@ def load_dashboard_workflow_metrics(
 
     active_records = (read_context.workflow(conn) if read_context is not None
                       else load_current_workflow_projection(conn))
+    if desktop_dashboard:
+        active_records = dashboard_active_cycles(conn, active_records)
     active_by_cycle_type = {"initial": 0, "transfer": 0, "progression": 0}
     active_cycle_ids = tuple(row.cycle_id for row in active_records)
     if active_cycle_ids:
@@ -81,15 +96,18 @@ def load_dashboard_workflow_metrics(
             cycle_type = str(row[0])
             if cycle_type in active_by_cycle_type:
                 active_by_cycle_type[cycle_type] = int(row[1])
-    stage_distribution = load_stage_distribution(conn, read_context=read_context)
-    signed_sql = """
-        SELECT count(DISTINCT application_cycle_id)
-        FROM contracts
-        WHERE application_cycle_id IS NOT NULL
-          AND contract_status='FullyExecuted'
-          AND dashboard_business_date(fully_executed_at)>=?
-          AND dashboard_business_date(fully_executed_at)<?
-    """
+    stage_distribution = load_stage_distribution(
+        conn, read_context=read_context, projection=active_records
+    )
+    if not desktop_dashboard:
+        signed_sql = """
+            SELECT count(DISTINCT application_cycle_id)
+              FROM contracts
+             WHERE application_cycle_id IS NOT NULL
+               AND contract_status='FullyExecuted'
+               AND dashboard_business_date(fully_executed_at)>=?
+               AND dashboard_business_date(fully_executed_at)<?
+        """
     offer_state_clause = ""
     if has_offer_state_events:
         offer_state_clause = """
@@ -107,6 +125,16 @@ def load_dashboard_workflow_metrics(
           AND dashboard_business_date(received_at)<?
           {offer_state_clause}
     """
+    if desktop_dashboard:
+        from dashboard_metric_details import load_dashboard_metric_rows
+
+        signed_week = len(load_dashboard_metric_rows(conn, "signing", week))
+        signed_month = len(load_dashboard_metric_rows(conn, "signing", month))
+        week_offers = len(load_dashboard_metric_rows(conn, "offers", week))
+    else:
+        signed_week = _count(conn, signed_sql, week)
+        signed_month = _count(conn, signed_sql, month)
+        week_offers = _count(conn, offer_sql, week)
     week_grants, month_grants = load_student_visa_grant_counts(conn, today=today)
     active_acceptance_clause = (
         "WHERE acceptance_status='active'"
@@ -131,9 +159,9 @@ def load_dashboard_workflow_metrics(
         unique_active_student_count=len({
             row.student_id for row in active_records if row.student_id is not None
         }),
-        signed_this_week=_count(conn, signed_sql, week),
-        signed_this_month=_count(conn, signed_sql, month),
-        week_offer_count=_count(conn, offer_sql, week),
+        signed_this_week=signed_week,
+        signed_this_month=signed_month,
+        week_offer_count=week_offers,
         week_grant_count=week_grants,
         month_grant_count=month_grants,
         signed_institution_structure=structure,

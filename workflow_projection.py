@@ -92,9 +92,13 @@ def load_current_workflow_projection(
     return tuple(rows)
 
 
-def load_stage_distribution(conn: sqlite3.Connection, *, read_context=None) -> StageDistribution:
-    rows = (read_context.workflow(conn) if read_context is not None
-            else load_current_workflow_projection(conn))
+def load_stage_distribution(
+    conn: sqlite3.Connection, *, read_context=None, projection=None
+) -> StageDistribution:
+    rows = projection
+    if rows is None:
+        rows = (read_context.workflow(conn) if read_context is not None
+                else load_current_workflow_projection(conn))
     cycle_ids_by_key: dict[str, list[int]] = {
         stage.key: [] for stage in ACTIVE_WORKFLOW_STAGES
     }

@@ -2754,14 +2754,14 @@ class CoreTests(unittest.TestCase):
 
         self.assertIn('<section class="metrics dashboard-metrics dashboard-kpi-grid">', html)
         self.assertEqual(html.count('<div class="metric">'), 6)
-        for title in ("在办流程", "本周签约", "本月签约", "本周下签", "本月下签", "本周 OFFER"):
+        for title in ("在办流程", "本周签约学生", "本月签约学生", "本周下签", "本月下签", "本周 OFFER"):
             self.assertIn(f"<span>{title}</span>", html)
         self.assertNotIn("在办学生", html)
         for retired in ("本周新增", "材料待审核", "等待家长", "本月获签"):
             self.assertNotIn(f"<span>{retired}</span>", html)
         for value in (52, 3, 5, 1, 2, 4):
             self.assertIn(f"<strong>{value}</strong>", html)
-        self.assertIn('/students?sort=stage', html)
+        self.assertIn('#dashboard-workflow-distribution-chart', html)
         self.assertEqual(html.count('/contracts?view=list'), 2)
         self.assertEqual(html.count('/students?sort=visa_expiry'), 2)
         self.assertIn('/students?sort=offer_expiry', html)

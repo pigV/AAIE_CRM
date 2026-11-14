@@ -29,8 +29,8 @@ def _student_case(case):
     return not subclasses or all(value == "500" for value in subclasses)
 
 
-def load_student_visa_grant_counts(conn: sqlite3.Connection, *, today: date) -> tuple[int, int]:
-    """Count distinct students independently inside each Melbourne date window."""
+def load_student_visa_grant_records(conn: sqlite3.Connection, *, today: date):
+    """Return qualifying grant records for each Melbourne date window."""
     present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     students = {str(row["student_id"]) for row in _rows(conn, "SELECT * FROM students")
                 if not row.get("deleted_at")}
@@ -54,7 +54,7 @@ def load_student_visa_grant_counts(conn: sqlite3.Connection, *, today: date) -> 
         from visa_document_lifecycle import case_projection
 
     windows = business_windows(today)
-    week_students, month_students = set(), set()
+    week_records, month_records = [], []
     for case in cases:
         student_id = str(case.get("student_id") or "").strip()
         if not student_id or student_id not in students or not _student_case(case):
@@ -81,8 +81,17 @@ def load_student_visa_grant_counts(conn: sqlite3.Connection, *, today: date) -> 
             day = business_date_iso(value)
             if day is None:
                 continue
+            record = {
+                "student_id": student_id, "date": day, "record_id": case["id"],
+                "subclass": case.get("visa_subclass") or "",
+            }
             if windows.week_start.isoformat() <= day < windows.week_end.isoformat():
-                week_students.add(student_id)
+                week_records.append(record)
             if windows.month_start.isoformat() <= day < windows.next_month.isoformat():
-                month_students.add(student_id)
-    return len(week_students), len(month_students)
+                month_records.append(record)
+    return week_records, month_records
+
+
+def load_student_visa_grant_counts(conn: sqlite3.Connection, *, today: date) -> tuple[int, int]:
+    week, month = load_student_visa_grant_records(conn, today=today)
+    return len({row["student_id"] for row in week}), len({row["student_id"] for row in month})

@@ -34,7 +34,7 @@
   gap: 16px;
 }
 
-.dashboard-transfer-v2 > header > a {
+.dashboard-transfer-v2 > header > strong {
   display: grid;
   min-width: 72px;
   min-height: 56px;
@@ -52,16 +52,21 @@
 }
 
 .dashboard-transfer-v2-stage-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
   min-width: 0;
   padding: 12px;
   border: 1px solid #dce5f3;
   border-radius: 12px;
   color: #173e73;
   text-decoration: none;
+}
+
+.dashboard-transfer-v2-stage-card > summary {
+  cursor: pointer;
+}
+
+.dashboard-transfer-v2-stage-card > summary > strong {
+  float: right;
+  margin-inline-start: 8px;
 }
 
 @media (max-width: 720px) {
@@ -247,6 +252,10 @@
   background: #fff;
   color: var(--aaie-chart-text);
   text-decoration: none;
+}
+
+.ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student[hidden] {
+  display: none;
 }
 
 .ui-premium-v2 #dashboard-workflow-distribution-chart .dashboard-workflow-distribution-chart__student:hover,

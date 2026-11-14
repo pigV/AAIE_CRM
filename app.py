@@ -460,7 +460,11 @@ from student_lifecycle.transfer_v2_projection import (
     TransferV2ProjectionError,
     load_transfer_v2_projection,
 )
-from student_lifecycle.transfer_v2_dashboard import build_transfer_v2_dashboard, is_active_transfer_stage
+from student_lifecycle.transfer_v2_dashboard import (
+    build_transfer_v2_dashboard,
+    is_active_transfer_stage,
+    transfer_dashboard_bucket,
+)
 from student_lifecycle import transfer_source_authority, transfer_contract_authority
 from student_lifecycle.transfer_v2_reminders import reconcile_transfer_v2_reminders
 from student_lifecycle.transfer_v2_service import (
@@ -8720,15 +8724,18 @@ def workflow_stage_label(stage):
     return dict(WORKFLOW_STAGES).get(stage, stage or "建档")
 
 
-def dashboard_kpi_cards_html(kpis):
+def dashboard_kpi_cards_html(kpis, *, metric_details=False):
+    def detail_link(metric, period, fallback):
+        return f"/dashboard/metrics/{metric}/{period}" if metric_details else fallback
+
     return f"""
         <section class="metrics dashboard-metrics dashboard-kpi-grid">
-          <div class="metric"><span>在办流程</span><strong>{kpis.in_progress_students}</strong><small>当前 ACTIVE Application Cycles</small><div class="metric-links"><a href="/students?sort=stage">查看在办流程</a></div></div>
-          <div class="metric"><span>本周签约</span><strong>{kpis.signed_this_week}</strong><small>本周完成签署的 Application Cycles</small><div class="metric-links"><a href="/contracts?view=list">查看合同</a></div></div>
-          <div class="metric"><span>本月签约</span><strong>{kpis.signed_this_month}</strong><small>本月完成签署的 Application Cycles</small><div class="metric-links"><a href="/contracts?view=list">查看合同</a></div></div>
-          <div class="metric"><span>本周下签</span><strong>{kpis.visa_granted_this_week}</strong><small>本周按获签日期去重统计</small><div class="metric-links"><a href="/students?sort=visa_expiry">查看签证学生</a></div></div>
-          <div class="metric"><span>本月下签</span><strong>{kpis.visa_granted_this_month}</strong><small>本月按获签日期去重统计</small><div class="metric-links"><a href="/students?sort=visa_expiry">查看签证学生</a></div></div>
-          <div class="metric"><span>本周 OFFER</span><strong>{kpis.offers_uploaded_this_week}</strong><small>本周实际收到的 canonical Formal Offer</small><div class="metric-links"><a href="/students?sort=offer_expiry">查看 OFFER</a></div></div>
+          <div class="metric"><span>在办流程</span><strong>{kpis.in_progress_students}</strong><small>当前 ACTIVE Application Cycles</small><div class="metric-links"><a href="#dashboard-workflow-distribution-chart">查看在办流程</a></div></div>
+          <div class="metric"><span>本周签约学生</span><strong>{kpis.signed_this_week}</strong><small>本周完成签署的学生人数</small><div class="metric-links"><a href="{detail_link("signing", "week", "/contracts?view=list")}">查看合同</a></div></div>
+          <div class="metric"><span>本月签约学生</span><strong>{kpis.signed_this_month}</strong><small>本月完成签署的学生人数</small><div class="metric-links"><a href="{detail_link("signing", "month", "/contracts?view=list")}">查看合同</a></div></div>
+          <div class="metric"><span>本周下签</span><strong>{kpis.visa_granted_this_week}</strong><small>本周按获签日期去重统计</small><div class="metric-links"><a href="{detail_link("grants", "week", "/students?sort=visa_expiry")}">查看签证学生</a></div></div>
+          <div class="metric"><span>本月下签</span><strong>{kpis.visa_granted_this_month}</strong><small>本月按获签日期去重统计</small><div class="metric-links"><a href="{detail_link("grants", "month", "/students?sort=visa_expiry")}">查看签证学生</a></div></div>
+          <div class="metric"><span>本周 OFFER</span><strong>{kpis.offers_uploaded_this_week}</strong><small>本周正式 Offer 接收事件（份）</small><div class="metric-links"><a href="{detail_link("offers", "week", "/students?sort=offer_expiry")}">查看 OFFER</a></div></div>
         </section>"""
 
 
@@ -10285,7 +10292,7 @@ def dashboard_workflow_distribution_chart_html(stage_students):
             for student in students
         ) or '<p class="dashboard-workflow-distribution-chart__empty">暂无学生</p>'
         rows.append(f"""<details class="dashboard-workflow-distribution-chart__row{muted_class}">
-          <summary aria-label="展开{esc(label)}学生名单，共 {stage_count} 人">
+          <summary aria-label="展开{esc(label)}明细，共 {stage_count} 个申请周期">
             <span class="dashboard-workflow-distribution-chart__label"><span class="dashboard-workflow-distribution-chart__index">{index + 1}</span><span class="dashboard-workflow-distribution-chart__name">{esc(label)}</span></span>
             <svg class="dashboard-workflow-distribution-chart__svg" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="{esc(label)}：{stage_count}">
               <title>{esc(label)}：{stage_count}</title>
@@ -10298,9 +10305,9 @@ def dashboard_workflow_distribution_chart_html(stage_students):
         </details>""")
     return f"""
       <link rel="stylesheet" href="/assets/student-lifecycle-phase6.css?v=1">
-      <script defer src="/assets/student-lifecycle-phase6.js?v=1"></script>
+      <script defer src="/assets/student-lifecycle-phase6.js?v=2"></script>
       <section id="dashboard-workflow-distribution-chart" class="dashboard-workflow-distribution-chart" aria-label="学生申请阶段分布横向条形图" data-lifecycle-stage-distribution>
-        <header class="dashboard-workflow-distribution-chart__header"><div><h2>学生申请阶段分布</h2><p>按正式业务记录自动判断；点击阶段可原地查看学生和待办原因。</p></div>
+        <header class="dashboard-workflow-distribution-chart__header"><div><h2>学生申请阶段分布</h2><p>按正式业务记录自动判断；按申请周期计数，点击阶段查看对应流程和待办原因。</p></div>
           <div class="lifecycle-stage-filters" role="group" aria-label="Lifecycle Type filter">{''.join(f'<button type="button" class="secondary compact{" active" if key == "all" else ""}" data-lifecycle-stage-filter="{key}" aria-pressed="{"true" if key == "all" else "false"}">{label}</button>' for key, label in (("all", "ALL"), ("initial", "INITIAL"), ("transfer", "TRANSFER"), ("progression", "PROGRESSION")))}</div>
         </header>
         <div class="dashboard-lifecycle-active-cards" aria-label="当前转学与升学业务">
@@ -10317,17 +10324,27 @@ def dashboard_workflow_distribution_chart_html(stage_students):
 
 
 def dashboard_transfer_v2_stage_cards_html(stage_students):
+    stage_students = tuple(stage_students)
     dashboard = build_transfer_v2_dashboard(stage_students)
+    links = {item.key: [] for item in dashboard.stages}
+    for row in stage_students:
+        bucket = transfer_dashboard_bucket(row)
+        if bucket is None:
+            continue
+        links[bucket].append(
+            f'<li><a href="{esc(dashboard_application_stage_destination(row))}">'
+            f'{esc(row.student_name)} · {esc(row.stage.label)} · 周期 #{esc(row.cycle_id)}</a></li>'
+        )
     cards = "".join(
-        f'<a class="dashboard-transfer-v2-stage-card" data-transfer-v2-stage="{esc(item.key)}" '
-        f'href="/students?lifecycle_type=transfer&amp;stage={esc(item.key)}">'
-        f'<span>{esc(item.label)}</span><strong>{item.count}</strong></a>'
+        f'<details class="dashboard-transfer-v2-stage-card" data-transfer-v2-stage="{esc(item.key)}">'
+        f'<summary><span>{esc(item.label)}</span><strong>{item.count}</strong></summary>'
+        f'<ul>{"".join(links[item.key]) or "<li>暂无申请周期</li>"}</ul></details>'
         for item in dashboard.stages
     )
     return f"""
       <section class="panel dashboard-transfer-v2" data-transfer-v2-dashboard>
-        <header><div><span class="eyebrow">Transfer V2</span><h2>转学中总数</h2></div>
-          <a href="/students?lifecycle_type=transfer&amp;stage=transfer_active"><strong>{dashboard.active_total}</strong></a></header>
+        <header><div><h2>转学中总数</h2></div>
+          <strong>{dashboard.active_total}</strong></header>
         <div class="dashboard-transfer-v2-stage-grid">{cards}</div>
       </section>
     """
@@ -27331,6 +27348,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 return self.error_page("安全验证已过期，请刷新页面后重试。", HTTPStatus.FORBIDDEN)
             routes = [
                 (r"^/$", self.dashboard),
+                (r"^/dashboard/metrics/(signing|grants|offers)/(week|month)$", self.dashboard_metric_detail),
                 (r"^/view-mode/(mobile|desktop)$", self.view_mode_switch),
                 (r"^/mobile$", self.mobile_dashboard),
                 (r"^/revenue$", self.revenue_workspace),
@@ -27918,7 +27936,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
     def route_module_key(self, path):
         if path == "/agent-reach" or path.startswith("/agent-reach/"):
             return "agent_reach"
-        if path == "/":
+        if path == "/" or path.startswith("/dashboard/metrics/"):
             return "dashboard"
         if path == "/account":
             return "dashboard"
@@ -30967,6 +30985,101 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         with DashboardReadContext(db) as read_context:
             return self._dashboard_read_snapshot(method, read_context)
 
+    def dashboard_metric_detail(self, method, metric, period):
+        from dashboard_business_time import business_windows
+        from dashboard_metric_details import load_dashboard_metric_rows, group_dashboard_metric_records
+        from dashboard_visa_metrics import load_student_visa_grant_records
+
+        if method != "GET":
+            return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
+        if metric == "offers" and period != "week":
+            return self.error_page("页面不存在", HTTPStatus.NOT_FOUND)
+        if metric == "signing" and not can_view_contract_center(self.user):
+            return self.deny_module_access("contract_management_center")
+        if metric != "signing":
+            module = "visa" if metric == "grants" else "offer"
+            if not can_access_module(self.user, module):
+                return self.deny_module_access(module)
+        today = datetime.now(ZoneInfo("Australia/Melbourne")).date()
+        windows = business_windows(today)
+        parameters = windows.week_parameters if period == "week" else windows.month_parameters
+        with db.read_snapshot() as connection:
+            if not is_workflow_v2_active(connection):
+                return self.error_page("页面不存在", HTTPStatus.NOT_FOUND)
+            if metric == "grants":
+                week, month = load_student_visa_grant_records(connection, today=today)
+                groups = group_dashboard_metric_records(metric, week if period == "week" else month)
+            else:
+                groups = load_dashboard_metric_rows(connection, metric, parameters)
+            student_ids = {str(group[0]["student_id"]) for group in groups if group[0]["student_id"]}
+            names = {}
+            if student_ids:
+                from student_application_stage_distribution import _student_names
+
+                names = _student_names(connection, tuple(student_ids))
+        title = {"signing": "签约学生", "grants": "下签", "offers": "OFFER"}[metric]
+        period_label = "本周" if period == "week" else "本月"
+        unit = "份" if metric == "offers" else "人"
+        start, end = (date.fromisoformat(value) for value in parameters)
+        periods = ("week",) if metric == "offers" else ("week", "month")
+        tabs = "".join(
+            f'<a class="secondary button-link" href="/dashboard/metrics/{metric}/{key}"'
+            f'{" aria-current=page" if key == period else ""}>{"本周" if key == "week" else "本月"}</a>'
+            for key in periods
+        )
+        rows = []
+        for group in groups:
+            latest = group[0]
+            sid = str(latest["student_id"] or "")
+            name = names.get(sid, sid or "尚未建档")
+            items = []
+            for record in group:
+                record_id = int(record["record_id"])
+                if metric == "signing":
+                    cycle_id = record["application_cycle_id"]
+                    cycle = f"申请周期 #{cycle_id}" if cycle_id is not None else "未关联申请周期"
+                    detail = f'{record["title"] or "合同"} #{record_id} · {cycle}'
+                    href = (
+                        f"/contracts?view=list#contract-record-{record_id}"
+                        if can_view_contract_center(self.user) else ""
+                    )
+                elif metric == "grants":
+                    detail = f'签证案件 #{record_id} · 子类 {record["subclass"] or "未记录"}'
+                    href = (
+                        f"/visa-management/cases/{record_id}"
+                        if can_access_module(self.user, "visa") else ""
+                    )
+                else:
+                    cycle_id = record["application_cycle_id"]
+                    detail = f'{record["title"]} · Offer #{record_id} · 申请周期 #{cycle_id}'
+                    href = ""
+                    if sid and can_access_module(self.user, "students") and can_access_module(self.user, "offer"):
+                        legacy_id = record["legacy_offer_id"]
+                        anchor = f"#offer-card-{legacy_id}" if legacy_id else ""
+                        href = f"/students/{quote(sid)}?tab=offer{anchor}"
+                label = f'{record["date"]} · {detail}'
+                item = f'<a href="{esc(href)}">{esc(label)}</a>' if href else esc(label)
+                items.append(f"<li>{item}</li>")
+            description = f'<ul>{"".join(items)}</ul>'
+            if metric != "offers":
+                description = f'<details><summary>{len(items)} 条计入记录</summary>{description}</details>'
+            rows.append(
+                f'<tr data-dashboard-metric-row><td>{esc(name)} <small>{esc(sid)}</small></td>'
+                f'<td>{esc(latest["date"])}</td><td>{description}</td></tr>'
+            )
+        table_rows = "".join(rows) or '<tr><td colspan="3" class="empty">本期暂无记录</td></tr>'
+        body = f"""
+        <section class="panel">
+          <div class="panel-head"><h2>{period_label}{title}明细</h2><a href="/">返回首页</a></div>
+          <nav aria-label="统计期间">{tabs}</nav>
+          <p>{start.isoformat()} 至 {(end - timedelta(days=1)).isoformat()}（墨尔本时间）</p>
+          <p>共 <strong data-dashboard-metric-total>{len(groups)}</strong> {unit}</p>
+          <div class="table-wrap"><table><thead><tr><th>学生</th><th>日期</th><th>计入记录</th></tr></thead>
+          <tbody>{table_rows}</tbody></table></div>
+        </section>
+        """
+        return self.send_html(page(f"{period_label}{title}明细", body, self.user, self.csrf, "dashboard", nas.status()))
+
     def _dashboard_read_snapshot(self, method, read_context):
         melbourne_today = datetime.now(ZoneInfo("Australia/Melbourne")).date()
         final_workflow_stage = WORKFLOW_STAGES[-1][0]
@@ -30981,10 +31094,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
         finally:
             db._release_connection(kpi_connection)
-        kpi_cards_html = dashboard_kpi_cards_html(dashboard_kpis)
+        kpi_cards_html = dashboard_kpi_cards_html(
+            dashboard_kpis, metric_details=is_workflow_v2_active(db)
+        )
         stage_connection = db.connect()
         try:
-            application_stage_students = load_application_stage_distribution(stage_connection, read_context=read_context)
+            application_stage_students = load_application_stage_distribution(
+                stage_connection, read_context=read_context, cycles_only=True
+            )
         finally:
             db._release_connection(stage_connection)
         stage_chart_html = dashboard_workflow_distribution_chart_html(application_stage_students)
@@ -30994,8 +31111,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         recent = db.all(
             """SELECT s.student_id,s.passport_first_name,s.passport_last_name,s.created_date
                FROM students s
-               WHERE s.deleted_at IS NULL
-               ORDER BY s.created_date DESC LIMIT 8"""
+               WHERE COALESCE(s.deleted_at,'')=''
+               ORDER BY s.created_date DESC, s.student_id DESC LIMIT 8"""
         )
         recent_summary_connection = db.connect()
         try:
@@ -31036,7 +31153,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         rows = "".join(recent_student_row_html(row) for row in recent) or '<tr><td colspan="6" class="empty">尚无学生记录</td></tr>'
         signed_institution_structure = dashboard_signed_institution_structure_data()
         signed_institution_structure_html = dashboard_signed_institution_structure_chart_html(signed_institution_structure)
-        dashboard_workflow_chart_css = '<link rel="stylesheet" href="/assets/dashboard-workflow-distribution-chart-v1.css?v=10">'
+        dashboard_workflow_chart_css = '<link rel="stylesheet" href="/assets/dashboard-workflow-distribution-chart-v1.css?v=11">'
         dashboard_signed_institution_css = '<link rel="stylesheet" href="/assets/dashboard-signed-institution-structure-chart-v1.css?v=4">'
         body = f"""
         {dashboard_workflow_chart_css}
@@ -60713,7 +60830,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             elif not is_current_accepted:
                 accept_action = '<span class="offer-accept-disabled">完善学校匹配后可设为已接受</span>'
             rows.append(
-                f'<article class="student-file-record offer-record-card{" offer-record-card--muted" if is_muted else ""}" data-offer-current-accepted="{"true" if is_current_accepted else "false"}" data-offer-accept-eligible="{"true" if classification_resolved and not legacy_accepted_conflict and not current_requires_history_review else "false"}">'
+                f'<article id="offer-card-{offer["id"]}" class="student-file-record offer-record-card{" offer-record-card--muted" if is_muted else ""}" data-offer-current-accepted="{"true" if is_current_accepted else "false"}" data-offer-accept-eligible="{"true" if classification_resolved and not legacy_accepted_conflict and not current_requires_history_review else "false"}">'
                 f'<div class="student-file-record-main">'
                 f'{lifecycle_context_badge_html(lifecycle_contexts.get(int(offer["id"])))}'
                 f'<div class="student-file-record-head"><div><span class="status">{esc(document_label)}</span>'
@@ -72288,13 +72405,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 void_note = f'<div class="contract-void-note">VOID / 已作废：{esc(contract["void_reason"] or "未记录原因")}</div>'
             if compact_columns:
                 rows.append(
-                    f'<tr data-contract-row data-contract-id="{contract["id"]}"><td>{esc(student_name)}</td><td>{student_link}</td><td>{esc(dob)}</td>'
+                    f'<tr id="contract-record-{contract["id"]}" data-contract-row data-contract-id="{contract["id"]}"><td>{esc(student_name)}</td><td>{student_link}</td><td>{esc(dob)}</td>'
                     f'<td>{esc(contract["contract_type"])}{void_note}</td><td>{contract_status_badge(contract)}{signature_preview}</td>'
                     f'<td>{esc(contract["consulting_and_visa_service_fee"] or "")}</td>{common_tail}'
                 )
             else:
                 rows.append(
-                    f'<tr data-contract-row data-contract-id="{contract["id"]}"><td><strong>{esc(uid)}</strong></td><td>{esc(student_name)}</td><td>{student_link}</td><td>{esc(dob)}</td>'
+                    f'<tr id="contract-record-{contract["id"]}" data-contract-row data-contract-id="{contract["id"]}"><td><strong>{esc(uid)}</strong></td><td>{esc(student_name)}</td><td>{student_link}</td><td>{esc(dob)}</td>'
                     f'<td>{esc(contract["contract_type"])}{void_note}</td><td>{contract_status_badge(contract)}{signature_preview}</td>'
                     f'<td>{esc(contract["consulting_and_visa_service_fee"] or "")}</td><td>{esc(contract["service_fee_currency"] or "")}</td><td>{esc(contract["final_fee_amount"] or "")}</td>'
                     f'<td>{esc(contract["parent_signer_name"] or data.get("parent_signer_name") or "")}</td>{common_tail}'

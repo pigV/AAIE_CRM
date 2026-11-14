@@ -124,7 +124,7 @@ def load_student_management_summary_map(
         f"""SELECT student_id,passport_first_name,passport_last_name,
                    applying_year_level,created_date
               FROM students
-             WHERE deleted_at IS NULL AND student_id IN ({placeholders})""",
+             WHERE COALESCE(deleted_at,'')='' AND student_id IN ({placeholders})""",
         ids,
     )
     stages = load_application_stage_result_map(connection, ids, read_context=read_context)

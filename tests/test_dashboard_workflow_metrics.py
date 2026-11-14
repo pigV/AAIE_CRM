@@ -102,6 +102,19 @@ class DashboardWorkflowMetricsTests(unittest.TestCase):
         )
         self.assertEqual(2, metrics.active_workflow_count)
 
+    def test_desktop_excludes_deleted_owner_but_keeps_unregistered_cycle(self):
+        self.conn.execute("ALTER TABLE students ADD COLUMN deleted_at TEXT")
+        create_student_cycle(self.conn, "S1", "initial", NOW, 1, cycle_uid="deleted-owner")
+        create_parent_form_cycle(self.conn, "parent-token-1", NOW, 1)
+        self.conn.execute("UPDATE students SET deleted_at=? WHERE student_id='S1'", (NOW,))
+
+        metrics = load_dashboard_workflow_metrics(
+            self.conn, today=date(2026, 8, 7), desktop_dashboard=True
+        )
+
+        self.assertEqual(1, metrics.active_workflow_count)
+        self.assertIsNone(metrics.active_records[0].student_id)
+
     def test_offer_metric_counts_real_events_not_students_or_documents(self):
         cycle, private_id = self._student_offer_cycle()
         for number in range(5):
@@ -137,7 +150,7 @@ class DashboardWorkflowMetricsTests(unittest.TestCase):
 
         self.assertEqual(5, metrics.week_offer_count)
 
-    def test_contract_metric_counts_cycle_once_with_exclusive_week_boundary(self):
+    def test_contract_metric_counts_student_once_and_includes_unlinked_transfer_with_exclusive_week_boundary(self):
         cycle, _ = self._student_offer_cycle()
         self.conn.execute(
             """
@@ -155,10 +168,16 @@ class DashboardWorkflowMetricsTests(unittest.TestCase):
             (cycle.id,),
         )
 
-        metrics = load_dashboard_workflow_metrics(self.conn, today=date(2026, 8, 7))
+        self.conn.execute("ALTER TABLE contracts ADD COLUMN contract_type TEXT")
+        self.conn.execute(
+            """INSERT INTO contracts(student_id,contract_status,fully_executed_at,contract_type)
+               VALUES('S2','FullyExecuted','2026-08-04','TransferApplicationContract')"""
+        )
 
-        self.assertEqual(1, metrics.signed_this_week)
-        self.assertEqual(1, metrics.signed_this_month)
+        metrics = load_dashboard_workflow_metrics(self.conn, today=date(2026, 8, 7), desktop_dashboard=True)
+
+        self.assertEqual(2, metrics.signed_this_week)
+        self.assertEqual(2, metrics.signed_this_month)
 
     def test_grant_counts_first_event_and_refusal_only_closes_cycle(self):
         grant_cycle = self._insert_closed_cycle("S1", "grant-cycle", "granted", 1)

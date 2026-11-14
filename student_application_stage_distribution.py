@@ -209,37 +209,44 @@ def _student_names(connection, student_ids: tuple[str, ...]) -> dict[str, str]:
     return names
 
 
-def _canonical_distribution(connection, *, read_context=None) -> tuple[ApplicationStageStudent, ...]:
+def _canonical_distribution(connection, *, read_context=None, cycles_only=False) -> tuple[ApplicationStageStudent, ...]:
     projection = (read_context.workflow(connection) if read_context is not None
                   else load_current_workflow_projection(connection))
-    transfer_candidates = {
-        str(row.student_id) for row in projection if row.student_id
-    }
-    if _table_exists(connection, "contracts"):
-        contract_columns = _columns(connection, "contracts")
-        if {"student_id", "contract_type"}.issubset(contract_columns):
-            deleted = " AND deleted_at IS NULL" if "deleted_at" in contract_columns else ""
-            voided = " AND voided_at IS NULL" if "voided_at" in contract_columns else ""
+    if cycles_only:
+        from dashboard_workflow_metrics import dashboard_active_cycles
+
+        projection = dashboard_active_cycles(connection, projection)
+        student_ids = tuple({str(row.student_id) for row in projection if row.student_id})
+        student_workflow = {}
+    else:
+        transfer_candidates = {
+            str(row.student_id) for row in projection if row.student_id
+        }
+        if _table_exists(connection, "contracts"):
+            contract_columns = _columns(connection, "contracts")
+            if {"student_id", "contract_type"}.issubset(contract_columns):
+                deleted = " AND deleted_at IS NULL" if "deleted_at" in contract_columns else ""
+                voided = " AND voided_at IS NULL" if "voided_at" in contract_columns else ""
+                transfer_candidates.update(
+                    str(row[0])
+                    for row in connection.execute(
+                        """SELECT DISTINCT student_id FROM contracts
+                             WHERE contract_type='TransferApplicationContract'"""
+                        + deleted
+                        + voided
+                    ).fetchall()
+                    if row[0]
+                )
+        if _table_exists(connection, "application_cycles"):
             transfer_candidates.update(
                 str(row[0])
                 for row in connection.execute(
-                    """SELECT DISTINCT student_id FROM contracts
-                         WHERE contract_type='TransferApplicationContract'"""
-                    + deleted
-                    + voided
+                    """SELECT DISTINCT student_id FROM application_cycles
+                         WHERE cycle_type='transfer' AND student_id IS NOT NULL"""
                 ).fetchall()
-                if row[0]
             )
-    if _table_exists(connection, "application_cycles"):
-        transfer_candidates.update(
-            str(row[0])
-            for row in connection.execute(
-                """SELECT DISTINCT student_id FROM application_cycles
-                     WHERE cycle_type='transfer' AND student_id IS NOT NULL"""
-            ).fetchall()
-        )
-    student_ids = tuple(transfer_candidates)
-    student_workflow = load_student_workflow_projection_map(connection, student_ids, read_context=read_context)
+        student_ids = tuple(transfer_candidates)
+        student_workflow = load_student_workflow_projection_map(connection, student_ids, read_context=read_context)
     names = _student_names(connection, student_ids)
     cycle_ids = tuple(row.cycle_id for row in projection)
     cycle_meta = {}
@@ -634,9 +641,9 @@ def load_application_stage_result_map(
     }
 
 
-def load_application_stage_distribution(connection, *, read_context=None) -> tuple[ApplicationStageStudent, ...]:
+def load_application_stage_distribution(connection, *, read_context=None, cycles_only=False) -> tuple[ApplicationStageStudent, ...]:
     if uses_canonical_workflow(connection):
-        return _canonical_distribution(connection, read_context=read_context)
+        return _canonical_distribution(connection, read_context=read_context, cycles_only=cycles_only)
     students = []
     for fact in _load_application_stage_fact_map(connection).values():
         stage = classify_application_stage(fact)

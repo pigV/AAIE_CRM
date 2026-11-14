@@ -9,7 +9,8 @@ document.addEventListener("click", (event) => {
     item.classList.toggle("active", active);
     item.setAttribute("aria-pressed", active ? "true" : "false");
   });
-  chart.querySelectorAll(".dashboard-workflow-distribution-chart__row").forEach((row) => {
+  const rows = Array.from(chart.querySelectorAll(".dashboard-workflow-distribution-chart__row"));
+  const counts = rows.map((row) => {
     let visible = 0;
     row.querySelectorAll("[data-lifecycle-type]").forEach((student) => {
       const show = requested === "all" || student.dataset.lifecycleType === requested;
@@ -19,6 +20,19 @@ document.addEventListener("click", (event) => {
     const count = row.querySelector("[data-lifecycle-filter-count]");
     if (count) count.textContent = String(visible);
     row.classList.toggle("dashboard-workflow-distribution-chart__row--muted", visible === 0);
+    const summary = row.querySelector("summary");
+    const stage = row.querySelector(".dashboard-workflow-distribution-chart__name").textContent;
+    summary.setAttribute("aria-label", `展开${stage}明细，共 ${visible} 个申请周期`);
+    row.querySelector("svg").setAttribute("aria-label", `${stage}：${visible}`);
+    row.querySelector("title").textContent = `${stage}：${visible}`;
+    return visible;
+  });
+  const max = Math.max(1, ...counts);
+  rows.forEach((row, index) => {
+    const width = `${counts[index] / max * 100}%`;
+    const bar = row.querySelector(".dashboard-workflow-distribution-chart__svg-fill");
+    bar.setAttribute("width", width);
+    bar.dataset.width = width;
   });
 });
 

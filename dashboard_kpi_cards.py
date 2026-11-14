@@ -39,7 +39,9 @@ def load_dashboard_kpis(
     if is_workflow_v2_active(connection):
         from dashboard_workflow_metrics import load_dashboard_workflow_metrics
 
-        metrics = load_dashboard_workflow_metrics(connection, today=today, read_context=read_context)
+        metrics = load_dashboard_workflow_metrics(
+            connection, today=today, read_context=read_context, desktop_dashboard=True
+        )
         return DashboardKpis(
             in_progress_students=metrics.active_workflow_count,
             signed_this_week=metrics.signed_this_week,
