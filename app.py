@@ -10305,13 +10305,13 @@ def dashboard_workflow_distribution_chart_html(stage_students):
           <div class="dashboard-workflow-distribution-chart__students">{student_links}</div>
         </details>""")
     return f"""
-      <link rel="stylesheet" href="/assets/student-lifecycle-phase6.css?v=1">
+      <link rel="stylesheet" href="/assets/student-lifecycle-phase6.css?v=4">
       <script defer src="/assets/student-lifecycle-phase6.js?v=2"></script>
       <section id="dashboard-workflow-distribution-chart" class="dashboard-workflow-distribution-chart" aria-label="学生申请阶段分布横向条形图" data-lifecycle-stage-distribution>
         <header class="dashboard-workflow-distribution-chart__header"><div><h2>学生申请阶段分布</h2><p>共 {total_count} 个在办周期 · 点击阶段查看对应流程和待办原因。</p></div>
-          <div class="lifecycle-stage-filters" role="group" aria-label="Lifecycle Type filter">{''.join(f'<button type="button" class="secondary compact{" active" if key == "all" else ""}" data-lifecycle-stage-filter="{key}" aria-pressed="{"true" if key == "all" else "false"}">{label}</button>' for key, label in (("all", "ALL"), ("initial", "INITIAL"), ("transfer", "TRANSFER"), ("progression", "PROGRESSION")))}</div>
+          <div class="lifecycle-stage-filters" role="group" aria-label="Lifecycle Type filter" hidden>{''.join(f'<button type="button" class="secondary compact{" active" if key == "all" else ""}" data-lifecycle-stage-filter="{key}" aria-pressed="{"true" if key == "all" else "false"}">{label}</button>' for key, label in (("all", "ALL"), ("initial", "INITIAL"), ("transfer", "TRANSFER"), ("progression", "PROGRESSION")))}</div>
         </header>
-        <div class="dashboard-lifecycle-active-cards" aria-label="当前转学与升学业务">
+        <div class="dashboard-lifecycle-active-cards" aria-label="当前转学与升学业务" hidden>
           <button type="button" class="dashboard-lifecycle-active-card dashboard-lifecycle-active-card--transfer" data-lifecycle-stage-filter="transfer" aria-pressed="false">
             <span>正在转学</span><strong data-lifecycle-active-count="transfer">{active_counts['transfer']}</strong><small>查看各阶段与学生</small>
           </button>

@@ -152,6 +152,8 @@
 .lifecycle-module-business-control button { width: auto; }
 .lifecycle-module-business-control [hidden] { display: none !important; }
 .lifecycle-stage-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.lifecycle-stage-filters[hidden],
+.dashboard-lifecycle-active-cards[hidden] { display: none; }
 .lifecycle-stage-filters .active { background: #315bef; color: #fff; }
 .dashboard-lifecycle-active-cards {
   display: grid;
