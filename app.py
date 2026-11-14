@@ -10183,23 +10183,10 @@ def dashboard_signed_institution_structure_chart_html(data):
         "按院校或校区所在地归类",
         "已定位",
     )
-    coverage = data.get("coverage", {})
-    type_percent = coverage.get("type_percent", round((recognized / total * 100), 2) if total else 0)
-    city_percent = coverage.get("city_percent", 0)
     empty_html = '<p class="dashboard-signed-institution-structure-chart__empty">暂无 SignedOffer 记录。</p>' if data.get("empty") else ""
     return f"""
       <section id="dashboard-signed-institution-structure-chart" class="dashboard-signed-institution-structure-chart" aria-label="学生签署院校结构">
-        <header class="dashboard-signed-institution-structure-chart__header">
-          <div><h2>学生签署院校结构</h2><p>按每个 Application Cycle 的 Final Accepted / Signed School 统计。</p></div>
-        </header>
         <div class="dashboard-signed-institution-structure-chart__content">
-          <div class="dashboard-signed-institution-structure-chart__summary-strip">
-            <span><strong>{data.get("involved_student_count", 0)}</strong> 名学生</span>
-            <span><strong>{total}</strong> Final Accepted Cycle</span>
-            <span>类型覆盖 <strong>{type_percent:.2f}%</strong></span>
-            <span>城市覆盖 <strong>{city_percent:.2f}%</strong></span>
-            <span>历史 fallback <strong>{int(data.get("fallback_usage_count", 0))}</strong></span>
-          </div>
           <div class="dashboard-signed-institution-structure-chart__donut-grid">
             {type_donut}
             {metro_donut}
