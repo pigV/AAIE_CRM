@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from dashboard_confirmed_stages import STAGE_DETAILS, held_case_cycles, load_confirmed_cycle_stages
+from dashboard_confirmed_stages import (
+    SCHOOL_APPLICATION_CLOSED, STAGE_DETAILS, held_case_cycles, load_confirmed_cycle_stages,
+)
 from workflow_projection import load_current_workflow_projection
 from student_lifecycle.transfer_state import load_student_transfer_state_map
 
@@ -104,6 +106,8 @@ def load_student_workflow_projection_map(
                             "archived": "已归档", "completed": "已完成",
                         }.get(held.get(projection.cycle_id), "暂无符合统计条件的申请阶段"), None, 0,
                     )
+                elif result[0] == SCHOOL_APPLICATION_CLOSED:
+                    stage_key, stage_label, blocker, stage_order = result[0], result[1], None, 0
                 else:
                     stage_key, blocker = result
                     stage_order, stage_label, _ = STAGE_DETAILS[stage_key]

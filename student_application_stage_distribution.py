@@ -7,7 +7,7 @@ from typing import Iterable, Mapping
 
 from security import is_expired
 from dashboard_confirmed_stages import (
-    STAGES as DASHBOARD_STAGE_DEFINITIONS, STAGE_DETAILS, load_confirmed_cycle_stages,
+    SCHOOL_APPLICATION_CLOSED, STAGES as DASHBOARD_STAGE_DEFINITIONS, STAGE_DETAILS, load_confirmed_cycle_stages,
 )
 from workflow_projection import load_current_workflow_projection
 from workflow_resolver import ACTIVE_WORKFLOW_STAGES
@@ -488,7 +488,7 @@ def _canonical_distribution(connection, *, read_context=None, cycles_only=False)
             stage = _canonical_stage_result(row)
             if row.cycle_id in dashboard_stages:
                 resolved = dashboard_stages[row.cycle_id]
-                if resolved is None:
+                if resolved is None or resolved[0] == SCHOOL_APPLICATION_CLOSED:
                     continue
                 key, blocker = resolved
                 index, label, destination = STAGE_DETAILS[key]

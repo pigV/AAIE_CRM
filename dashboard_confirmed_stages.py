@@ -28,6 +28,9 @@ STAGES = (
 )
 
 
+SCHOOL_APPLICATION_CLOSED = "school_application_closed"
+
+
 STAGE_DETAILS = {
     key: (index, label, destination)
     for index, (key, label, destination) in enumerate(STAGES, 1)
@@ -178,20 +181,34 @@ def load_dashboard_stages(connection, cycle_ids):
     """, cycle_ids):
         contracts.setdefault(row["application_cycle_id"], _contract_status(row))
 
-    submitted = set()
-    preparing_cases = set()
-    for table, eligible in (
-        ("public_application_groups", "('submitted','waiting_response')"),
-        ("private_school_applications",
-         "('submitted','interview','test','waiting_list','additional_documents','offer_received')"),
-        ("higher_education_applications", "('submitted','offer received')"),
-    ):
-        submitted.update(row[0] for row in connection.execute(f"""
-            SELECT DISTINCT application_cycle_id FROM {table}
-             WHERE application_cycle_id IN ({marks}) AND lower(status) IN {eligible}
-               AND trim(coalesce(submitted_at,''))<>''
-        """, cycle_ids))
+    school_responses = {}
+    for cycle_id, status in connection.execute(f"""
+        WITH requested_cycles AS (
+            SELECT id, student_id FROM application_cycles WHERE id IN ({marks})
+        )
+        SELECT grp.application_cycle_id, preference.application_status
+          FROM public_application_groups grp
+          JOIN requested_cycles cycle ON cycle.id=grp.application_cycle_id
+               AND cycle.student_id=grp.student_id
+          JOIN public_application_preferences preference ON preference.public_application_group_id=grp.id
+         WHERE grp.status IN ('submitted','waiting_response')
+           AND trim(coalesce(grp.submitted_at,''))<>''
+           AND preference.application_status<>'planned'
+        UNION ALL
+        SELECT application.application_cycle_id, application.status
+          FROM private_school_applications application
+          JOIN requested_cycles cycle ON cycle.id=application.application_cycle_id
+               AND cycle.student_id=application.student_id
+         WHERE trim(coalesce(application.submitted_at,''))<>''
+        UNION ALL
+        SELECT application_cycle_id, lower(status)
+          FROM higher_education_applications
+         WHERE application_cycle_id IN (SELECT id FROM requested_cycles) AND is_current=1
+           AND trim(coalesce(submitted_at,''))<>''
+    """, cycle_ids):
+        school_responses.setdefault(cycle_id, set()).add(status)
 
+    preparing_cases = set()
     for table in ("public_application_groups", "private_school_applications", "higher_education_applications"):
         preparing_cases.update(row[0] for row in connection.execute(
             f"SELECT DISTINCT application_cycle_id FROM {table} WHERE application_cycle_id IN ({marks})",
@@ -204,11 +221,11 @@ def load_dashboard_stages(connection, cycle_ids):
         SELECT cycle.id, target.application_status FROM application_cycles cycle
           JOIN progression_target_applications target ON target.case_id=cycle.source_student_case_id
          WHERE cycle.id IN ({marks}) AND cycle.cycle_type='progression'
-           AND target.application_status NOT IN ('withdrawn','not_proceeding')
     """, cycle_ids):
-        progression_targets.setdefault(cycle_id, set()).add(status)
-        if status in {"submitted", "offer_received", "offer_accepted"}:
-            submitted.add(cycle_id)
+        if status not in {"withdrawn", "not_proceeding"}:
+            progression_targets.setdefault(cycle_id, set()).add(status)
+        if status in {"submitted", "offer_received", "offer_accepted", "rejected", "withdrawn", "not_proceeding"}:
+            school_responses.setdefault(cycle_id, set()).add(status)
 
     offers = {}
     for row in _rows(connection, f"""
@@ -357,14 +374,26 @@ def load_dashboard_stages(connection, cycle_ids):
             required = False
             if contract is None:
                 contract = "not_required"
+        responses = school_responses.get(cycle_id, set())
+        waiting_for_school = bool(responses & {
+            "submitted", "interview", "test", "waiting_list", "additional_documents",
+        })
         resolved = resolve_dashboard_stage(
             form_live=form_live, form_submitted=form_submitted or gate == "waiting_contract_creation",
             contract=contract, contract_required=required,
             preparing=bool(fact.plan_exists or fact.plan_confirmed or progression_targets.get(cycle_id) or cycle_id in preparing_cases),
-            submitted=cycle_id in submitted, offer=valid_offer, accepted=accepted,
+            submitted=waiting_for_school, offer=valid_offer, accepted=accepted,
             outstanding=outstanding, coe=confirmed_coe,
             visa=visas.get(cycle_id), offer_hold=offer_hold,
         )
+        if responses and not waiting_for_school and not valid_offer and not accepted and not (
+            offer_hold or visas.get(cycle_id) in {"lodged", "granted", "refused", "withdrawn"}
+        ):
+            if responses <= {"rejected", "withdrawn", "closed", "not_proceeding"}:
+                label = "学校申请已全部拒录" if responses == {"rejected"} else "学校申请已结束"
+                resolved = (SCHOOL_APPLICATION_CLOSED, label)
+            else:
+                resolved = None
         if accepted and resolved and resolved[0] in {
             "offer_acceptance_steps", "09_waiting_coe", "10_visa_submission"
         }:
