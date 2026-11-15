@@ -682,10 +682,10 @@ def transfer_completed_cycle_id(projection):
 
 
 def transfer_precreation_file_modules(projection, module_labels):
-    if (
-        projection is None
-        or projection.cycle_type != "transfer"
-        or projection.cycle_id is not None
+    if projection is None:
+        return None
+    if not getattr(projection, "transfer_precreation", False) and (
+        projection.cycle_type != "transfer" or projection.cycle_id is not None
     ):
         return None
     return [

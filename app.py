@@ -192,6 +192,7 @@ from contract_generation_authority import (
     render_bound_contract,
 )
 from contract_generation_cutover import (
+    bind_generated_ordinary_contract,
     ContractGenerationPersistenceError,
     create_contract_atomic,
     replace_draft_atomic,
@@ -74904,38 +74905,40 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         document_id = db.execute(
             """INSERT INTO student_documents(student_id,folder_category,document_type,original_name,stored_name,
                file_path,version,file_size,uploaded_by,uploaded_at,preview_path,is_active)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,1)""",
+               VALUES(?,?,?,?,{ORDINARY_CONTRACT_CYCLE_SQL},?,?,?,?,?,?,?,1)""",
             (
                 student_id, "Forms", "StudyAbroadContract", target.name, target.name,
                 str(target), version, target.stat().st_size, self.user["id"], now_iso(), "",
             ),
         )
-        contract_id = db.execute(
-            """INSERT INTO contracts(
-              student_id,contract_uid,is_standalone_contract,standalone_data_json,
-              contract_category,contract_type,contract_title,contract_status,contract_date,
-              service_type,service_scope_json,other_service_scope_text,service_fee_currency,
-              consulting_and_visa_service_fee,discount_amount,final_fee_amount,payment_due_date,
-              refund_policy_type,refund_policy_text,refusal_deduction_currency,refusal_deduction_amount,
-              refusal_refund_currency,refusal_refund_amount,refund_notes,special_terms,
-              parent_signer_name,parent_phone,parent_email,parent_address,notes,contract_file_path,
-              template_version,generated_by,generated_at,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                student_id, contract_uid, 0, snapshot_json,
-                payload["contract_type_label"], payload["contract_type"], payload["contract_title"], "Draft",
-                payload["contract_date"], payload["service_type"], payload["service_scope_json"],
-                payload["other_service_scope_text"], payload["service_fee_currency"],
-                payload["consulting_and_visa_service_fee"], payload["discount_amount"],
-                payload["final_fee_amount"], payload["payment_due_date"], payload["refund_policy_type"],
-                payload["refund_policy_text"], payload["refusal_deduction_currency"],
-                payload["refusal_deduction_amount"], payload["refusal_refund_currency"],
-                payload["refusal_refund_amount"], payload["refund_notes"], payload["special_terms"],
-                payload["parent_signer_name"], payload["parent_phone"], payload["parent_email"],
-                payload["parent_address"], payload["notes"],
-                str(target), STUDY_CONTRACT_TEMPLATE_VERSION, self.user["id"], now_iso(), now_iso(),
-            ),
-        )
+        with db.transaction() as connection:
+            contract_id = connection.execute(
+                """INSERT INTO contracts(
+                  student_id,contract_uid,is_standalone_contract,standalone_data_json,
+                  contract_category,contract_type,contract_title,contract_status,contract_date,
+                  service_type,service_scope_json,other_service_scope_text,service_fee_currency,
+                  consulting_and_visa_service_fee,discount_amount,final_fee_amount,payment_due_date,
+                  refund_policy_type,refund_policy_text,refusal_deduction_currency,refusal_deduction_amount,
+                  refusal_refund_currency,refusal_refund_amount,refund_notes,special_terms,
+                  parent_signer_name,parent_phone,parent_email,parent_address,notes,contract_file_path,
+                  template_version,generated_by,generated_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    student_id, contract_uid, 0, snapshot_json,
+                    payload["contract_type_label"], payload["contract_type"], payload["contract_title"], "Draft",
+                    payload["contract_date"], payload["service_type"], payload["service_scope_json"],
+                    payload["other_service_scope_text"], payload["service_fee_currency"],
+                    payload["consulting_and_visa_service_fee"], payload["discount_amount"],
+                    payload["final_fee_amount"], payload["payment_due_date"], payload["refund_policy_type"],
+                    payload["refund_policy_text"], payload["refusal_deduction_currency"],
+                    payload["refusal_deduction_amount"], payload["refusal_refund_currency"],
+                    payload["refusal_refund_amount"], payload["refund_notes"], payload["special_terms"],
+                    payload["parent_signer_name"], payload["parent_phone"], payload["parent_email"],
+                    payload["parent_address"], payload["notes"],
+                    str(target), STUDY_CONTRACT_TEMPLATE_VERSION, self.user["id"], now_iso(), now_iso(),
+                ),
+            ).lastrowid
+            bind_generated_ordinary_contract(connection, contract_id, student_id, payload["contract_type"])
         db.audit(
             self.user,
             "generate",
@@ -82368,9 +82371,16 @@ sqlite3 database/aaie_crm.db 'PRAGMA quick_check;'"""
                 if len(pending) > 1:
                     raise transfer_source_authority.SourceAuthorityError("存在多个待生成转学合同，请先确认本次合同。")
                 # Resolve first; missing/conflicting facts cannot even reserve a Draft.
-                transfer_source_authority.identify_for_submission(
-                    connection, str(student_id), int(pending[0][0]) if pending else None,
-                    form=self.form)
+                draft_id = int(pending[0][0]) if pending else None
+                source = transfer_source_authority.identify_for_submission(
+                    connection, str(student_id), draft_id, form=self.form)
+                if source["source_classification"] == "new_transfer":
+                    existing_id = transfer_source_authority.existing_new_transfer_intake_contract(
+                        connection, str(student_id), source["parent_form_token"], draft_id=draft_id)
+                    if existing_id is not None:
+                        raise transfer_source_authority.SourceAuthorityError(
+                            f"本次转学已存在合同 #{existing_id}，请先在合同页核对或重发签署链接。"
+                        )
                 stamp = now_iso()
                 contract_id = int(pending[0][0]) if pending else transfer_source_authority.reserve_unbound_transfer_application_draft(
                     connection, str(student_id), actor_user_id=int(self.user["id"]), occurred_at=stamp)

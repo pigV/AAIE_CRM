@@ -193,6 +193,37 @@ def _stage_artifact(rendered: RenderedBoundContract, target: Path, request_id: s
     return staging
 
 
+# Use the same selection in both generation paths, before committing the new row.
+ORDINARY_CONTRACT_CYCLE_SQL = """(
+    SELECT CASE WHEN COUNT(*)=1 THEN MIN(cycle.id) END
+    FROM application_cycles cycle
+    JOIN parent_form_tokens token ON token.token=cycle.parent_form_token
+         AND token.student_id=cycle.student_id
+    WHERE cycle.student_id=? AND cycle.status='active' AND cycle.cycle_type='initial'
+      AND cycle.education_stream='school_education'
+      AND token.intake_type='ordinary_new_application'
+      AND coalesce(token.submitted_at,'')<>'' AND coalesce(token.invalidated_at,'')=''
+      AND ? IN ('NewInternationalStudentContract','LocalStudentApplicationContract')
+      AND NOT EXISTS (
+          SELECT 1 FROM application_cycles other
+          WHERE other.student_id=cycle.student_id AND other.status='active' AND other.id<>cycle.id
+      )
+)"""
+
+
+def bind_generated_ordinary_contract(connection, contract_id, student_id, contract_type):
+    if contract_type not in {"NewInternationalStudentContract", "LocalStudentApplicationContract"}:
+        return
+    # Older databases can generate contracts before the workflow migrations run.
+    if not any(row[1] == "application_cycle_id" for row in connection.execute("PRAGMA table_info(contracts)")):
+        return
+    connection.execute(
+        f"UPDATE contracts SET application_cycle_id={ORDINARY_CONTRACT_CYCLE_SQL} "
+        "WHERE id=? AND student_id=? AND application_cycle_id IS NULL",
+        (student_id, contract_type, contract_id, student_id),
+    )
+
+
 def create_contract_atomic(
     database,
     *,
@@ -272,6 +303,7 @@ def create_contract_atomic(
                 ),
             )
             contract_id = int(cursor.lastrowid)
+            bind_generated_ordinary_contract(conn, contract_id, student_id, values["contract_type"])
             document = conn.execute(
                 """INSERT INTO student_documents(
                    student_id,folder_category,document_type,original_name,stored_name,file_path,

@@ -1,6 +1,6 @@
 import unittest
 
-from dashboard_confirmed_stages import resolve_dashboard_stage
+from dashboard_confirmed_stages import PROFILE_ONLY_STAGES, resolve_dashboard_stage
 
 
 class DashboardConfirmedStageTests(unittest.TestCase):
@@ -9,7 +9,7 @@ class DashboardConfirmedStageTests(unittest.TestCase):
         self.assertIsNone(resolve_dashboard_stage(form_submitted=True, contract="draft"))
         self.assertEqual(resolve_dashboard_stage(contract="ready")[0], "contract_preparation")
         self.assertEqual(resolve_dashboard_stage(contract="live")[0], "03_contract_signature")
-        self.assertIsNone(resolve_dashboard_stage(form_submitted=True, contract="inactive_link"))
+        self.assertIn(resolve_dashboard_stage(form_submitted=True, contract="inactive_link")[0], PROFILE_ONLY_STAGES)
         self.assertEqual(resolve_dashboard_stage(contract="signed", preparing=True)[0], "06_school_application_submission")
 
     def test_valid_form_only_enters_contract_queue_if_contract_is_required(self):
@@ -23,7 +23,7 @@ class DashboardConfirmedStageTests(unittest.TestCase):
     def test_only_started_cycles_with_a_current_stage_count(self):
         self.assertIsNone(resolve_dashboard_stage())
         self.assertEqual(resolve_dashboard_stage(form_live=True)[0], "01_parent_form")
-        self.assertIsNone(resolve_dashboard_stage(contract="signed"))
+        self.assertIn(resolve_dashboard_stage(contract="signed")[0], PROFILE_ONLY_STAGES)
         self.assertEqual(
             resolve_dashboard_stage(contract="not_required", preparing=True)[0],
             "06_school_application_submission",

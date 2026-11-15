@@ -29,7 +29,29 @@ STAGES = (
 
 
 SCHOOL_APPLICATION_CLOSED = "school_application_closed"
+PROFILE_ONLY_STAGES = {SCHOOL_APPLICATION_CLOSED, "contract_link_inactive", "waiting_school_plan"}
 
+
+# The intake stage precedes the Transfer V2 cycle that will consume the contract.
+VERIFIED_TRANSFER_INTAKE_CONTRACT_SQL = """
+contract.application_cycle_id IS NULL
+AND contract.contract_type='TransferApplicationContract'
+AND coalesce(contract.contract_file_path,'')<>''
+AND cycle.cycle_type='initial' AND cycle.status='active'
+AND EXISTS (
+    SELECT 1 FROM transfer_source_authorities authority
+    JOIN parent_form_tokens token ON token.token=authority.parent_form_token
+         AND token.student_id=cycle.student_id
+    WHERE authority.transfer_contract_id=contract.id
+      AND authority.student_id=cycle.student_id
+      AND authority.source_classification='new_transfer'
+      AND authority.lifecycle_state='verified'
+      AND authority.parent_form_token=cycle.parent_form_token
+      AND token.intake_type='new_student_transfer'
+      AND coalesce(token.submitted_at,'')<>''
+      AND coalesce(token.invalidated_at,'')=''
+)
+"""
 
 STAGE_DETAILS = {
     key: (index, label, destination)
@@ -85,11 +107,17 @@ def resolve_dashboard_stage(*, form_live=False, form_submitted=False, contract=N
     if submitted:
         return "07_school_response", ""
     if contract in {"signed", "not_required"}:
-        return ("06_school_application_submission", "") if preparing else None
+        if preparing:
+            return "06_school_application_submission", ""
+        if contract == "signed":
+            return "waiting_school_plan", "等待制作学校方案"
+        return None
     if contract == "live":
         return "03_contract_signature", ""
     if contract == "ready":
         return "contract_preparation", ""
+    if contract == "inactive_link":
+        return "contract_link_inactive", "签署链接已失效，等待重发"
     if contract is not None:
         return None
     if form_submitted and contract_required:
@@ -133,6 +161,15 @@ def _visa_status(row):
     return None
 
 
+def verified_transfer_contract_for_intake_cycle(connection, contract_id, cycle_id):
+    return connection.execute(
+        f"""SELECT 1 FROM application_cycles cycle
+             JOIN contracts contract ON contract.student_id=cycle.student_id
+             WHERE cycle.id=? AND contract.id=? AND {VERIFIED_TRANSFER_INTAKE_CONTRACT_SQL}""",
+        (cycle_id, contract_id),
+    ).fetchone() is not None
+
+
 def load_dashboard_stages(connection, cycle_ids):
     """Read only exact-cycle evidence, from the same snapshot as the chart details."""
     if not cycle_ids:
@@ -141,7 +178,7 @@ def load_dashboard_stages(connection, cycle_ids):
     facts = load_workflow_facts(connection, cycle_ids)
     forms = {}
     for row in _rows(connection, f"""
-        SELECT cycle.id, token.token, token.submitted_at, token.invalidated_at, token.expires_at, token.intake_type
+        SELECT cycle.id, token.token, token.submitted_at, token.invalidated_at, token.expires_at, token.intake_type, cycle.education_stream
           FROM application_cycles cycle
           LEFT JOIN parent_form_tokens token ON token.token=cycle.parent_form_token
                AND (token.student_id=cycle.student_id OR cycle.student_id IS NULL)
@@ -155,11 +192,12 @@ def load_dashboard_stages(connection, cycle_ids):
                 pass
         forms[row["id"]] = (
             live, bool(row["submitted_at"] and not row["invalidated_at"]), row["intake_type"],
+            row["education_stream"],
         )
 
     contracts = {}
     for row in _rows(connection, f"""
-        SELECT contract.application_cycle_id, contract.contract_status,
+        SELECT cycle.id AS application_cycle_id, contract.contract_status,
                (contract.contract_status IN ('ParentSigned','FullyExecuted')
                 OR contract.signed_at IS NOT NULL OR contract.fully_executed_at IS NOT NULL
                 OR EXISTS (SELECT 1 FROM contract_signatures signature
@@ -171,9 +209,11 @@ def load_dashboard_stages(connection, cycle_ids):
                           AND julianday(link.expires_at)>julianday('now')) AS live,
                EXISTS (SELECT 1 FROM contract_signing_links link
                         WHERE link.contract_id=contract.id) AS had_link
-          FROM contracts contract
-          JOIN application_cycles cycle ON cycle.id=contract.application_cycle_id
-               AND cycle.student_id=contract.student_id
+          FROM application_cycles cycle
+          JOIN contracts contract ON contract.student_id=cycle.student_id
+               AND (cycle.id=contract.application_cycle_id OR (
+                    {VERIFIED_TRANSFER_INTAKE_CONTRACT_SQL}
+               ))
          WHERE cycle.id IN ({marks}) AND coalesce(contract.deleted_at,'')=''
            AND coalesce(contract.voided_at,'')='' AND contract.superseded_by_contract_id IS NULL
            AND contract.contract_status NOT IN ('Deleted','Voided','Superseded','Cancelled')
@@ -359,7 +399,7 @@ def load_dashboard_stages(connection, cycle_ids):
             fact.signed_offer_completed, fact.payment_completed, returned,
             optional_steps.get(choice["id"], ()) if choice and choice["active"] else (),
         )
-        form_live, form_submitted, intake = forms.get(cycle_id, (False, False, None))
+        form_live, form_submitted, intake, stream = forms.get(cycle_id, (False, False, None, None))
         contract = contracts.get(cycle_id)
         contract_decision = contract_decisions.get(cycle_id, {}).get("decision")
         gate = fact.contract_gate_status
@@ -367,7 +407,7 @@ def load_dashboard_stages(connection, cycle_ids):
             gate == "waiting_contract_creation" or contract_decision == "required"
             or (gate is None and intake in {"ordinary_new_application", "new_student_transfer"})
         )
-        if contract_decision == "optional":
+        if stream == "higher_education" or contract_decision == "optional":
             required = False
             contract = "not_required"
         elif gate == "not_required":

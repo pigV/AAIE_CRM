@@ -454,6 +454,28 @@ def identify_for_submission(connection, student_id, contract_id=None, *, form=No
             'rule_version': RULE_VERSION}
 
 
+def existing_new_transfer_intake_contract(connection, student_id, intake_token, *, draft_id=None):
+    """Find a generated live record for the verified intake, including expired links."""
+    if not intake_token:
+        return None
+    row = connection.execute("""
+        SELECT contract.id FROM transfer_source_authorities authority
+        JOIN contracts contract ON contract.id=authority.transfer_contract_id
+             AND contract.student_id=authority.student_id
+        WHERE authority.student_id=? AND authority.parent_form_token=?
+          AND authority.source_classification='new_transfer'
+          AND authority.lifecycle_state IN ('verified','consumed')
+          AND contract.contract_type='TransferApplicationContract'
+          AND coalesce(contract.contract_file_path,'')<>''
+          AND coalesce(contract.deleted_at,'')='' AND coalesce(contract.voided_at,'')=''
+          AND contract.superseded_by_contract_id IS NULL
+          AND contract.contract_status NOT IN ('Deleted','Voided','Superseded','Cancelled')
+          AND contract.id<>coalesce(?,0)
+        ORDER BY contract.id DESC LIMIT 1
+    """, (student_id, intake_token, draft_id)).fetchone()
+    return int(row[0]) if row else None
+
+
 def ensure_for_submission(connection, student_id, contract_id, *, form=None,
                           actor_user_id, occurred_at):
     """Associate a reliable source within the normal unsigned-Draft submission."""
