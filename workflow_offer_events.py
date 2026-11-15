@@ -704,7 +704,13 @@ def record_final_school_submission(
     if acceptance_row is None:
         raise WorkflowEventConflictError("final acceptance was not found")
     acceptance = _acceptance(acceptance_row)
-    if not acceptance.signed_offer_completed_at or not acceptance.payment_completed_at:
+    from final_school_requirements import load_optional_steps
+
+    optional = load_optional_steps(conn, (acceptance.id,)).get(acceptance.id, ())
+    if (
+        (not acceptance.signed_offer_completed_at and "signed" not in optional)
+        or (not acceptance.payment_completed_at and "payment" not in optional)
+    ):
         raise WorkflowEventConflictError(
             "final school submission requires Signed Offer and payment evidence"
         )

@@ -7,6 +7,7 @@ from typing import Iterable
 
 from dashboard_visa_metrics import is_student_visa_case
 from workflow_resolver import WorkflowFacts
+from visa_dashboard_retry import load_retries, retry_key
 
 
 def _ids(values: Iterable[int]) -> tuple[int, ...]:
@@ -31,12 +32,15 @@ def _load_student_visa_facts(conn, ids, state):
         )
     }
     current = {}
+    retries = load_retries(conn, ids)
     if _columns(conn, "visa_result_status_current"):
-        current = dict(conn.execute(
-            f"""SELECT result.visa_case_id, result.effective_result
-                  FROM visa_result_status_current result JOIN visa_cases visa ON visa.id=result.visa_case_id
-                 WHERE visa.application_cycle_id IN ({marks})""", ids
-        ))
+        current = {
+            row[0]: (row[1], row[2]) for row in conn.execute(
+                f"""SELECT result.visa_case_id,result.effective_result,result.source_event_id
+                      FROM visa_result_status_current result JOIN visa_cases visa ON visa.id=result.visa_case_id
+                     WHERE visa.application_cycle_id IN ({marks})""", ids
+            )
+        }
     cursor = conn.execute(
         f"SELECT * FROM visa_cases WHERE application_cycle_id IN ({marks}) ORDER BY id DESC", ids
     )
@@ -51,9 +55,13 @@ def _load_student_visa_facts(conn, ids, state):
             continue
         case_id = case["id"]
         decision = decisions.get((cycle_id, case_id))
-        if case_id in current:
-            decision = {"Granted": "grant", "Refused": "refusal"}.get(current[case_id])
-        if current.get(case_id) == "Withdrawn":
+        result, source_event = current.get(case_id, (None, None))
+        if result is not None:
+            decision = {"Granted": "grant", "Refused": "refusal"}.get(result)
+        case.update(effective_result=result, source_event_id=source_event)
+        resumed = retry_key(case)
+        if (resumed and retries.get((case_id, str(case["student_id"]))) == resumed
+                or result == "Withdrawn"):
             continue
         date = str(case.get("actual_lodgement_date") or "").strip()
         lodged = bool(date) and (
@@ -172,14 +180,28 @@ def load_workflow_facts(
                AND signature.student_id=contract.student_id
                AND signature.status='signed'
              ORDER BY signature.id DESC LIMIT 1), 1)"""
+    link_columns = _columns(conn, "contract_signing_links")
+    live_signing = "signing.id IS NOT NULL"
+    if "expires_at" in link_columns:
+        live_signing += " AND signing.status='active' AND julianday(signing.expires_at)>julianday('now')"
+        if "invalidated_at" in link_columns:
+            live_signing += " AND coalesce(signing.invalidated_at,'')=''"
+    contract_columns = _columns(conn, "contracts")
+    active_contract = "".join(
+        f" AND coalesce(contract.{column},'')=''"
+        for column in ("deleted_at", "voided_at", "superseded_by_contract_id")
+        if column in contract_columns
+    )
+    sent_fallback = "OR contract.contract_status='Sent'" if "expires_at" not in link_columns else ""
     for row in conn.execute(
         f"""
         SELECT contract.application_cycle_id,
                count(*),
-               max(CASE WHEN signing.id IS NOT NULL
+               max(CASE WHEN ({live_signing})
                           OR contract.signed_at IS NOT NULL
                           OR contract.fully_executed_at IS NOT NULL
-                          OR contract.contract_status IN ('Sent','ParentSigned','FullyExecuted')
+                          {sent_fallback}
+                          OR contract.contract_status IN ('ParentSigned','FullyExecuted')
                         THEN 1 ELSE 0 END),
                max(CASE WHEN contract.signed_at IS NOT NULL
                           OR contract.fully_executed_at IS NOT NULL
@@ -192,7 +214,8 @@ def load_workflow_facts(
                         THEN 1 ELSE 0 END)
         FROM contracts AS contract
         LEFT JOIN contract_signing_links AS signing ON signing.contract_id=contract.id
-        WHERE contract.application_cycle_id IN ({marks})
+        WHERE contract.application_cycle_id IN ({marks}) {active_contract}
+          AND lower(contract.contract_status) NOT IN ('deleted','voided','revoked','superseded')
         GROUP BY contract.application_cycle_id
         """,
         ids,
@@ -257,7 +280,7 @@ def load_workflow_facts(
             values["contract_gate_status"] = gate_status
 
     link_columns = _columns(conn, "school_plan_report_links")
-    live_link = ["link.status='active'"]
+    live_link = ["link.status='active'" if "status" in link_columns else "0"]
     if "expires_at" in link_columns:
         live_link.append("julianday(link.expires_at)>julianday('now')")
     if "invalidated_at" in link_columns:

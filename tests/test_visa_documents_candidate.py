@@ -245,11 +245,12 @@ class VisaDocumentsCandidateTests(unittest.TestCase):
     def test_refusal_uses_canonical_without_grant_and_missing_cycle_fails_closed(self):
         self.student_cycle()
         extraction=self.extract(text='Visa refusal notification\nDate of decision: 4 September 2026')
-        # Explicit staff decision history remains separate from read-time workflow.
-        from visa_result_status import record_manual_result
-        record_manual_result(self.conn,1,'Refused',reason='Staff confirmed refusal',**self.actor)
+        self.assertEqual('Pending', self.conn.execute("SELECT result_status FROM visa_cases WHERE id=1").fetchone()[0])
         self.service.confirm_letter(self.conn,1,extraction['id'],values=json.loads(extraction['proposed_json']),**self.actor)
         self.assertEqual('refusal',self.conn.execute('SELECT decision_type FROM visa_decision_events').fetchone()[0])
+        self.assertEqual(('closed', 'refused'), tuple(self.conn.execute(
+            "SELECT status,outcome FROM application_cycles WHERE id=1"
+        ).fetchone()))
         self.conn.execute("UPDATE visa_cases SET student_id='S1' WHERE id=2")
         second=self.extract(2)
         with self.assertRaises(ValueError):

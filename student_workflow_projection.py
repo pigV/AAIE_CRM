@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from dashboard_confirmed_stages import STAGE_DETAILS, held_case_cycles, load_confirmed_cycle_stages
 from workflow_projection import load_current_workflow_projection
 from student_lifecycle.transfer_state import load_student_transfer_state_map
 
@@ -25,7 +26,7 @@ class StudentWorkflowProjection:
 
 
 def load_student_workflow_projection_map(
-    connection, student_ids: Iterable[str], *, read_context=None
+    connection, student_ids: Iterable[str], *, read_context=None, cycle_id=None
 ) -> dict[str, StudentWorkflowProjection]:
     ids = tuple(dict.fromkeys(str(value) for value in student_ids if value))
     if not ids:
@@ -44,13 +45,14 @@ def load_student_workflow_projection_map(
     if not existing:
         return {}
 
+    cycle_filter = " AND id=?" if cycle_id is not None else ""
     cycle_rows = connection.execute(
         f"""SELECT id,student_id,cycle_type,status,outcome,sequence_no
               FROM application_cycles
-             WHERE student_id IN ({marks})
+             WHERE student_id IN ({marks}){cycle_filter}
              ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
                       sequence_no DESC,id DESC""",
-        ids,
+        (*ids, cycle_id) if cycle_id is not None else ids,
     ).fetchall()
     active = {}
     closed = {}
@@ -74,20 +76,51 @@ def load_student_workflow_projection_map(
         projection_diagnostic = f"{type(exc).__name__}: {exc}"
         projected = {}
 
+    from student_application_stage_distribution import application_stage_overrides
+
+    confirmed_schema = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='final_school_optional_steps'"
+    ).fetchone()
+    if confirmed_schema:
+        confirmed = load_confirmed_cycle_stages(connection, tuple(projected.values()))
+        overrides = {}
+    else:
+        confirmed = {}
+        overrides = application_stage_overrides(connection, tuple(projected.values()))
+    held = held_case_cycles(connection, tuple(key for key, value in confirmed.items() if value is None))
     results = {}
     for student_id in existing:
         projection = projected.get(student_id)
         active_row = active.get(student_id)
         if projection is not None:
+            override = overrides.get(projection.cycle_id)
+            stage_order = projection.stage_number
+            if projection.cycle_id in confirmed:
+                result = confirmed[projection.cycle_id]
+                if result is None:
+                    stage_key, stage_label, blocker, stage_order = (
+                        "no_counted_stage", {
+                            "paused": "已暂停", "cancelled": "已取消", "failed": "已终止",
+                            "archived": "已归档", "completed": "已完成",
+                        }.get(held.get(projection.cycle_id), "暂无符合统计条件的申请阶段"), None, 0,
+                    )
+                else:
+                    stage_key, blocker = result
+                    stage_order, stage_label, _ = STAGE_DETAILS[stage_key]
+            else:
+                stage_key, stage_label, blocker = override or (
+                    projection.stage_key, projection.stage_title, projection.blocker
+                )
             results[student_id] = StudentWorkflowProjection(
                 student_id,
                 "active",
-                projection.stage_key,
-                projection.stage_title,
-                projection.stage_number,
+                stage_key,
+                stage_label,
+                stage_order,
                 cycle_id=projection.cycle_id,
                 cycle_type=str(active_row[2]) if active_row is not None else None,
                 issue_codes=tuple(projection.issue_codes),
+                diagnostic=blocker if override or projection.cycle_id in confirmed else None,
             )
         elif active_row is not None:
             results[student_id] = StudentWorkflowProjection(
@@ -134,7 +167,9 @@ def load_student_workflow_projection_map(
             )
     transfer_states = load_student_transfer_state_map(connection, existing)
     for student_id, transfer in transfer_states.items():
-        if transfer.state == "ordinary":
+        if transfer.cycle_id in confirmed and confirmed[transfer.cycle_id] is None:
+            continue
+        if transfer.state == "ordinary" or (cycle_id is not None and transfer.cycle_id != cycle_id):
             continue
         results[student_id] = StudentWorkflowProjection(
             student_id=student_id,

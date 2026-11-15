@@ -6,6 +6,9 @@ from dataclasses import dataclass, replace
 from typing import Iterable, Mapping
 
 from security import is_expired
+from dashboard_confirmed_stages import (
+    STAGES as DASHBOARD_STAGE_DEFINITIONS, STAGE_DETAILS, load_confirmed_cycle_stages,
+)
 from workflow_projection import load_current_workflow_projection
 from workflow_resolver import ACTIVE_WORKFLOW_STAGES
 from workflow_cutover import is_workflow_v2_active
@@ -137,7 +140,9 @@ def _columns(connection, table: str) -> set[str]:
 
 
 def _rows(connection, sql: str, parameters: Iterable[object] = ()) -> list[dict]:
-    return [dict(row) for row in connection.execute(sql, tuple(parameters)).fetchall()]
+    cursor = connection.execute(sql, tuple(parameters))
+    keys = tuple(column[0] for column in cursor.description)
+    return [dict(zip(keys, row)) for row in cursor]
 
 
 def _normal_school(value: object) -> str:
@@ -211,7 +216,7 @@ def _student_names(connection, student_ids: tuple[str, ...]) -> dict[str, str]:
     return names
 
 
-def _dashboard_stage_overrides(connection, projection):
+def application_stage_overrides(connection, projection):
     """Resolve dashboard-only exceptions without changing lifecycle ownership."""
     overrides = {}
     form_ids = tuple(row.cycle_id for row in projection if row.stage_key == "01_parent_form")
@@ -234,6 +239,11 @@ def _dashboard_stage_overrides(connection, projection):
                     overrides[cycle_id] = None
 
     contract_ids = tuple(row.cycle_id for row in projection if row.stage_key == "02_contract_creation")
+    if contract_ids:
+        contract_ids = tuple(row[0] for row in connection.execute(
+            f"SELECT id FROM application_cycles WHERE cycle_type='initial' AND id IN ({','.join('?' for _ in contract_ids)})",
+            contract_ids,
+        ))
     if not contract_ids:
         return overrides
 
@@ -248,7 +258,7 @@ def _dashboard_stage_overrides(connection, projection):
         row[0] for row in connection.execute(
             f"""SELECT DISTINCT application_cycle_id FROM contracts contract
                  WHERE application_cycle_id IN ({marks})
-                   AND contract_status='Draft' AND {valid_contract}""", contract_ids
+                   AND contract_status IN ('Draft','Sent') AND {valid_contract}""", contract_ids
         )
     }
     placeholders = set()
@@ -273,23 +283,93 @@ def _dashboard_stage_overrides(connection, projection):
                        AND {" AND ".join(evidence) or "1"}""", contract_ids
             )
         }
+    intake = {}
+    if "intake_type" in _columns(connection, "parent_form_tokens"):
+        intake = {
+            row[0]: (row[1], row[2]) for row in connection.execute(
+                f"""SELECT cycle.id, form.intake_type, form.submitted_at
+                      FROM application_cycles cycle
+                      LEFT JOIN parent_form_tokens form
+                        ON form.token=cycle.parent_form_token AND form.student_id=cycle.student_id
+                     WHERE cycle.id IN ({marks})""", contract_ids
+            )
+        }
+    candidates = {row.cycle_id: row.student_id for row in projection if row.cycle_id in contract_ids}
+    from student_lifecycle.transfer_state import load_student_transfer_state_map
+
+    transfers = load_student_transfer_state_map(connection, candidates.values()) if intake else {}
+    student_ids = tuple(dict.fromkeys(value for value in candidates.values() if value))
+    student_marks = ",".join("?" for _ in student_ids)
+    evidence = {}
+    for table, required, condition in (
+        ("offers", {"document_type"}, "lower(document_type) IN ('offer','signedoffer','signed offer')"),
+        ("coe_oshc", {"document_kind"}, "upper(document_kind) IN ('COE','COE_CAAW')"),
+        ("visa_cases", {"actual_lodgement_date", "result_status"}, "trim(coalesce(actual_lodgement_date,''))<>'' OR lower(coalesce(result_status,'')) IN ('granted','refused')"),
+    ):
+        columns = _columns(connection, table)
+        if not student_ids or not ({"student_id", "application_cycle_id"} | required).issubset(columns):
+            continue
+        for row in _rows(connection, f"SELECT * FROM {table} WHERE student_id IN ({student_marks}) AND ({condition})", student_ids):
+            evidence.setdefault(row["student_id"], {}).setdefault(table, []).append(row)
+    review = ("contract_evidence_review", "待核对申请凭据")
     for cycle_id in contract_ids:
-        reason = "已有草稿，待生成签署链接" if cycle_id in draft_ids else "待建立合同"
-        overrides[cycle_id] = (
-            None if cycle_id in placeholders else ("02_contract_creation", DASHBOARD_CONTRACT_STAGE_LABEL, reason)
-        )
+        if cycle_id in placeholders:
+            overrides[cycle_id] = None
+            continue
+        student_id = candidates[cycle_id]
+        kind, submitted = intake.get(cycle_id, (None, None))
+        transfer = transfers.get(student_id)
+        if kind == "new_student_transfer" and transfer and transfer.state in {"ready", "contract_pending"}:
+            blocker = transfer.label
+            if transfer.state == "contract_pending":
+                blocker = "请核对转学合同及签署链接是否有效"
+            overrides[cycle_id] = (transfer.stage_key, transfer.label, blocker)
+            continue
+        related = {
+            table: [row for row in records if row["application_cycle_id"] in (None, cycle_id)]
+            for table, records in evidence.get(student_id, {}).items()
+        }
+        if related.get("coe_oshc") or related.get("visa_cases"):
+            overrides[cycle_id] = (*review, "已有 CoE 或签证记录，待核对当前周期和有效凭据")
+            continue
+        offers = related.get("offers", [])
+        if offers:
+            from dashboard_business_time import business_date_iso
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            today = datetime.now(ZoneInfo("Australia/Melbourne")).date().isoformat()
+            valid = all(
+                row["application_cycle_id"] == cycle_id and row.get("offer_file_path")
+                and str(row.get("offer_status") or "").strip().lower() in {"received", "sent_to_parent"}
+                and (not row.get("offer_expiry_date") or (business_date_iso(row["offer_expiry_date"]) or "") >= today)
+                for row in offers
+            )
+            overrides[cycle_id] = (
+                ("08_offer_acceptance", "等待家长接受 Offer（Signed Offer + Payment）",
+                 "已有同周期 Offer，待核对正式接收和最终接受")
+                if valid else (*review, "已有 Offer 记录，待核对有效期、签署或周期归属")
+            )
+            continue
+        if kind == "new_student_transfer":
+            overrides[cycle_id] = (*review, "新学生转学表单已提交，待确认转学合同")
+        elif cycle_id in draft_ids or (kind == "ordinary_new_application" and submitted):
+            reason = "已有合同，待生成或重发有效签署链接" if cycle_id in draft_ids else "待建立合同"
+            overrides[cycle_id] = ("02_contract_creation", DASHBOARD_CONTRACT_STAGE_LABEL, reason)
+        else:
+            overrides[cycle_id] = (*review, "待确认初次申请是否已正式启动")
     return overrides
 
 
 def _canonical_distribution(connection, *, read_context=None, cycles_only=False) -> tuple[ApplicationStageStudent, ...]:
     projection = (read_context.workflow(connection) if read_context is not None
                   else load_current_workflow_projection(connection))
-    stage_overrides = {}
+    dashboard_stages = {}
     if cycles_only:
         from dashboard_workflow_metrics import dashboard_active_cycles
 
         projection = dashboard_active_cycles(connection, projection)
-        stage_overrides = _dashboard_stage_overrides(connection, projection)
+        dashboard_stages = load_confirmed_cycle_stages(connection, projection)
         student_ids = tuple({str(row.student_id) for row in projection if row.student_id})
         student_workflow = {}
     else:
@@ -406,12 +486,14 @@ def _canonical_distribution(connection, *, read_context=None, cycles_only=False)
             )
         else:
             stage = _canonical_stage_result(row)
-            if row.cycle_id in stage_overrides:
-                override = stage_overrides[row.cycle_id]
-                if override is None:
+            if row.cycle_id in dashboard_stages:
+                resolved = dashboard_stages[row.cycle_id]
+                if resolved is None:
                     continue
-                key, label, blocker = override
-                stage = replace(stage, key=key, label=label, blocker=blocker)
+                key, blocker = resolved
+                index, label, destination = STAGE_DETAILS[key]
+                stage = replace(stage, key=key, index=index, label=label, blocker=blocker,
+                                destination=destination)
         results.append(
             ApplicationStageStudent(
                 record_id,

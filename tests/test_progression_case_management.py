@@ -2406,7 +2406,7 @@ class ProgressionRouteTests(ProgressionServiceTests):
         self.assertEqual(status, 303)
         with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute(
-                "INSERT INTO offers(id,student_id) VALUES(3000,'1001')"
+                "INSERT INTO offers(id,student_id,school_id,school_name) VALUES(3000,'1001',20,'Target University')"
             )
             connection.commit()
         status, _, _ = self.request(

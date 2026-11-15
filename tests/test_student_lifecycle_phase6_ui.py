@@ -235,6 +235,7 @@ class StudentLifecyclePhase6UIContracts(unittest.TestCase):
             "正在升学", "升学", "Cycle #2", "Future University", "等待 COE",
         ):
             self.assertIn(expected, html)
+        self.assertIn('/students/S1?tab=coe&amp;application_cycle_id=2', html)
         self.assertIn('data-lifecycle-stage-filter="transfer"', html)
         self.assertIn('data-lifecycle-stage-filter="progression"', html)
         self.assertIn('data-lifecycle-active-count="transfer">0<', html)
@@ -267,7 +268,7 @@ class StudentLifecyclePhase6UIContracts(unittest.TestCase):
 
         html = app.dashboard_workflow_distribution_chart_html(rows)
 
-        self.assertIn("等待 COE：3", html)
+        self.assertIn("等待 CoE：3", html)
         self.assertIn('data-lifecycle-active-count="transfer">1<', html)
         self.assertIn('data-lifecycle-active-count="progression">1<', html)
 

@@ -328,7 +328,7 @@ from student_doc import (
 from student_application_stage_distribution import (
     APPLICATION_STAGE_DEFINITIONS,
     CANONICAL_APPLICATION_STAGE_DEFINITIONS,
-    DASHBOARD_CONTRACT_STAGE_LABEL,
+    DASHBOARD_STAGE_DEFINITIONS,
     active_cycle_type_counts,
     load_application_stage_distribution,
 )
@@ -10244,24 +10244,24 @@ def dashboard_application_stage_destination(student):
         "visa": "visa",
         "homestay": "homestay",
     }.get(student.stage.destination)
-    return student_path if not tab else f"{student_path}?tab={tab}"
+    params = {"tab": tab} if tab else {}
+    if getattr(student, "source_model", None) == "application_cycle" and student.cycle_id is not None:
+        params["application_cycle_id"] = student.cycle_id
+    return f"{student_path}?{urlencode(params)}" if params else student_path
 
 
-def dashboard_workflow_distribution_chart_html(stage_students):
+def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None):
     stage_students = tuple(stage_students)
     active_counts = active_cycle_type_counts(stage_students)
-    definitions = list(
-        CANONICAL_APPLICATION_STAGE_DEFINITIONS
-        if any(
+    if canonical is None:
+        canonical = any(
             getattr(student, "source_model", "legacy_student") == "application_cycle"
             for student in stage_students
         )
-        else APPLICATION_STAGE_DEFINITIONS
+    definitions = (
+        [(key, label) for key, label, _destination in DASHBOARD_STAGE_DEFINITIONS]
+        if canonical else list(APPLICATION_STAGE_DEFINITIONS)
     )
-    definitions = [
-        (key, DASHBOARD_CONTRACT_STAGE_LABEL if key == "02_contract_creation" else label)
-        for key, label in definitions
-    ]
     known = {key for key, _label in definitions}
     observed = {}
     for student in stage_students:
@@ -27609,6 +27609,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/(\d+)/progression-cases/(\d+)/activate$", self.student_progression_case_activate),
                 (r"^/students/(\d+)/progression-cases/(\d+)/cancel$", self.student_progression_case_cancel),
                 (r"^/students/(\d+)/progression-cases/(\d+)$", self.student_progression_case_detail),
+                (r"^/students/(\d+)/application-cycles/(\d+)/stage-evidence$", self.student_cycle_stage_evidence),
                 (r"^/students/(\d+)/progression-cases/(\d+)/edit$", self.student_progression_case_edit),
                 (r"^/students/(\d+)/progression-cases/(\d+)/stage$", self.student_progression_case_stage),
                 (r"^/students/(\d+)/progression-cases/(\d+)/path-stages$", self.student_progression_path_stage_add),
@@ -27694,6 +27695,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/(\d+)/visa-cases/(\d+)/evidence-ai-review$", self.student_visa_case_evidence_ai_review),
                 (r"^/students/(\d+)/visa-cases/(\d+)/guardian-applicant$", self.student_visa_case_guardian_applicant_save),
                 (r"^/students/(\d+)/visa-cases/(\d+)/lodgement-submit$", self.student_visa_case_lodgement_submit),
+                (r"^/students/(\d+)/visa-cases/(\d+)/resume-preparation$", self.student_visa_case_resume_preparation),
                 (r"^/students/(\d+)/visa-cases/(\d+)/information-collection/package$", self.student_visa_case_information_package_create),
                 (r"^/students/(\d+)/visa-cases/(\d+)/information-collection/application-type$", self.student_visa_case_information_application_type_save),
                 (r"^/students/(\d+)/visa-cases/(\d+)/information-collection/respondents$", self.student_visa_case_information_respondent_create),
@@ -27725,6 +27727,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/(\d+)/offer/(\d+)/classify$", self.offer_classify),
                 (r"^/students/(\d+)/offer/(\d+)/accept$", self.offer_accept),
                 (r"^/students/(\d+)/offer/(\d+)/withdraw-acceptance$", self.offer_acceptance_withdraw),
+                (r"^/students/(\d+)/offer/resume-selection$", self.offer_selection_resume),
                 (r"^/students/(\d+)/coe$", self.coe_create),
                 (r"^/students/(\d+)/coe/(\d+)/update$", self.coe_update),
                 (r"^/students/(\d+)/coe/(\d+)/confirm-final-school$", self.confirm_final_school_coe),
@@ -31112,7 +31115,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
         finally:
             db._release_connection(stage_connection)
-        stage_chart_html = dashboard_workflow_distribution_chart_html(application_stage_students)
+        stage_chart_html = dashboard_workflow_distribution_chart_html(
+            application_stage_students, canonical=is_workflow_v2_active(db)
+        )
         recent = db.all(
             """SELECT s.student_id,s.passport_first_name,s.passport_last_name,s.created_date
                FROM students s
@@ -59480,6 +59485,113 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "待入读学校已取消。",
         )
 
+    def student_cycle_stage_evidence(self, method, student_id, cycle_id):
+        from cycle_stage_requirements import pathway_offer_key
+        from dashboard_confirmed_stages import held_case_cycles
+        from workflow_facts import load_workflow_facts
+
+        if method != "POST":
+            return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
+        location = f"/students/{quote(student_id)}?application_cycle_id={cycle_id}"
+        decision = self.form.get("decision")
+        kind = self.form.get("kind")
+        reason = str(self.form.get("reason") or "").strip()
+        if not 0 < len(reason) <= 500:
+            return self.flash_redirect(location, "请填写确认依据", "error")
+        try:
+            with db.transaction() as connection:
+                cycle = connection.execute(
+                    """SELECT cycle_type FROM application_cycles
+                         WHERE id=? AND student_id=? AND status='active'""", (cycle_id, student_id)
+                ).fetchone()
+                if not cycle or held_case_cycles(connection, (int(cycle_id),)):
+                    raise ValueError("只有正在办理的申请周期可以确认")
+                payload = {"decision": decision, "reason": reason}
+                if kind == "contract" and cycle[0] == "initial":
+                    if not can_workflow_module_save(self.user, "Forms") or decision not in {"required", "optional"}:
+                        return self.deny_module_access("student_contracts")
+                    action = "cycle_contract_requirement_confirmed"
+                elif kind == "return" and cycle[0] == "progression":
+                    student = self.student_capability_subject(student_id)
+                    if not student or not student_capabilities.can_edit_progression_case(
+                        self.user, student, flags=self.transfer_case_flags()
+                    ):
+                        return self.deny_module_access("offer")
+                    if decision not in {"returned", "optional", "required"}:
+                        raise ValueError("请选择学校回传状态")
+                    key = pathway_offer_key(connection, cycle_id)
+                    facts = load_workflow_facts(connection, (int(cycle_id),))[int(cycle_id)]
+                    if not key or not facts.final_acceptance_selected:
+                        raise ValueError("请先确认所有必修课程的最终 Offer")
+                    if decision == "returned":
+                        returned_on = date.fromisoformat(self.form.get("returned_on", ""))
+                        if returned_on > datetime.now(ZoneInfo("Australia/Melbourne")).date():
+                            raise ValueError("回传日期不能晚于今天")
+                        if not facts.signed_offer_completed or not facts.payment_completed:
+                            raise ValueError("请先完成必需的签署和付款")
+                        payload["returned_on"] = returned_on.isoformat()
+                    payload["offer_key"] = key
+                    action = "progression_school_return_confirmed"
+                else:
+                    raise ValueError("申请类型与确认事项不匹配")
+                connection.execute(
+                    """INSERT INTO audit_logs(user_id,username,action_type,module_name,module_key,
+                                              record_id,student_id,new_value,status,created_at)
+                       VALUES (?,?,?,'application_cycles','application_cycles',?,?,?,'success',?)""",
+                    (self.user["id"], self.user["username"], action, cycle_id, student_id,
+                     json.dumps(payload, ensure_ascii=False), now_iso()),
+                )
+        except ValueError as exc:
+            return self.flash_redirect(location, str(exc), "error")
+        return self.flash_redirect(location, "已保存当前周期的确认记录")
+
+    def student_cycle_stage_evidence_html(self, student_id, workflow):
+        from cycle_stage_requirements import pathway_offer_key, stage_decisions
+
+        if not workflow or workflow.state != "active" or workflow.cycle_type not in {"initial", "progression"}:
+            return ""
+        if not db.one("SELECT 1 FROM sqlite_master WHERE type='view' AND name='final_school_optional_steps'"):
+            return ""
+        if workflow.cycle_type == "initial":
+            if not can_workflow_module_save(self.user, "Forms"):
+                return ""
+            kind, title, action = "contract", "合同要求", "cycle_contract_requirement_confirmed"
+            options = (("required", "需要签合同"), ("optional", "无需签合同"))
+            date_field = ""
+        else:
+            subject = self.student_capability_subject(student_id)
+            if not subject or not student_capabilities.can_edit_progression_case(
+                self.user, subject, flags=self.transfer_case_flags()
+            ):
+                return ""
+            kind, title, action = "return", "升学 Offer 回传", "progression_school_return_confirmed"
+            options = (("required", "待回传"), ("returned", "已回传"), ("optional", "学校不要求回传"))
+            date_field = '<label>实际回传日期<input type="date" name="returned_on"></label>'
+        with db.read_snapshot() as connection:
+            current = stage_decisions(connection, action, (workflow.cycle_id,)).get(workflow.cycle_id, {})
+            if kind == "return":
+                key = pathway_offer_key(connection, workflow.cycle_id)
+                if not key:
+                    return ""
+                if current.get("offer_key") != key:
+                    current = {}
+        choices = "".join(
+            f'<option value="{value}"{" selected" if current.get("decision") == value else ""}>{label}</option>'
+            for value, label in options
+        )
+        return f"""
+          <details>
+            <summary>{title}</summary>
+            <form method="post" action="/students/{quote(student_id)}/application-cycles/{workflow.cycle_id}/stage-evidence">
+              <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+              <input type="hidden" name="kind" value="{kind}">
+              <label>{title}<select name="decision">{choices}</select></label>
+              {date_field}
+              <label>确认依据<input name="reason" required maxlength="500"></label>
+              <button class="secondary compact" type="submit">保存确认</button>
+            </form>
+          </details>"""
+
     def student_detail(self, method, student_id):
         if not self.require("students.view"):
             return
@@ -59489,11 +59601,21 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         student_perf_log("base_query", student_id, elapsed_ms=perf_ms(step_start))
         if not student:
             return self.error_page("学生不存在", 404)
+        requested_cycle = (getattr(self, "query", {}).get("application_cycle_id") or [None])[0]
+        if requested_cycle is not None:
+            if not str(requested_cycle).isdigit():
+                return self.error_page("申请周期不存在", HTTPStatus.NOT_FOUND)
+            requested_cycle = int(requested_cycle)
+            if not db.one(
+                "SELECT 1 FROM application_cycles WHERE id=? AND student_id=?",
+                (requested_cycle, student_id),
+            ):
+                return self.error_page("申请周期不存在", HTTPStatus.NOT_FOUND)
         workflow_projection_map = None
         projection_connection = db.connect()
         try:
             workflow_projection_map = load_student_workflow_projection_map(
-                projection_connection, (str(student_id),)
+                projection_connection, (str(student_id),), cycle_id=requested_cycle
             )
         except Exception as exc:
             append_service_log(
@@ -59737,14 +59859,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         create_500_visa_button = ""
         create_590_visa_button = ""
         if can_access_module(self.user, "visa"):
+            visa_cycle_input = (
+                f'<input type="hidden" name="application_cycle_id" value="{requested_cycle}">'
+                if requested_cycle is not None else ""
+            )
             create_500_visa_button = f"""
             <form class="inline-form" method="post" action="/students/{esc(student_id)}/visa-cases/create-500">
               <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+              {visa_cycle_input}
               <button class="secondary compact" type="submit">建立500签证</button>
             </form>"""
             create_590_visa_button = f"""
             <form class="inline-form" method="post" action="/students/{esc(student_id)}/visa-cases/create-590">
               <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+              {visa_cycle_input}
               <button class="secondary compact" type="submit">建立590签证</button>
             </form>"""
         create_transfer_case_button = ""
@@ -59868,6 +59996,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         status_card_html = f'''<div data-student-summary-fact data-student-detail-status-card>
               <span>当前状态</span>
               <strong class="student-detail-stage">{esc(student_stage_display_label(card_summary.stage_label))}</strong>
+              {self.student_cycle_stage_evidence_html(student_id, (workflow_projection_map or {}).get(str(student_id)))}
               <p class="student-detail-created-date">建档时间：{esc(card_summary.created_date or "未记录")}</p>
             </div>'''
         school_card_html = f'''<div data-student-summary-fact data-student-detail-school-card>
@@ -60651,6 +60780,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                    "已保存首年学费。")
 
     def final_school_submission_panel(self, student_id):
+        from final_school_requirements import STEPS, load_optional_steps, outstanding_steps
+
         if not is_workflow_v2_active(db) or not db.one(
             "SELECT 1 FROM sqlite_master WHERE name='final_school_coe_confirmations'"
         ):
@@ -60665,13 +60796,22 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                   AND c.status='active' AND c.cycle_type='initial'
                   AND c.education_stream='school_education'""", (student_id,)
         )
+        with db.read_snapshot() as connection:
+            decisions = load_optional_steps(connection, tuple(row["id"] for row in rows))
         panels = []
         for row in rows:
             school = esc(row["school_name_snapshot"])
+            optional = decisions.get(row["id"], ())
+            outstanding = outstanding_steps(
+                row["signed_offer_completed_at"], row["payment_completed_at"],
+                row["submitted_at"], optional,
+            )
             if row["submitted_at"]:
                 panel = f'<p>{school} · 已确认递交 {esc(row["submitted_at"])}</p>'
-            elif not row["signed_offer_completed_at"] or not row["payment_completed_at"]:
-                panel = f'<p>{school} · 待确认 Signed Offer 和付款</p>'
+            elif outstanding and outstanding != (STEPS["return"],):
+                panel = f'<p>{school} · 待完成 {esc("、".join(outstanding))}</p>'
+            elif "return" in optional:
+                panel = f'<p>{school} · 学校不要求回传</p>'
             elif can_workflow_module_save(self.user, "Offer"):
                 panel = f"""
                 <form method="post" action="/students/{student_id}/offer/final-school-submission">
@@ -60686,6 +60826,19 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 </form>"""
             else:
                 continue
+            if not row["submitted_at"] and can_workflow_module_save(self.user, "Offer"):
+                for step, label in STEPS.items():
+                    required = step in optional
+                    action_label = f"{label}改为必需" if required else f"{label}不适用"
+                    panel += f"""
+                    <form class="row-actions" method="post" action="/students/{student_id}/offer/final-school-submission">
+                      <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                      <input type="hidden" name="acceptance_id" value="{row['id']}">
+                      <input type="hidden" name="step" value="{step}">
+                      <input type="hidden" name="decision" value="{'required' if required else 'optional'}">
+                      <label>{esc(action_label)}原因<input name="reason" required maxlength="500"></label>
+                      <button class="secondary" type="submit">确认{esc(action_label)}</button>
+                    </form>"""
             panels.append(panel)
         return "".join(panels)
 
@@ -60929,6 +61082,33 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 f'<aside class="student-file-record-file">{file_preview}</aside>'
                 f'</article>'
             )
+        resume_selection = ""
+        if can_workflow_module_save(self.user, "Offer") and is_workflow_v2_active(db):
+            selections = db.all(
+                """SELECT entry.id,cycle.sequence_no FROM cycle_final_acceptances entry
+                     JOIN application_cycles cycle ON cycle.id=entry.application_cycle_id
+                    WHERE entry.student_id=? AND cycle.status='active' AND cycle.cycle_type<>'transfer'
+                      AND entry.acceptance_status='withdrawn'
+                      AND entry.id=(SELECT max(latest.id) FROM cycle_final_acceptances latest
+                                     WHERE latest.application_cycle_id=cycle.id)
+                      AND NOT EXISTS (SELECT 1 FROM cycle_final_acceptances current
+                                       WHERE current.application_cycle_id=cycle.id
+                                         AND current.acceptance_status='active')
+                      AND NOT EXISTS (SELECT 1 FROM audit_logs audit
+                                       WHERE audit.action_type='dashboard_offer_selection_resumed'
+                                         AND audit.module_name='offers'
+                                         AND audit.record_id=CAST(entry.id AS TEXT)
+                                         AND audit.student_id=entry.student_id)""",
+                (student_id,),
+            )
+            resume_selection = "".join(
+                f"""<form method="post" action="/students/{student_id}/offer/resume-selection">
+                  <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                  <input type="hidden" name="acceptance_id" value="{entry['id']}">
+                  <button class="secondary" type="submit">确认继续选校（周期 #{entry['sequence_no']}）</button>
+                </form>"""
+                for entry in selections
+            )
         offer_cards = "".join(rows) or '<div class="empty">暂无 Offer</div>'
         document_type_options = "".join(
             f'<option value="{esc(kind)}">{esc(module_document_type_label("Offer", kind))}</option>'
@@ -60942,6 +61122,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="offer_status" value="received">
             {transfer_branch_field}<input type="file" name="file" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" required><button class="primary">上传 Offer 并自动识别</button>
           </form>
+          {resume_selection}
           {self.final_school_submission_panel(student_id)}
           {self.student_intake_tuition_panel(student_id)}
           <div class="student-file-list offer-file-list">{offer_cards}</div>
@@ -67264,6 +67445,22 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             for option in options
         )
 
+    def visa_case_cycle_field(self, student_id, selected="", *, explicit=False):
+        from visa_cycle_assignment import active_visa_cycles
+
+        with db.read_snapshot() as connection:
+            cycles = active_visa_cycles(connection, student_id)
+        if not cycles:
+            return ""
+        if len(cycles) == 1 and not explicit:
+            selected = selected or cycles[0][0]
+        options = ['<option value="">请选择</option>']
+        for cycle_id, sequence, cycle_type, stream in cycles:
+            label = f"周期 #{sequence} · {LIFECYCLE_LABELS.get(cycle_type, cycle_type)} · {stream}"
+            selected_flag = " selected" if str(selected) == str(cycle_id) else ""
+            options.append(f'<option value="{cycle_id}"{selected_flag}>{esc(label)}</option>')
+        return f'<label>申请周期<select name="application_cycle_id" required>{"".join(options)}</select></label>'
+
     def visa_case_foundation_form_html(self, student, values=None, action=""):
         values = values or {}
         student_id = student["student_id"]
@@ -67276,6 +67473,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <input type="hidden" name="csrf" value="{esc(self.csrf)}">
           <div class="panel-head"><div><h2>创建 Visa Case</h2><p>Phase 1 只记录基础信息；不包含家长链接、材料上传、Evidence、Word/PDF 或 GS/GTE。</p></div></div>
           <div class="dialog-grid visa-case-new-section">
+            {self.visa_case_cycle_field(student_id, values.get("application_cycle_id", ""))}
             <label>Visa Type<select name="visa_type" required><option value="">请选择</option>{self.visa_case_select_options(self.visa_case_type_options(), values.get("visa_type", ""))}</select></label>
             <label>Application Type<input name="application_type" value="{value("application_type", "New Application")}"></label>
             <label>Guardian Applicant<select name="guardian_applicant"><option value="">Please select / 请选择</option>{self.visa_case_select_options(self.visa_case_guardian_applicant_options(), values.get("guardian_applicant", ""))}</select></label>
@@ -67503,7 +67701,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 </div>
                 <a class="secondary button-link" href="/students/{quote(student_id)}/visa-cases">返回 Visa Case 列表</a>
               </section>
-              {self.visa_case_foundation_form_html(student)}
+              {self.visa_case_foundation_form_html(student, {'application_cycle_id': (getattr(self, "query", {}).get("application_cycle_id") or [""])[0]})}
             </div>
             """
             return self.send_html(page("Create Visa Case", body, self.user, self.csrf, "visa_management", nas.status()))
@@ -67539,37 +67737,48 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         case_owner = form_text_value(form, "case_owner", self.user.get("display_name", "") if self.user else "")
         actual_lodgement_date = form_text_value(form, "actual_lodgement_date")
         result_date = form_text_value(form, "result_date")
-        case_id = db.execute(
-            """INSERT INTO visa_cases(
-                 student_id,visa_case_name,visa_type,application_type,main_applicant,guardian_applicant,
-                 applicant_count,status,case_owner,target_lodgement_date,actual_lodgement_date,
-                 result_date,result_status,notes,case_type,applicant_name,responsible_consultant,
-                 lodgement_date,decision_status,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                student_id,
-                f"{visa_type} - {student_id}",
-                visa_type,
-                form_text_value(form, "application_type", "New Application"),
-                main_applicant,
-                guardian_applicant,
-                applicant_count,
-                status,
-                case_owner,
-                form_text_value(form, "target_lodgement_date"),
-                actual_lodgement_date,
-                result_date,
-                result_status,
-                form_text_value(form, "notes"),
-                visa_type,
-                main_applicant,
-                case_owner,
-                actual_lodgement_date,
-                result_status,
-                stamp,
-                stamp,
-            ),
-        )
+        from visa_cycle_assignment import resolve_visa_cycle
+
+        try:
+            with db.transaction() as connection:
+                cycle_id = resolve_visa_cycle(connection, student_id, form_text_value(form, "application_cycle_id"))
+                case_id = connection.execute(
+                    """INSERT INTO visa_cases(
+                         student_id,visa_case_name,visa_type,application_type,main_applicant,guardian_applicant,
+                         applicant_count,status,case_owner,target_lodgement_date,actual_lodgement_date,
+                         result_date,result_status,notes,case_type,applicant_name,responsible_consultant,
+                         lodgement_date,decision_status,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        student_id,
+                        f"{visa_type} - {student_id}",
+                        visa_type,
+                        form_text_value(form, "application_type", "New Application"),
+                        main_applicant,
+                        guardian_applicant,
+                        applicant_count,
+                        status,
+                        case_owner,
+                        form_text_value(form, "target_lodgement_date"),
+                        actual_lodgement_date,
+                        result_date,
+                        result_status,
+                        form_text_value(form, "notes"),
+                        visa_type,
+                        main_applicant,
+                        case_owner,
+                        actual_lodgement_date,
+                        result_status,
+                        stamp,
+                        stamp,
+                    ),
+                ).lastrowid
+                if cycle_id is not None:
+                    connection.execute(
+                        "UPDATE visa_cases SET application_cycle_id=? WHERE id=?", (cycle_id, case_id)
+                    )
+        except ValueError as exc:
+            return self.flash_redirect(f"/students/{quote(student_id)}/visa-cases/new", str(exc), "error")
         case = db.one("SELECT * FROM visa_cases WHERE id=? AND student_id=?", (case_id, student_id))
         if case:
             self.visa_material_initialize_checklist(case)
@@ -67591,19 +67800,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return "590 Guardian Visa"
         return "500 Student Visa"
 
-    def student_visa_case_active_for_type(self, student_id, visa_type):
-        placeholders = ",".join("?" for _status in self.student_visa_case_open_statuses())
-        return db.one(
-            f"""SELECT * FROM visa_cases
-                WHERE student_id=?
-                  AND visa_type=?
-                  AND archived_at IS NULL
-                  AND COALESCE(status,'Draft') IN ({placeholders})
-                ORDER BY updated_at DESC,id DESC
-                LIMIT 1""",
-            (student_id, visa_type, *self.student_visa_case_open_statuses()),
-        )
-
     def student_visa_case_quick_create(self, method, student_id, visa_kind):
         if method != "POST":
             return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
@@ -67613,41 +67809,62 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if not student:
             return self.error_page("学生不存在", 404)
         visa_type = self.student_visa_case_quick_type_label(visa_kind)
-        existing_case = self.student_visa_case_active_for_type(student_id, visa_type)
-        if existing_case:
-            return self.flash_redirect(
-                f"/students/{quote(student_id)}/visa-cases/{existing_case['id']}",
-                f"已进入现有 active {visa_type}。",
-            )
         stamp = now_iso()
         student_name = f'{student["passport_first_name"] or ""} {student["passport_last_name"] or ""}'.strip()
         case_owner = self.user.get("display_name", "") if self.user else ""
-        case_id = db.execute(
-            """INSERT INTO visa_cases(
-                 student_id,visa_case_name,visa_type,application_type,main_applicant,guardian_applicant,
-                 applicant_count,status,case_owner,result_status,notes,case_type,applicant_name,
-                 responsible_consultant,decision_status,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                student_id,
-                f"{visa_type} - {student_id}",
-                visa_type,
-                "New Application",
-                student_name,
-                "",
-                1,
-                "Information Collection",
-                case_owner,
-                "Pending",
-                "",
-                visa_type,
-                student_name,
-                case_owner,
-                "Pending",
-                stamp,
-                stamp,
-            ),
-        )
+        from visa_cycle_assignment import resolve_visa_cycle
+
+        try:
+            with db.transaction() as connection:
+                cycle_id = resolve_visa_cycle(connection, student_id, getattr(self, "form", {}).get("application_cycle_id", ""))
+                statuses = self.student_visa_case_open_statuses()
+                marks = ",".join("?" for _ in statuses)
+                cycle_clause = "AND application_cycle_id IS ?" if cycle_id is not None else ""
+                cycle_params = (cycle_id,) if cycle_id is not None else ()
+                existing_case = connection.execute(
+                    f"""SELECT id FROM visa_cases WHERE student_id=? AND visa_type=?
+                         {cycle_clause} AND archived_at IS NULL
+                         AND COALESCE(status,'Draft') IN ({marks})
+                         ORDER BY updated_at DESC,id DESC LIMIT 1""",
+                    (student_id, visa_type, *cycle_params, *statuses),
+                ).fetchone()
+                if existing_case:
+                    return self.flash_redirect(
+                        f"/students/{quote(student_id)}/visa-cases/{existing_case[0]}",
+                        f"已进入现有 active {visa_type}。",
+                    )
+                case_id = connection.execute(
+                    """INSERT INTO visa_cases(
+                         student_id,visa_case_name,visa_type,application_type,main_applicant,guardian_applicant,
+                         applicant_count,status,case_owner,result_status,notes,case_type,applicant_name,
+                         responsible_consultant,decision_status,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        student_id,
+                        f"{visa_type} - {student_id}",
+                        visa_type,
+                        "New Application",
+                        student_name,
+                        "",
+                        1,
+                        "Information Collection",
+                        case_owner,
+                        "Pending",
+                        "",
+                        visa_type,
+                        student_name,
+                        case_owner,
+                        "Pending",
+                        stamp,
+                        stamp,
+                    ),
+                ).lastrowid
+                if cycle_id is not None:
+                    connection.execute(
+                        "UPDATE visa_cases SET application_cycle_id=? WHERE id=?", (cycle_id, case_id)
+                    )
+        except ValueError as exc:
+            return self.flash_redirect(f"/students/{quote(student_id)}/visa-cases/new", str(exc), "error")
         case = db.one("SELECT * FROM visa_cases WHERE id=? AND student_id=?", (case_id, student_id))
         if case:
             self.visa_material_initialize_checklist(case)
@@ -67691,6 +67908,40 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         {preview_dialog_html()}"""
         self.send_html(page("Evidence / AI Review Centre", body, self.user, self.csrf, "visa_management", nas.status()))
 
+    def student_visa_case_resume_preparation(self, method, student_id, case_id):
+        from dashboard_visa_metrics import is_student_visa_case
+        from visa_dashboard_retry import load_retries, retry_key
+
+        if method != "POST":
+            return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
+        if not can_workflow_module_save(self.user, "Visa"):
+            return self.deny_module_access("visa")
+        location = self.visa_case_return_path(student_id, case_id, "visa_result")
+        reason = str(self.form.get("reason") or "").strip()
+        if not 0 < len(reason) <= 500:
+            return self.flash_redirect(location, "请填写恢复办理原因", "error")
+        with db.transaction() as connection:
+            case = connection.execute(
+                """SELECT visa.*,result.effective_result,result.source_event_id FROM visa_cases visa
+                      JOIN application_cycles cycle ON cycle.id=visa.application_cycle_id
+                           AND cycle.student_id=visa.student_id
+                      LEFT JOIN visa_result_status_current result ON result.visa_case_id=visa.id
+                     WHERE visa.id=? AND visa.student_id=? AND visa.archived_at IS NULL
+                       AND cycle.status='active' AND cycle.cycle_type<>'transfer'""",
+                (case_id, student_id),
+            ).fetchone()
+            key = retry_key(dict(case)) if case and is_student_visa_case(dict(case)) else None
+            if key is None:
+                return self.flash_redirect(location, "当前签证案件或申请周期不支持恢复办理", "error")
+            if load_retries(connection, (case["application_cycle_id"],)).get((int(case_id), student_id)) != key:
+                connection.execute(
+                    """INSERT INTO audit_logs(user_id,username,action_type,module_name,module_key,
+                                              record_id,student_id,old_value,new_value,status,created_at)
+                       VALUES (?,?,'student_visa_preparation_resumed','visa_cases','visa_cases',?,?,?,?,'success',?)""",
+                    (self.user["id"], self.user["username"], case_id, student_id, key, reason, now_iso()),
+                )
+        return self.flash_redirect(location, "已确认恢复签证准备，原签证结果已保留")
+
     def student_visa_case_lodgement_submit(self, method, student_id, case_id):
         return_path = self.visa_case_return_path(student_id, case_id, "visa_result", "visa-lodgement-submission")
         if method != "POST":
@@ -67732,13 +67983,23 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         actor_name = str(self.user.get("display_name") or self.user.get("username") or "System") if self.user else "System"
         try:
             with db.transaction() as connection:
+                from visa_cycle_assignment import resolve_visa_cycle
+
+                cycle_id = dict(case).get("application_cycle_id")
+                if cycle_id is None and "application_cycle_id" in case.keys():
+                    cycle_id = resolve_visa_cycle(
+                        connection, student_id, self.form.get("application_cycle_id", ""), infer_single=False,
+                    )
+                link_clause = "application_cycle_id=COALESCE(application_cycle_id,?)," if cycle_id is not None else ""
+                cycle_params = (cycle_id,) if cycle_id is not None else ()
                 cursor = connection.execute(
-                    """UPDATE visa_cases
+                    f"""UPDATE visa_cases
                           SET actual_lodgement_date=?,lodgement_date=?,status='Lodged',
+                              {link_clause}
                               lodged_by_user_id=?,lodged_by_name=?,lodgement_recorded_at=?,updated_at=?
                         WHERE id=? AND student_id=? AND archived_at IS NULL
                           AND lodgement_recorded_at IS NULL""",
-                    (actual_date, actual_date, actor_id, actor_name, stamp, stamp, int(case_id), str(student_id)),
+                    (actual_date, actual_date, *cycle_params, actor_id, actor_name, stamp, stamp, int(case_id), str(student_id)),
                 )
                 if cursor.rowcount != 1:
                     return self.flash_redirect(return_path, "正式递交证据未保存，请刷新后重试。", "error")
@@ -67756,7 +68017,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         db.audit(
             self.user, "visa_application_submitted", "visa_cases", int(case_id),
             student_id=str(student_id),
-            new_value=json.dumps({"actual_lodgement_date": actual_date, "lodged_by_name": actor_name}, ensure_ascii=False),
+            new_value=json.dumps({"actual_lodgement_date": actual_date, "lodged_by_name": actor_name,
+                                  "application_cycle_id": cycle_id}, ensure_ascii=False),
             ip=self.client_address[0], device=self.headers.get("User-Agent"),
         )
         return self.flash_redirect(return_path, "VISA Application Submitted 已记录。")
@@ -67771,6 +68033,33 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <section class="panel visa-lodgement-panel" id="visa-lodgement-submission">
               <div class="panel-head"><div><h2>VISA Application Submitted</h2><p>数据库迁移完成后可在这里记录正式递交。</p></div></div>
             </section>"""
+        from dashboard_visa_metrics import is_student_visa_case
+        from visa_dashboard_retry import load_retries, retry_key
+
+        if (dict(case).get("application_cycle_id") is not None
+                and can_workflow_module_save(self.user, "Visa") and is_student_visa_case(dict(case))
+                and db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'")):
+            with db.read_snapshot() as connection:
+                result = connection.execute(
+                    """SELECT cycle.id,result.effective_result,result.source_event_id
+                          FROM application_cycles cycle LEFT JOIN visa_result_status_current result
+                               ON result.visa_case_id=?
+                         WHERE cycle.id=? AND cycle.student_id=? AND cycle.status='active'
+                           AND cycle.cycle_type<>'transfer'""",
+                    (case["id"], case["application_cycle_id"], student_id),
+                ).fetchone()
+                if result:
+                    context = dict(case, effective_result=result[1], source_event_id=result[2])
+                    key = retry_key(context)
+                    already_resumed = load_retries(connection, (result[0],)).get((case["id"], student_id))
+                    if key and key != already_resumed:
+                        return f"""
+                        <form class="panel visa-lodgement-panel" method="post"
+                              action="/students/{quote(student_id)}/visa-cases/{case['id']}/resume-preparation">
+                          <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                          <label>恢复办理原因<input name="reason" required maxlength="500"></label>
+                          <button type="submit">确认恢复签证准备</button>
+                        </form>"""
         acknowledge_date = ""
         dates_available = bool(db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='visa_processing_date_revisions'"))
         if dates_available:
@@ -67805,6 +68094,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <form class="visa-lodgement-form" method="post" action="/students/{quote(str(student_id))}/visa-cases/{int(case['id'])}/lodgement-submit">
             <input type="hidden" name="csrf" value="{esc(self.csrf)}">
             <label>实际递交日期<input type="date" name="actual_lodgement_date" value="{esc(acknowledge_date)}" required></label>
+            {self.visa_case_cycle_field(student_id, explicit=True) if "application_cycle_id" in case.keys() and case["application_cycle_id"] is None else ""}
             <button class="primary" type="submit">确认 VISA Application Submitted</button>
           </form>
         </section>"""
@@ -71057,6 +71347,43 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "unchanged": change.unchanged,
         })
 
+    def offer_selection_resume(self, method, student_id):
+        if method != "POST":
+            return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
+        if not can_workflow_module_save(self.user, "Offer"):
+            return self.deny_module_access("offer")
+        try:
+            acceptance_id = int(self.form.get("acceptance_id", ""))
+        except (TypeError, ValueError):
+            return self.error_page("无效的最终接受记录", HTTPStatus.BAD_REQUEST)
+        with db.transaction() as connection:
+            entry = connection.execute(
+                """SELECT entry.id FROM cycle_final_acceptances entry
+                     JOIN application_cycles cycle ON cycle.id=entry.application_cycle_id
+                    WHERE entry.id=? AND entry.student_id=? AND cycle.student_id=entry.student_id
+                      AND cycle.status='active' AND cycle.cycle_type<>'transfer'
+                      AND entry.acceptance_status='withdrawn'
+                      AND entry.id=(SELECT max(latest.id) FROM cycle_final_acceptances latest
+                                     WHERE latest.application_cycle_id=cycle.id)
+                      AND NOT EXISTS (SELECT 1 FROM cycle_final_acceptances current
+                                       WHERE current.application_cycle_id=cycle.id
+                                         AND current.acceptance_status='active')""",
+                (acceptance_id, student_id),
+            ).fetchone()
+            if entry is None:
+                return self.error_page("当前周期的最终接受记录已变更", HTTPStatus.CONFLICT)
+            connection.execute(
+                """INSERT INTO audit_logs(
+                       user_id,username,action_type,module_name,module_key,record_id,student_id,status,created_at)
+                   SELECT ?,?,'dashboard_offer_selection_resumed','offers','offers',?,?,'success',?
+                    WHERE NOT EXISTS (SELECT 1 FROM audit_logs
+                                       WHERE action_type='dashboard_offer_selection_resumed'
+                                         AND module_name='offers' AND record_id=? AND student_id=?)""",
+                (self.user["id"], self.user["username"], str(acceptance_id), student_id, now_iso(),
+                 str(acceptance_id), student_id),
+            )
+        return self.flash_redirect(f"/students/{student_id}?tab=offer", "已确认继续选校。")
+
     def offer_acceptance_withdraw(self, method, student_id, offer_id):
         if method != "POST":
             return self.json_response(
@@ -71125,10 +71452,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if not can_workflow_module_save(self.user, "Offer"):
             return self.deny_module_access("offer")
         try:
-            submitted = date.fromisoformat(self.form.get("submitted_at", ""))
-            channel = self.form.get("channel", "")
-            if submitted > datetime.now(ZoneInfo("Australia/Melbourne")).date() or channel not in {"email","portal","other"}:
-                raise ValueError("请填写实际递交日期和方式")
             acceptance_id = int(self.form.get("acceptance_id", ""))
             with db.transaction() as conn:
                 active = conn.execute(
@@ -71140,6 +71463,31 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 ).fetchone()
                 if not is_workflow_v2_active(conn) or active is None:
                     raise ValueError("最终学校接受记录已变更，请刷新后重试")
+                if "step" in self.form:
+                    from final_school_requirements import STEPS
+
+                    step = self.form.get("step")
+                    decision = self.form.get("decision")
+                    reason = str(self.form.get("reason") or "").strip()
+                    if step not in STEPS or decision not in {"optional", "required"} or not 0 < len(reason) <= 500:
+                        raise ValueError("请选择手续是否适用并填写原因")
+                    if conn.execute(
+                        "SELECT 1 FROM final_school_submission_events WHERE final_acceptance_id=?",
+                        (acceptance_id,),
+                    ).fetchone():
+                        raise ValueError("已确认回传，请保留当时的手续口径")
+                    conn.execute(
+                        """INSERT INTO audit_logs(user_id,username,action_type,module_name,module_key,
+                                                  record_id,student_id,old_value,new_value,status,created_at)
+                           VALUES (?,?,'final_school_step_requirement','offers','offers',?,?,?,?,'success',?)""",
+                        (self.user["id"], self.user["username"], str(acceptance_id), student_id,
+                         step, json.dumps({"decision": decision, "reason": reason}, ensure_ascii=False), now_iso()),
+                    )
+                    return self.flash_redirect(f"/students/{student_id}?tab=offer", "已保存学校手续要求")
+                submitted = date.fromisoformat(self.form.get("submitted_at", ""))
+                channel = self.form.get("channel", "")
+                if submitted > datetime.now(ZoneInfo("Australia/Melbourne")).date() or channel not in {"email","portal","other"}:
+                    raise ValueError("请填写实际递交日期和方式")
                 record_final_school_submission(
                     conn, acceptance_id, submitted_at=submitted.isoformat(),
                     submission_channel=channel, submission_reference=None,
@@ -73173,20 +73521,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if contract["contract_type"] == transfer_contract_authority.TRANSFER:
             transfer_contract_authority.validate_fee_text(pdf_text(source_pdf), contract)
         stamp = now_iso()
-        if regenerate:
+        active = db.one(
+            "SELECT * FROM contract_signing_links WHERE contract_id=? AND status='active' ORDER BY id DESC LIMIT 1",
+            (contract_id,),
+        )
+        if active and not regenerate and not active["invalidated_at"] and not is_expired(active["expires_at"]):
+            self.contract_mark_sent_after_signing_link(contract, user, stamp)
+            return dict(active)
+        if active:
             db.execute(
                 """UPDATE contract_signing_links
                    SET status='superseded',invalidated_at=?,invalidated_reason=?,updated_at=?
                    WHERE contract_id=? AND status='active'""",
                 (stamp, "regenerated", stamp, contract_id),
             )
-        active = db.one(
-            "SELECT * FROM contract_signing_links WHERE contract_id=? AND status='active' ORDER BY id DESC LIMIT 1",
-            (contract_id,),
-        )
-        if active and not regenerate:
-            self.contract_mark_sent_after_signing_link(contract, user, stamp)
-            return dict(active)
         token = new_token(32)
         token_hash = contract_signing_token_hash(token)
         link_id = db.execute(

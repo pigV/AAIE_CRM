@@ -110,6 +110,19 @@ class WorkflowVisaEventTests(unittest.TestCase):
             ).fetchone()[0],
         )
 
+    def test_guardian_refusal_cannot_close_the_student_cycle(self):
+        self.conn.execute("ALTER TABLE visa_cases ADD COLUMN case_type TEXT")
+        self.conn.execute("UPDATE visa_cases SET case_type='590 Guardian Visa' WHERE id=50")
+        self.add_document(63, "VisaRefusalLetter", NOW)
+        with self.assertRaisesRegex(VisaDecisionConflictError, "guardian visa"):
+            record_first_valid_visa_decision(
+                self.conn, self.cycle.id, visa_case_id=50, student_document_id=63,
+                decision_type="refusal", actor_user_id=1,
+            )
+        self.assertEqual("active", self.conn.execute(
+            "SELECT status FROM application_cycles WHERE id=?", (self.cycle.id,)
+        ).fetchone()[0])
+
     def test_opposite_decision_after_first_event_is_rejected(self):
         self.add_document(60, "VisaGrantLetter", NOW)
         record_first_valid_visa_decision(

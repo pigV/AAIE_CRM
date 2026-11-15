@@ -147,18 +147,19 @@ def record_first_valid_visa_decision(
     if str(cycle[2]) != "active":
         raise VisaDecisionConflictError("visa decision requires an active cycle")
     student_id = str(cycle[1])
-    visa_case = conn.execute(
-        """
-        SELECT student_id,application_cycle_id FROM visa_cases WHERE id=?
-        """,
-        (int(visa_case_id),),
-    ).fetchone()
+    from dashboard_visa_metrics import is_student_visa_case
+
+    cursor = conn.execute("SELECT * FROM visa_cases WHERE id=?", (int(visa_case_id),))
+    row = cursor.fetchone()
+    visa_case = dict(zip((column[0] for column in cursor.description), row)) if row else None
     if (
         visa_case is None
-        or str(visa_case[0]) != student_id
-        or int(visa_case[1] or 0) != int(application_cycle_id)
+        or str(visa_case["student_id"]) != student_id
+        or int(visa_case["application_cycle_id"] or 0) != int(application_cycle_id)
     ):
         raise VisaDecisionConflictError("visa case belongs to another application cycle")
+    if not is_student_visa_case(visa_case):
+        raise VisaDecisionConflictError("guardian visa cannot decide a student application cycle")
     document = None
     if student_document_id is not None:
         document = conn.execute(

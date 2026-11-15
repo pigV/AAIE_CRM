@@ -369,7 +369,10 @@ def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occur
                 or json.loads(existing['confirmed_json']) != effective):
             raise ValueError('Retained first decision requires a separate audited correction workflow')
         return existing
-    cycle_id = _student_cycle_id(conn, case) if kind and case.get('student_id') else None
+    from dashboard_visa_metrics import is_student_visa_case
+
+    student_decision = case.get("student_id") and is_student_visa_case(case)
+    cycle_id = _student_cycle_id(conn, case) if kind and student_decision else None
     if kind and not case.get('student_id') and case.get('application_cycle_id'):
         raise ValueError('Standalone applicant cannot own a Student Application Cycle')
     with _atomic(conn):
@@ -383,15 +386,28 @@ def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occur
             correct_processing_dates(conn,case_id,{'medical_completed_date':effective['medical_completed_date']},actor_user_id=actor_user_id,occurred_at=occurred_at)
         canonical_id = None
         from visa_document_lifecycle import active_documents
-        grant_authority = any(d.get('id') == document['id'] and d['authority_category'] == 'grant_letter'
-                              for d in active_documents(conn, case_id))
-        project_decision = bool(kind) and (kind != 'grant' or grant_authority)
+        expected_category = {"grant": "grant_letter", "refusal": "refusal_letter"}.get(kind)
+        project_decision = bool(expected_category) and any(
+            row["id"] == document["id"] and row["authority_category"] == expected_category
+            for row in active_documents(conn, case_id)
+        )
         if kind and conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='visa_result_status_current'"
         ).fetchone():
             label = 'Granted' if kind == 'grant' else 'Refused'
             proposed = json.loads(extraction['proposed_json'])
-            if proposed.get('document_kind') == kind and proposed.get('decision_type') == kind:
+            if kind == "refusal" and project_decision:
+                from visa_result_status import record_manual_result, result_summary
+
+                current_result = result_summary(conn, case_id)
+                if current_result["effective_result"] == "Granted":
+                    raise ValueError("已有下签结果，须先完成签证结果冲突复核")
+                if current_result["effective_result"] != "Refused":
+                    current_result = record_manual_result(
+                        conn, case_id, label, actor_user_id=actor_user_id,
+                        occurred_at=occurred_at, reason="工作人员确认有效拒签信",
+                    )
+            elif proposed.get('document_kind') == kind and proposed.get('decision_type') == kind:
                 from visa_result_status import record_auto_result
                 current_result = record_auto_result(
                     conn, case_id, document['id'], label,
@@ -416,7 +432,7 @@ def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occur
                 current_result={'effective_result':case_projection(conn,case_id)['result_status']}
             project_decision = project_decision and bool(current_result and current_result['effective_result'] == label)
         if project_decision:
-            if case.get('student_id'):
+            if student_decision:
                 cursor = conn.execute('''INSERT INTO visas(student_id,file_path,visa_type,visa_sector,visa_grant_date,visa_start_date,
                     visa_expiry_date,visa_conditions,visa_status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)''',
                     (case['student_id'], document['file_path'], case.get('visa_type') or '', '', effective['decision_date'],

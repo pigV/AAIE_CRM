@@ -1,4 +1,5 @@
 """Visa case workspace and independently owned applicant routes."""
+from contextlib import nullcontext
 import hashlib
 import json
 import re
@@ -83,10 +84,10 @@ class VisaWorkspaceCandidateMixin:
             return read_legacy_letter_text(path,self._visa_runtime()['PdfReader'])
         except (ValueError,OSError,UnicodeError):return ''
 
-    def _visa_check_upload(self, case, data, category=None, exclude_source_id=None):
+    def _visa_check_upload(self, case, data, category=None, exclude_source_id=None, *, connection=None):
         from visa_document_lifecycle import check_upload
         g=self._visa_runtime()
-        with g['db'].transaction() as conn:
+        with (nullcontext(connection) if connection is not None else g['db'].transaction()) as conn:
             check_upload(conn,int(case['id']),hashlib.sha256(data).hexdigest(),category,
                          read_bytes=lambda d:self._visa_document_path(case,d).read_bytes(),exclude_source_id=exclude_source_id)
 
@@ -455,7 +456,7 @@ class VisaWorkspaceCandidateMixin:
                         else:root=g['APP_DIR']/'storage'/'visa-applicants'/str(case['applicant_id'])/'cases'/str(case_id)
                         from visa_document_lifecycle import KIND_CATEGORY
                         category=KIND_CATEGORY.get(service.propose_letter(extracted_text)['document_kind'],'other')
-                        self._visa_check_upload(dict(case),upload.data,category)
+                        self._visa_check_upload(dict(case),upload.data,category,connection=conn)
                         digest=hashlib.sha256(upload.data).hexdigest();root.mkdir(parents=True,exist_ok=True);path=root/(digest+suffix)
                         if not path.exists():
                             with path.open('xb') as stream:stream.write(upload.data)
@@ -481,7 +482,8 @@ class VisaWorkspaceCandidateMixin:
                         service.confirm_letter(conn,int(case_id),int(value('extraction_id')),values={k:value(k) for k in ('document_kind','decision_type','decision_date','official_date','length_of_stay','expiry_date','medical_completed_date')},actor_user_id=actor,occurred_at=stamp)
                     else:raise ValueError('Unsupported action.')
                 result_action = action in {'confirm','resolve-unknown','correct-result-status','upload','legacy-extract','extract'}
-                if result_action and case['student_id']:
+                from dashboard_visa_metrics import is_student_visa_case
+                if result_action and case['student_id'] and is_student_visa_case(dict(case)):
                     from visa_document_lifecycle import case_projection
                     with db.transaction() as conn:
                         terminal=case_projection(conn,int(case_id))['result_status'] == 'Granted'
