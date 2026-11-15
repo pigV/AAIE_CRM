@@ -368,7 +368,17 @@ def _canonical_distribution(connection, *, read_context=None, cycles_only=False)
     if cycles_only:
         from dashboard_workflow_metrics import dashboard_active_cycles
 
+        from cycle_stage_requirements import stage_decisions
+
         projection = dashboard_active_cycles(connection, projection)
+        if _table_exists(connection, "audit_logs"):
+            decisions = stage_decisions(
+                connection, "dashboard_test_cycle_confirmed", tuple(row.cycle_id for row in projection)
+            )
+            projection = tuple(
+                row for row in projection
+                if decisions.get(row.cycle_id, {}).get("decision") != "exclude_test"
+            )
         dashboard_stages = load_confirmed_cycle_stages(connection, projection)
         student_ids = tuple({str(row.student_id) for row in projection if row.student_id})
         student_workflow = {}
