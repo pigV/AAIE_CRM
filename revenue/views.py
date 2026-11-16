@@ -1573,6 +1573,7 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
         f'<strong>{_money(int(item["value"])) if str(item["key"]).endswith("_cents") else int(item["value"])}</strong>'
         f'<small>查看明细</small></a>'
         for item in data.get("metrics") or []
+        if item["key"] not in {"unmatched_statement_items", "open_exceptions"}
     )
     pending = "".join(
         f'<a class="revenue-pending-item" href="{escape(str(item["href"]), quote=True)}">'
@@ -1583,17 +1584,8 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
         f'<a class="revenue-workspace-link" href="{escape(str(item["href"]), quote=True)}">'
         f'<strong>{escape(str(item["label"]))}</strong><span>进入工作区</span></a>'
         for item in data.get("workspace_links") or []
+        if item["key"] not in {"cases", "billing", "direct-commission", "reconciliation"}
     )
-    quick_action_items = [
-        item for item in data.get("quick_actions") or []
-        if not mobile or item.get("mobile_safe")
-    ]
-    quick_actions = "".join(
-        f'<a class="revenue-quick-action" href="{escape(str(item["href"]), quote=True)}">'
-        f'<strong>{escape(str(item["label"]))}</strong>'
-        f'<span>{escape(str(item["description"]))}</span></a>'
-        for item in quick_action_items
-    ) or '<p class="revenue-empty">当前没有可用快捷操作。</p>'
     desktop_rows = "".join(
         f'<tr><td><a class="revenue-row-link" href="{escape(str(row["href"]), quote=True)}">{escape(str(row["student_name"]))}</a></td>'
         f'<td>{escape(str(row["student_id"]))}</td><td>{escape(str(row["classification"]))}</td><td>{escape(str(row["business_type"]))}</td><td>{escape(str(row["institution"]))}</td>'
@@ -1653,7 +1645,6 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
       </header>
       <section class="revenue-metrics" aria-label="收入与佣金摘要">{metrics}</section>
       <nav class="revenue-workspace-links" aria-label="收入与佣金工作区">{workspace_links}</nav>
-      <section class="revenue-panel revenue-quick-panel"><div class="revenue-panel-heading"><div><span class="revenue-eyebrow">已闭环能力</span><h2>快捷操作</h2></div></div><div class="revenue-quick-actions">{quick_actions}</div></section>
       <section class="revenue-dashboard-grid">
         <article class="revenue-panel revenue-recent-panel"><div class="revenue-panel-heading"><div><span class="revenue-eyebrow">实时数据</span><h2>最近有收费/佣金记录的学生</h2><p>仅显示近期已有收费或佣金档案的学生。查看完整学生名单，请点击“查看全部学生”。</p></div><a href="{escape(cases_href, quote=True)}">查看全部学生</a></div>{recent_content}</article>
         <aside class="revenue-panel revenue-pending-panel"><div class="revenue-panel-heading"><div><span class="revenue-eyebrow">需要关注</span><h2>待办事项</h2></div><a href="/revenue/reconciliation">进入对账</a></div><div class="revenue-pending-list">{pending}</div></aside>
