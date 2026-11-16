@@ -55,6 +55,15 @@ class RevenueDatabaseFixture:
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
+    def seed_dashboard_invoice(self, connection, case_id, issued_at="2026-08-30T13:29:22Z"):
+        uid = f"dashboard-invoice-{case_id}"
+        connection.execute(
+            """INSERT INTO revenue_invoices(uid,document_kind,invoice_number,commercial_case_id,
+                       issue_date,net_cents,gst_cents,gross_cents,status,issued_at,created_at)
+               VALUES (?,'client_invoice',?,?,?,10000,0,10000,'issued',?,?)""",
+            (uid, uid, case_id, issued_at[:10], issued_at, issued_at),
+        )
+
     def seed_prior_existing_cycle(self, connection):
         connection.execute(
             "INSERT INTO application_cycles VALUES(90,'cycle-90','S-REVENUE','initial','closed','school_education','2025-01-01')"

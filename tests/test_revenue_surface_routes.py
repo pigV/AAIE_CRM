@@ -17,6 +17,7 @@ class RevenueSurfaceURLTests(RevenueDatabaseFixture, unittest.TestCase):
             case = RevenueService(RevenueRepository(connection)).open_case(
                 100, 1, "surface-case"
             )
+            self.seed_dashboard_invoice(connection, case["id"])
             desktop = RevenueReadModels(connection, case_surface="desktop")
             mobile = RevenueReadModels(connection, case_surface="mobile")
 

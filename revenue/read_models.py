@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo
 
+from canonical_acceptance import active_acceptance_predicate
 from revenue.operational_visibility import RevenueOperationalVisibility
 from revenue.urls import case_url, cases_url, revenue_home_url
 
@@ -1549,14 +1550,118 @@ class RevenueReadModels:
 
     def _recent_cases(self) -> list[dict[str, Any]]:
         rows = self.connection.execute(
-            """SELECT id,uid,application_cycle_id,student_id,status,
-                      existing_aaie_k12,opened_at,closed_at
-                 FROM revenue_commercial_cases c
+            """WITH activity(case_id, occurred_at) AS (
+                   SELECT commercial_case_id,created_at FROM revenue_fee_items
+                    WHERE status<>'cancelled'
+                   UNION ALL
+                   SELECT f.commercial_case_id,p.confirmed_at
+                     FROM revenue_client_payment_allocations a
+                     JOIN revenue_payments p ON p.id=a.payment_id
+                     JOIN revenue_fee_items f ON f.id=a.fee_item_id
+                    WHERE p.status='confirmed' AND p.payment_direction='received'
+                      AND p.counterparty_kind='client' AND f.status<>'cancelled'
+                   UNION ALL
+                   SELECT commercial_case_id,calculated_at FROM revenue_commission_lines
+                   UNION ALL
+                   SELECT l.commercial_case_id,r.issued_at
+                     FROM revenue_claims r
+                     JOIN revenue_claim_allocations a ON a.claim_id=r.id
+                     JOIN revenue_commission_instalments i ON i.id=a.commission_instalment_id
+                     JOIN revenue_commission_lines l ON l.id=i.commission_line_id
+                    WHERE r.status='issued'
+                   UNION ALL
+                   SELECT l.commercial_case_id,a.confirmed_at
+                     FROM revenue_payment_allocations a
+                     JOIN revenue_payments p ON p.id=a.payment_id
+                     JOIN revenue_commission_lines l ON l.id=a.commission_line_id
+                    WHERE p.status='confirmed' AND p.payment_direction='received'
+                   UNION ALL
+                   SELECT i.commercial_case_id,a.confirmed_at
+                     FROM revenue_payment_allocations a
+                     JOIN revenue_payments p ON p.id=a.payment_id
+                     JOIN revenue_invoice_lines l ON l.id=a.invoice_line_id
+                     JOIN revenue_invoices i ON i.id=l.invoice_id
+                    WHERE p.status='confirmed' AND p.payment_direction='received'
+                      AND i.status='issued' AND i.commercial_case_id IS NOT NULL
+                   UNION ALL
+                   SELECT commercial_case_id,issued_at FROM revenue_invoices
+                    WHERE status='issued' AND commercial_case_id IS NOT NULL
+               ), latest AS (
+                   SELECT case_id,occurred_at,julianday(occurred_at) activity_time,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY case_id ORDER BY julianday(occurred_at) DESC, occurred_at DESC
+                          ) AS rank
+                     FROM activity
+                    WHERE julianday(occurred_at) IS NOT NULL
+               )
+               SELECT c.id,c.uid,c.application_cycle_id,c.student_id,c.status,
+                      c.existing_aaie_k12,c.opened_at,c.closed_at,latest.occurred_at
+                 FROM revenue_commercial_cases c JOIN latest ON latest.case_id=c.id AND latest.rank=1
                 WHERE """ + self.visibility.case_predicate("c") + """
-             ORDER BY COALESCE(c.closed_at,c.opened_at) DESC,c.id DESC
+             ORDER BY latest.activity_time DESC,c.id DESC
                 LIMIT 10"""
         ).fetchall()
-        return [self._case_projection(row) for row in rows]
+        recent = []
+        for row in rows:
+            item = self._case_projection(row)
+            item["updated_at"] = row["occurred_at"]
+            item["updated_at_display"] = melbourne_datetime_display(row["occurred_at"])
+            item["intake"], item["intake_source"] = self._recent_case_intake(row, item["intake"])
+            recent.append(item)
+        return recent
+
+    def _recent_case_intake(self, row: sqlite3.Row, cycle_intake: str) -> tuple[str, str]:
+        cycle_id, student_id = row["application_cycle_id"], row["student_id"]
+        if {"application_cycle_id", "student_id", "start_date", "status"} <= self._columns("student_school_enrolments"):
+            enrolment = self.connection.execute(
+                """SELECT DISTINCT date(start_date) FROM student_school_enrolments
+                   WHERE application_cycle_id=? AND student_id=? AND status IN ('active','ended')
+                     AND date(start_date) IS NOT NULL LIMIT 2""",
+                (cycle_id, student_id),
+            ).fetchall()
+            if len(enrolment) == 1:
+                return enrolment[0][0], "已确认入学"
+
+        if {"application_cycle_id", "student_id", "course_start_date", "offer_status"} <= self._columns("offers"):
+            selected = []
+            if "legacy_offer_id" in self._columns("offer_received_events"):
+                selected = self.connection.execute(
+                    """SELECT DISTINCT o.id,date(o.course_start_date) FROM cycle_final_acceptances a
+                       LEFT JOIN offer_received_events e ON e.id=a.offer_received_event_id
+                         AND e.application_cycle_id=a.application_cycle_id
+                       LEFT JOIN offers o ON o.id=e.legacy_offer_id
+                         AND o.application_cycle_id=a.application_cycle_id AND o.student_id=?
+                       WHERE a.application_cycle_id=? AND """ + active_acceptance_predicate(self.connection, alias="a"),
+                    (student_id, cycle_id),
+                ).fetchall()
+            if len(selected) == 1 and selected[0][1]:
+                return selected[0][1], "已接受 Offer 开学"
+            if not selected:
+                offers = self.connection.execute(
+                    """SELECT DISTINCT date(course_start_date) FROM offers
+                       WHERE application_cycle_id=? AND student_id=?
+                         AND lower(COALESCE(offer_status,'')) NOT IN
+                             ('withdrawn','cancelled','canceled','rejected','declined','expired','voided','superseded')
+                         AND date(course_start_date) IS NOT NULL LIMIT 2""",
+                    (cycle_id, student_id),
+                ).fetchall()
+                if len(offers) == 1:
+                    return offers[0][0], "Offer 开学"
+        if cycle_intake != "—":
+            return cycle_intake, "申请轮次"
+        if {"preferred_intake_year", "preferred_intake_term"} <= self._columns("students"):
+            student = self.connection.execute(
+                "SELECT preferred_intake_year,preferred_intake_term FROM students WHERE student_id=?",
+                (student_id,),
+            ).fetchone()
+            if student and str(student[0] or "").strip():
+                year, term = str(student[0]).strip(), str(student[1] or "").strip()
+                if term.isdecimal() and 1 <= int(term) <= 12:
+                    return f"{year} 年 {int(term)} 月", "意向入学"
+                if term:
+                    return f"{year} · {term}", "意向入学"
+                return year, "意向入学"
+        return "—", ""
 
     def _case_projection(self, row: sqlite3.Row) -> dict[str, Any]:
         case_id = int(row["id"])
