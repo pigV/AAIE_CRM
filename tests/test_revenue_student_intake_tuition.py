@@ -71,6 +71,19 @@ class StudentIntakeTuitionTests(unittest.TestCase):
         self.assertEqual([],self.workflow._drafts_for_target())
         self.assertEqual(0,self.db.execute("SELECT count(*) FROM revenue_invoices").fetchone()[0])
 
+    def test_coe_can_supply_first_tuition_when_provider_differs_from_school(self):
+        ctx = accepted_offer_context(self.db, "TEST-PENINSULA-SCHEDULE")
+        values = read_review_fields(self.fields(2028, "10", "12500"), 0)
+        self.assertIsNone(ctx["offer"])
+        self.assertEqual("coe", choose_coe(ctx, "Education Department", 125, values, "",
+                                           confirmed_school=ctx["school_name"]))
+        with self.assertRaisesRegex(ValueError, "同一"):
+            choose_coe(ctx, "Education Department", 123, values, "",
+                       confirmed_school=ctx["school_name"])
+        with self.assertRaisesRegex(ValueError, "同一"):
+            choose_coe(ctx, "Education Department", 125, values, "",
+                       confirmed_school="Different School")
+
     def test_amount_correction_keeps_offer_original_and_issued_snapshot(self):
         student = "TEST-VIC-PRIVATE"
         values = read_review_fields(self.fields(2027,"Year 9","10000.25"),0)

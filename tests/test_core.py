@@ -40284,6 +40284,40 @@ c.save()
                     handler.dispatch("POST")
                 self.assertEqual(handler.response_status, 403)
 
+    def test_application_and_payment_review_can_render_without_extraction(self):
+        from reportlab.pdfgen.canvas import Canvas
+
+        pdf = io.BytesIO()
+        canvas = Canvas(pdf)
+        canvas.drawString(30, 60, "Synthetic upload review document")
+        canvas.save()
+        content = pdf.getvalue()
+        with isolated_upload_review_regression_environment("no-extraction") as env:
+            for module, upload_route, file_count in (
+                ("Applications", "application_upload", 13),
+                ("Payments", "payment_create", 1),
+            ):
+                with self.subTest(module=module):
+                    handler = self._upload_review_handler(env["admin"])
+                    handler.files = [
+                        Upload("files", f"sample-{index}.pdf", "application/pdf", content)
+                        for index in range(file_count)
+                    ]
+                    handler.redirect = lambda url: setattr(handler, "redirect_location", url)
+                    getattr(handler, upload_route)("POST", env["student_id"])
+                    token = handler.redirect_location.rsplit("/", 1)[1]
+                    handler.upload_review("GET", env["student_id"], token)
+                    self.assertEqual(handler.response_status, 200)
+                    self.assertEqual(handler.response_html.count("data-upload-review-workbench"), file_count)
+                    document_type = "StudentPassport" if module == "Applications" else "ServiceFeeReceipt"
+                    self._confirm_isolated_review(env, token, module, [document_type] * file_count)
+                    documents = env["db"].all(
+                        "SELECT file_path FROM student_documents WHERE student_id=? AND folder_category=?",
+                        (env["student_id"], module),
+                    )
+                    self.assertEqual(len(documents), file_count)
+                    self.assertTrue(all(Path(row["file_path"]).read_bytes() == content for row in documents))
+
     def test_generic_upload_review_behavior_group_2_get_preview_download_and_stubs(self):
         with isolated_upload_review_regression_environment("group-2") as env:
             files = [

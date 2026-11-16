@@ -39,6 +39,23 @@ class WorkflowFactsTests(unittest.TestCase):
         self.assertTrue(facts.parent_form_exists)
         self.assertFalse(facts.student_exists)
 
+    def test_current_unconfirmed_plan_is_visible_in_its_initial_cycle(self):
+        cycle = create_student_cycle(self.conn, "S1", "initial", NOW, 1)
+        self.conn.execute("ALTER TABLE school_plan_reports ADD COLUMN created_at TEXT")
+        self.conn.execute("UPDATE school_plan_reports SET created_at=? WHERE id=20", (NOW,))
+        facts = load_workflow_facts(self.conn, [cycle.id])[cycle.id]
+        self.assertTrue(facts.plan_exists)
+        self.assertFalse(facts.plan_sent)
+
+        self.conn.execute(
+            "INSERT INTO school_plan_report_links(id,report_id,status,created_at) VALUES(80,20,'active',?)",
+            (NOW,),
+        )
+        self.assertTrue(load_workflow_facts(self.conn, [cycle.id])[cycle.id].plan_sent)
+
+        self.conn.execute("UPDATE school_plan_reports SET created_at='2000-01-01' WHERE id=20")
+        self.assertFalse(load_workflow_facts(self.conn, [cycle.id])[cycle.id].plan_exists)
+
     def test_loads_cycle_owned_offer_acceptance_facts_without_legacy_stage(self):
         cycle = create_student_cycle(
             self.conn,

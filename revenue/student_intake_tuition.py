@@ -137,9 +137,10 @@ def _school_key(name):
     return re.sub(r"[\W_]+", "", str(name or "").casefold())
 
 
-def choose_coe(context, provider, acceptance_id, values, choice):
+def choose_coe(context, provider, acceptance_id, values, choice, *, confirmed_school=""):
+    school_key = _school_key(confirmed_school or provider)
     if (not context or str(acceptance_id) != str(context["acceptance_id"])
-            or not _school_key(provider) or _school_key(provider) != _school_key(context["school_name"])):
+            or not school_key or school_key != _school_key(context["school_name"])):
         raise ValueError("请核对 CoE 的学校与同一次入学的已接受 Offer 后再确认学费。")
     if choice not in {"", "offer", "coe"}:
         raise ValueError("请选择有效的学费来源。")
@@ -348,13 +349,26 @@ def render_review_fields(index, module, document_type, context=None):
     year, grade, cents = values.get("year",""), values.get("grade",""), values.get("cents")
     amount = f"{cents//100}.{cents%100:02d}" if cents is not None else ""
     offer_reference = ""
+    school_confirmation = ""
+    if module == "COE + OSHC" and context:
+        school_name = escape(context["school_name"], quote=True)
+        school_confirmation = (
+            f'<label><input type="checkbox" name="intake_coe_school_{index}" value="{school_name}">'
+            f'我已核对 CoE 对应 {school_name}，与本次申请周期 #{int(context["application_cycle_id"])} '
+            f'已接受的 Offer #{int(context["legacy_offer_id"])} 一致。'
+            '如果 CoE 的 Provider 是教育部门或办学机构，请核对文件中的实际入读学校后勾选。</label>'
+        )
     if offer:
         offer_reference = (
             f'<p>已接受 Offer #{int(offer["uid"])} · {escape(context["school_name"])} · '
             f'{year} · {escape(grade)} · AUD {cents//100:,}.{cents%100:02d}</p>'
         )
+    elif context and module == "COE + OSHC":
+        offer_reference = "<p>可在 CoE 阶段首次确认学费。请按 CoE 或学校收费单核对入学当年金额。</p>"
     elif module == "COE + OSHC":
-        offer_reference = "<p>当前录取暂无可带出的 Offer 学费。请按 CoE 或学校收费单核对入学当年金额。</p>"
+        offer_reference = "<p>请先在本次申请周期确认对应的 Offer，再填写入学学费。</p>"
+    elif module == "Offer":
+        offer_reference = "<p>可留空，在 CoE 阶段确认首年学费。</p>"
     decision = ""
     if offer:
         decision = f'''<label data-intake-choice hidden>与 Offer 不一致时
@@ -364,7 +378,7 @@ def render_review_fields(index, module, document_type, context=None):
     hidden = "" if kind else " hidden disabled"
     return f'''<fieldset data-student-intake-tuition data-module="{escape(module,quote=True)}"
       data-offer-year="{year}" data-offer-grade="{escape(grade,quote=True)}" data-offer-amount="{amount}"{hidden}>
-      <legend>入学与学费</legend>{offer_reference}
+      <legend>入学与学费</legend>{offer_reference}{school_confirmation}
       <input type="hidden" name="intake_acceptance_{index}" value="{(context or {}).get('acceptance_id','')}">
       <label>入学年份<input name="intake_year_{index}" inputmode="numeric" maxlength="4" value="{year}" placeholder="2027"></label>
       <label>入学年级<input name="intake_grade_{index}" maxlength="24" value="{escape(grade,quote=True)}" placeholder="Year 9"></label>

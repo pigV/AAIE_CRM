@@ -24075,9 +24075,7 @@ def nsw_offer_school_match(candidate):
     return "", round(best_score, 3), "Needs Review"
 
 
-def nsw_offer_school_name(text):
-    section = nsw_coe_cover_letter_course_section(text)
-    blocks = split_nsw_coe_cover_letter_program_blocks(section)
+def nsw_offer_school_name(blocks):
     main_schools = []
     for block in blocks:
         if block.get("type") == "language":
@@ -24185,7 +24183,13 @@ def nsw_offer_deposit_from_schedule(pages):
 
 def infer_nsw_public_offer_details(upload, text, lines):
     pages = nsw_offer_page_texts(upload, text)
-    school_name, school_score, school_status = nsw_offer_school_name(text)
+    section = nsw_coe_cover_letter_course_section(text)
+    blocks = split_nsw_coe_cover_letter_program_blocks(section)
+    school_name, school_score, school_status = nsw_offer_school_name(blocks)
+    language_blocks = [block for block in blocks if block["type"] == "language"]
+    first_program = (language_blocks or blocks or [{}])[0]
+    language_school_name = first_program.get("school", "") if language_blocks else ""
+    course_start_date = first_program.get("startDateIso", "")
     offer_date = nsw_offer_letter_date(pages)
     offer_expiry_date = nsw_offer_expiry_date(lines)
     deposit_amount, deposit_currency = nsw_offer_deposit_from_schedule(pages)
@@ -24200,7 +24204,23 @@ def infer_nsw_public_offer_details(upload, text, lines):
         field_confidence["deposit_amount"] = "explicit"
     if deposit_currency:
         field_confidence["deposit_currency"] = "explicit"
+    if language_school_name:
+        field_confidence["language_school_name"] = "explicit"
+    if course_start_date:
+        field_confidence["course_start_date"] = "explicit"
     return {
+        "language_school_name": language_school_name,
+        "course_start_date": course_start_date,
+        "program_segments": [
+            {
+                "program_type": "语言课程" if block["type"] == "language" else "正文课程",
+                "school": block["school"],
+                "start_date": display_date_value(block["startDateIso"]),
+                "end_date": display_date_value(block["endDateIso"]),
+                "is_language_course": block["type"] == "language",
+            }
+            for block in blocks
+        ],
         "school_name": school_name,
         "offer_date": offer_date,
         "offer_expiry_date": offer_expiry_date,
@@ -24239,6 +24259,17 @@ def offer_course_details_schools(text):
                 value = phrases[0]
                 break
         result[field] = value
+    if result.get("school_name") and re.search(r"\bCourse[ \t]+Dates\b", section, re.I):
+        start_dates = set()
+        for match in re.finditer(
+            r"(?im)^[ \t]*(\d{1,2} [A-Za-z]+ \d{4})\s+to\s+(\d{1,2} [A-Za-z]+ \d{4})\b",
+            section,
+        ):
+            start, end = map(normalize_offer_date, match.groups())
+            if start and end and start < end:
+                start_dates.add(start)
+        if len(start_dates) == 1:
+            result["course_start_date"] = start_dates.pop()
     return result
 
 
@@ -24258,8 +24289,8 @@ def infer_offer_details(upload):
     )
     if is_nsw_public_offer(text, upload.filename):
         details = infer_nsw_public_offer_details(upload, text, lines)
-        details["course_start_date"] = course_start_date
-        if course_start_date:
+        if course_start_date and not details["course_start_date"]:
+            details["course_start_date"] = course_start_date
             details.setdefault("_field_confidence", {})["course_start_date"] = "explicit"
         details["extracted_text_found"] = bool(text.strip())
         return details
@@ -24289,7 +24320,7 @@ def infer_offer_details(upload):
         "school_name": course_schools.get("school_name", infer_school_name(lines, upload.filename)),
         "language_school_name": course_schools.get("language_school_name", ""),
         "offer_date": offer_date,
-        "course_start_date": course_start_date,
+        "course_start_date": course_schools.get("course_start_date") or course_start_date,
         "offer_expiry_date": offer_expiry_date,
         "deposit_amount": deposit_amount,
         "deposit_currency": deposit_currency or "AUD",
@@ -24584,6 +24615,15 @@ def infer_coe_oshc_details(upload, forced_kind=None):
         caaw_end = fallback_caaw_welfare_end_date(caaw_start, coe_end, all_dates)
     company = infer_oshc_provider(lines, upload.filename)
     provider = sa_caaw.get("provider") or labeled_value(lines, ("provider / school", "provider name", "education provider", "registered provider", "provider"), 160) or infer_school_name(lines, upload.filename)
+    if nsw_letter:
+        # The footer identifies the provider. The generic "Provider" label also
+        # matches "Provider Code", which is not a provider name.
+        provider_name = re.search(
+            r"(?im)^\s*(NSW[ \t]+Department[ \t]+of[ \t]+Education)"
+            r"(?=[ \t]*(?:\|[ \t]*CRICOS[ \t]+Provider[ \t]+Code\b|$))",
+            text,
+        )
+        provider = compact_document_text(provider_name.group(1)) if provider_name else ""
     caaw_start = sa_caaw.get("caaw_welfare_start_date") or caaw_start
     caaw_end = sa_caaw.get("caaw_welfare_end_date") or caaw_end
     field_confidence = {}
@@ -61044,7 +61084,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
             elif is_current_accepted:
                 accept_action = f"""
-                  <form method="post" action="/students/{student_id}/offer/{offer['id']}/withdraw-acceptance" data-offer-withdraw-acceptance-form>
+                  <form method="post" action="/students/{student_id}/offer/{offer['id']}/withdraw-acceptance" data-offer-withdraw-acceptance-form data-ajax-student-tab-form>
                     <input type="hidden" name="csrf" value="{esc(self.csrf)}">
                     <label>撤回原因<input name="reason" required placeholder="说明撤回 Acceptance 的原因"></label>
                     <button class="danger compact" type="submit">Withdraw Acceptance</button>
@@ -70101,7 +70141,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
             log_upload_review_document_detection(file_meta, module, suggested_type, options, extraction_data)
             local_review_attrs = ""
-            if extraction_data.get("local_extraction") is not None:
+            if extraction_data and extraction_data.get("local_extraction") is not None:
                 local_review_attrs = f' data-local-review-url="/students/{student_id}/upload-review/{quote(token)}/{index}/local-extraction"'
             extraction_html = extraction_review_html(index, module, extraction_data).replace(
                 'class="extraction-review-box ',
@@ -70474,7 +70514,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                     or stored_form.get("coe_provider") or stored_form.get("school_name"))
                         context = accepted_offer_context(connection, student_id)
                         decision = choose_coe(context, provider, self.form.get(f"intake_acceptance_{index}"),
-                                              values, self.form.get(f"intake_choice_{index}", ""))
+                                              values, self.form.get(f"intake_choice_{index}", ""),
+                                              confirmed_school=self.form.get(f"intake_coe_school_{index}", ""))
                         validate_tuition_update(connection, context, values if decision == "coe" else context["offer"]["values"])
                         intake_entries[index] = (values, context["acceptance_id"], decision)
                     else:
@@ -70755,7 +70796,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             (business_record_id, student_id),
                         ).fetchone()
                         decision = choose_coe(context, coe_provider, acceptance_id, values,
-                                              self.form.get(f"intake_choice_{index}", ""))
+                                              self.form.get(f"intake_choice_{index}", ""),
+                                              confirmed_school=self.form.get(f"intake_coe_school_{index}", ""))
                         if bound[0] != context["application_cycle_id"] or decision != prior_decision:
                             raise ValueError("当前录取已更新，请重新打开 CoE 核对页。")
                         source = save_source(
@@ -78273,9 +78315,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         title, message, status = self.school_plan_share_confirm_permission_problem(link)
         if status != 200:
             return self.school_plan_share_public_page(title, f"<h1>{esc(title)}</h1><p>{esc(message)}</p>", status)
-        existing = db.one("SELECT id FROM school_plan_report_confirmations WHERE report_id=? AND link_id=? AND status='confirmed' ORDER BY id DESC LIMIT 1", (link["report_id"], link["id"]))
+        existing = db.one("SELECT id,confirmed_at FROM school_plan_report_confirmations WHERE report_id=? AND link_id=? AND status='confirmed' ORDER BY id DESC LIMIT 1", (link["report_id"], link["id"]))
         if existing:
-            return self.redirect(f"/school-plan-share/{quote(token)}")
+            return self.school_plan_share_confirmation_receipt(token, existing["confirmed_at"])
         form, _files = parse_request_body(self)
         if form.get("declaration") != "yes":
             raise ValueError("请先勾选确认声明。")
@@ -78295,7 +78337,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             # Another request may have confirmed while this one parsed its form.
             # Recheck under BEGIN IMMEDIATE before writing signatures or archives.
             existing = connection.execute(
-                """SELECT id FROM school_plan_report_confirmations
+                """SELECT id,confirmed_at FROM school_plan_report_confirmations
                      WHERE report_id=? AND link_id=? AND status='confirmed'
                      ORDER BY id LIMIT 1""",
                 (link["report_id"], link["id"]),
@@ -78329,22 +78371,40 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     (link["report_id"], "parent_page_archive_requested", stamp, json.dumps({"confirmation_id": confirmation_id})),
                 )
         if existing:
-            return self.redirect(f"/school-plan-share/{quote(token)}")
-        confirmation_pdf = self.school_plan_generate_confirmation_pdf(confirmation_id)
-        db.execute(
-            "UPDATE school_plan_reports SET confirmation_note=?,updated_at=? WHERE id=?",
-            (f"Confirmation PDF: {confirmation_pdf}", stamp, link["report_id"]),
-        )
-        self.school_plan_share_record_log(
-            link,
-            "confirmed",
-            metadata={
-                "confirmation_id": confirmation_id,
-                "decision_mode": decision.mode,
-                "school_count": len(decision.schools),
-            },
-        )
+            return self.school_plan_share_confirmation_receipt(token, existing["confirmed_at"])
+
+        # Send the complete receipt before invoking PDF rendering or NAS writes.
         try:
+            response = self.school_plan_share_confirmation_receipt(token, stamp)
+            self.wfile.flush()
+        finally:
+            self.school_plan_finish_parent_confirmation(link, confirmation_id, stamp, decision)
+        return response
+
+    def school_plan_share_confirmation_receipt(self, token, stamp):
+        return self.school_plan_share_public_page(
+            "递交成功",
+            f"<h1>确认已递交</h1><p>AAIE 已收到最终学校申请意向和电子签名。确认时间：{esc(display_datetime(stamp))}</p><div class='share-actions'><a class='button-link' href='/school-plan-share/{esc(token)}'>返回查看方案</a></div>",
+        )
+
+    def school_plan_finish_parent_confirmation(self, link, confirmation_id, stamp, decision):
+        try:
+            self.school_plan_share_record_log(
+                link, "confirmed", metadata={
+                    "confirmation_id": confirmation_id,
+                    "decision_mode": decision.mode,
+                    "school_count": len(decision.schools),
+                },
+            )
+        except Exception as exc:
+            append_service_log("admin", "school_plan_confirmation_log_failed", repr(exc),
+                               confirmation_id=confirmation_id)
+        try:
+            confirmation_pdf = self.school_plan_generate_confirmation_pdf(confirmation_id)
+            db.execute(
+                "UPDATE school_plan_reports SET confirmation_note=?,updated_at=? WHERE id=?",
+                (f"Confirmation PDF: {confirmation_pdf}", stamp, link["report_id"]),
+            )
             archive_metadata = self.school_plan_archive_confirmation_documents(confirmation_id)
             self.school_plan_share_record_log(link, "confirmation_archived", metadata=archive_metadata)
         except Exception as exc:
@@ -78357,10 +78417,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 student_id=link["student_id"],
             )
             self.school_plan_share_record_log(link, "confirmation_archive_failed", metadata={"confirmation_id": confirmation_id, "error": repr(exc)})
-        return self.school_plan_share_public_page(
-            "递交成功",
-            f"<h1>确认已递交</h1><p>AAIE 已收到最终学校{'选择' if decision.mode == 'selected' else '排序'}和电子签名。确认时间：{esc(display_datetime(stamp))}</p><div class='share-actions'><a class='button-link' href='/school-plan-share/{esc(token)}'>返回查看方案</a></div>",
-        )
 
     def parent_portal(self, method, token):
         if method != "GET":
