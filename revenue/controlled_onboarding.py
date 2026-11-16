@@ -14,7 +14,7 @@ from revenue.client_fee_rules import (
 from revenue.facts import RevenueFactAdapter
 from revenue.operational_orchestrator import RevenueOperationalOrchestrator
 from revenue.repository import RevenueRepository, canonical_json, new_uid
-from revenue.services import RevenueService, VISA_FEE_KINDS
+from revenue.services import RevenueService
 
 
 class InvalidOnboardingProposal(ValueError):
@@ -24,8 +24,13 @@ class InvalidOnboardingProposal(ValueError):
 class OnboardingProposalDrift(RuntimeError):
     pass
 
+from revenue.visa_fee_policy import (
+    VISA_FEE_KINDS, SignedVisaPackageRequired, fully_executed_contracts, resolve_visa_fee, visa_fee_facts,
+)
+
 
 EXCEPTION_MESSAGES = {
+    "signed_visa_package_required": "首次学生签证套餐待核对，请确认双方签妥的 A$2,400 套餐包含学生签证递交。",
     "visa_fee_conflict": "签证收费有重复或金额不同，请核对现有收费。",
     "missing_student_authority": "Application Cycle has no authoritative Student.",
     "ambiguous_engagement_contract": "Multiple FullyExecuted contracts have no authoritative supersession.",
@@ -211,18 +216,7 @@ class ControlledOnboardingService:
 
     @staticmethod
     def _fully_executed(contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        result = []
-        for contract in contracts:
-            status = str(contract.get("contract_status") or "")
-            normalized = status.replace("_", "").replace(" ", "").lower()
-            if normalized != "fullyexecuted":
-                continue
-            if contract.get("deleted_at") or contract.get("voided_at"):
-                continue
-            if contract.get("superseded_by_contract_id"):
-                continue
-            result.append(contract)
-        return result
+        return fully_executed_contracts(contracts)
 
     @staticmethod
     def _he_category(applications: list[dict[str, Any]]) -> str | None:
@@ -362,37 +356,23 @@ class ControlledOnboardingService:
         proposals = []
         exception_codes = []
         for visa in visa_rows:
-            normalized = " ".join(
-                str(visa.get(name) or "").strip().lower()
-                for name in (
-                    "case_type", "visa_case_name", "visa_subclass", "visa_type",
-                    "application_type",
-                )
-            )
-            is_590 = "590" in normalized
-            renewal = any(token in normalized for token in ("renewal", "renew", "extension"))
-            independent = renewal or "standalone" in normalized or "independent" in normalized
-            facts = ClientFeeRuleFacts(
-                service_kind="guardian_590" if is_590 else "student_visa",
-                education_stream=cycle["education_stream"],
-                cycle_type=cycle["cycle_type"],
-                existing_aaie_k12=existing_aaie,
-                application_type="renewal" if renewal else "new",
-                independent_service=independent,
+            if visa.get("archived_at") or visa.get("student_id") not in (None, "", cycle["student_id"]):
+                continue
+            facts = visa_fee_facts(
+                visa, education_stream=cycle["education_stream"], cycle_type=cycle["cycle_type"],
+                existing_aaie=existing_aaie,
             )
             try:
-                resolved = self.fee_rules.resolve(facts, engagement_date)
-            except MissingFeeRule:
-                proposals.append(
-                    {
-                        "status": "blocked",
-                        "reason": "missing_fee_rule",
-                        "visa_case_id": visa["id"],
-                        "rule_version_uid": None,
-                        "net_cents": None,
-                    }
+                resolved = resolve_visa_fee(
+                    self.fee_rules, facts, visa, contracts, cycle["student_id"], engagement_date,
                 )
-                exception_codes.append("missing_fee_rule")
+            except MissingFeeRule as exc:
+                reason = "signed_visa_package_required" if isinstance(exc, SignedVisaPackageRequired) else "missing_fee_rule"
+                proposals.append({
+                    "status": "blocked", "reason": reason, "visa_case_id": visa["id"],
+                    "rule_version_uid": None, "net_cents": None,
+                })
+                exception_codes.append(reason)
                 continue
             status = "included" if resolved.net_cents is None else "proposed"
             reason = "included_in_base_fee" if status == "included" else "controlled_onboarding"

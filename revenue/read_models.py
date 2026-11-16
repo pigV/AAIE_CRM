@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from canonical_acceptance import active_acceptance_predicate
 from revenue.client_fee_rules import CLIENT_FEE_RULES_2026
 from revenue.operational_visibility import RevenueOperationalVisibility
+from revenue.visa_fee_policy import VISA_FEE_KINDS, signed_student_visa_package
 from revenue.urls import case_url, cases_url, revenue_home_url
 
 
@@ -164,6 +165,7 @@ EXCEPTION_CODE_LABELS = {
     "missing_engagement_contract": "缺少已签服务合同",
     "missing_fee_rule": "缺少适用收费规则",
     "visa_fee_conflict": "签证收费待核对",
+    "signed_visa_package_required": "首次学生签证套餐待核对",
     "unresolved_fee_classification": "收费类型待确认",
     "missing_he_application": "缺少高等教育申请资料",
     "missing_revenue_entity": "缺少佣金结算机构",
@@ -1699,6 +1701,13 @@ class RevenueReadModels:
             item["intake"], item["intake_source"] = self._recent_case_intake(row, item["intake"])
             item["institution"], item["institution_source"] = self._recent_case_institution(row)
             item.update(self._recent_case_fees(row["id"]))
+            contracts = self.connection.execute(
+                "SELECT * FROM contracts WHERE application_cycle_id=?",
+                (row["application_cycle_id"],),
+            )
+            item["student_visa_package_included"] = bool(
+                signed_student_visa_package(contracts, row["student_id"])
+            )
             item["school_commission"] = self._recent_school_commission(
                 row["id"], item["institution_source"]
             )
@@ -1804,7 +1813,6 @@ class RevenueReadModels:
             if not key:
                 other_count += 1
                 continue
-            totals = result[key] or {"received_cents": 0, "outstanding_cents": 0}
             unverified_gst = 0
             for entry in legacy_payments.get(fee_id, ()):
                 if entry["net_cents"] == entry["gross_cents"]:
@@ -1814,18 +1822,30 @@ class RevenueReadModels:
                     gst += entry["gross_cents"] - entry["net_cents"]
                 else:
                     unverified_gst += entry["received"]
-            totals["received_cents"] += received
-            totals["outstanding_cents"] += max(0, net - received)
-            if gst:
-                totals["gst_received_cents"] = totals.get("gst_received_cents", 0) + gst
-            if unverified_gst:
-                totals["legacy_gross_received_cents"] = totals.get("legacy_gross_received_cents", 0) + unverified_gst
+            visa_kind = VISA_FEE_KINDS.get(milestone) if key == "visa_service_fee" else None
+            visa_group = {
+                "student_visa": "student_visa_fee",
+                "guardian_590": "guardian_visa_fee",
+            }.get(visa_kind)
+            if key == "visa_service_fee" and not visa_group:
+                visa_group = "other_visa_fee"
+            possible_duplicate = False
             if key == "visa_service_fee" and visa_case_id is not None and net > 0:
-                source = (str(visa_case_id), milestone)
-                if source in visa_sources:
-                    totals["possible_duplicate"] = True
+                source = (str(visa_case_id), visa_kind or milestone)
+                possible_duplicate = source in visa_sources
                 visa_sources.add(source)
-            result[key] = totals
+
+            for group in ((key, visa_group) if visa_group else (key,)):
+                totals = result.get(group) or {"received_cents": 0, "outstanding_cents": 0}
+                totals["received_cents"] += received
+                totals["outstanding_cents"] += max(0, net - received)
+                if gst:
+                    totals["gst_received_cents"] = totals.get("gst_received_cents", 0) + gst
+                if unverified_gst:
+                    totals["legacy_gross_received_cents"] = totals.get("legacy_gross_received_cents", 0) + unverified_gst
+                if possible_duplicate:
+                    totals["possible_duplicate"] = True
+                result[group] = totals
         if other_count:
             result["other_fee_count"] = other_count
         return result

@@ -9,19 +9,13 @@ import json
 
 from revenue.ai import ProviderUnavailable
 from revenue.claim_eligibility import ClaimEligibilityResolver
-from revenue.client_fee_rules import CLIENT_FEE_RULES_2026, DatabaseClientFeeRuleResolver
+from revenue.client_fee_rules import DatabaseClientFeeRuleResolver
 from revenue.facts import RevenueFactAdapter
 from revenue.money import allocate_cents, apply_basis_points, gst_from_inclusive
 from revenue.repository import RevenueRepository, canonical_json, new_uid
 from revenue.rules import CommissionRuleEvaluator
 from revenue.school_commission_pilot import FORMAL_CONTRACT
-
-
-VISA_FEE_KINDS = {
-    rule["milestone_code"]: next(value for key, _, value in rule["conditions"] if key == "service_kind")
-    for rule in CLIENT_FEE_RULES_2026
-    if any(key == "service_kind" and value != "base" for key, _, value in rule["conditions"])
-}
+from revenue.visa_fee_policy import VISA_FEE_KINDS
 
 
 AUTHORITY_PRIORITY = {"estimated": 1, "manual": 2, "official": 3}
@@ -650,7 +644,10 @@ class RevenueService:
                         engagement_date = contract_fact.contract_date or cycle_fact.version[:10]
                     else:
                         visa_fact = verifier.facts.visa_case(item["visa_case_id"])
-                        facts = verifier._client_fee_facts_for_visa(cycle_fact, case, visa_fact)
+                        visa_row = self.connection.execute(
+                            "SELECT * FROM visa_cases WHERE id=?", (visa_fact.id,),
+                        ).fetchone()
+                        facts = verifier._client_fee_facts_for_visa(cycle_fact, case, visa_row)
                         active_contracts = verifier._active_fully_executed_contracts(cycle_fact.id)
                         if len(active_contracts) > 1:
                             raise SourceAuthorityError('Ambiguous historical Transfer contracts; HOLD')

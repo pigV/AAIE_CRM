@@ -1589,6 +1589,32 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
             return f"已收清 {amount}" if received else "无需收费"
         return f"已收 {amount}，还差 {aud(due)}"
 
+    def fee_with_warning(fee):
+        value = fee_text(fee)
+        if fee and fee.get("possible_duplicate"):
+            value += "（疑似重复收费，待核对）"
+        return value
+
+    def visa_fee_lines(row):
+        covered = row.get("student_visa_package_included")
+        student = row.get("student_visa_fee")
+        guardian = row.get("guardian_visa_fee")
+        other = row.get("other_visa_fee")
+        if not any((covered, student, guardian, other)):
+            return [fee_with_warning(row.get("visa_service_fee"))]
+        lines = []
+        if covered:
+            lines.append("首次学生签证已包含在 A$2,400 服务套餐中")
+        if student:
+            lines.append(f"学生签证收费记录 · {fee_with_warning(student)}")
+        if guardian:
+            lines.append(f"陪读签证 · {fee_with_warning(guardian)}")
+        elif covered:
+            lines.append("陪读签证尚无收费记录")
+        if other:
+            lines.append(f"其他签证费用 · {fee_with_warning(other)}")
+        return lines
+
     def commission_text(summary):
         if not summary:
             return "尚未建立学校佣金"
@@ -1605,19 +1631,16 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
         return " · ".join(parts)
 
     financial_columns = (
-        ("客户服务费", "client_service_fee", fee_text),
-        ("签证服务费", "visa_service_fee", fee_text),
+        ("客户服务费", "client_service_fee", fee_with_warning),
+        ("签证服务费", "visa_service_fee", None),
         ("学校佣金", "school_commission", commission_text),
     )
 
     def financial_values(row, *, card=False):
         values = []
         for label, key, formatter in financial_columns:
-            summary = row.get(key)
-            value = formatter(summary)
-            if summary and summary.get("possible_duplicate"):
-                value += "（疑似重复收费，待核对）"
-            value = escape(value)
+            lines = visa_fee_lines(row) if key == "visa_service_fee" else [formatter(row.get(key))]
+            value = "<br>".join(escape(line) for line in lines)
             if card:
                 values.append(f'<span class="revenue-mobile-case__states">{label}　{value}</span>')
             else:
