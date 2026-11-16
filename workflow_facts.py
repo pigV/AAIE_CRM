@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Iterable
 
+from application_withdrawal import REAPPLICATION_PREDECESSOR
 from dashboard_visa_metrics import is_student_visa_case
 from workflow_resolver import WorkflowFacts
 from visa_dashboard_retry import load_retries, retry_key
@@ -159,6 +160,15 @@ def load_workflow_facts(
         ids,
     ).fetchall():
         state[int(row[0])]["parent_form_submitted"] = row[1] is not None
+
+    if {"id", "record_id", "student_id", "module_name", "action_type", "status"} <= _columns(conn, "audit_logs"):
+        for (cycle_id,) in conn.execute(
+            f"""SELECT fresh.id FROM application_cycles AS fresh
+                WHERE fresh.id IN ({marks}) AND fresh.status='active' AND fresh.cycle_type='initial'
+                  AND fresh.parent_form_token IS NOT NULL AND {REAPPLICATION_PREDECESSOR}""",
+            ids,
+        ):
+            state[int(cycle_id)]["requires_fresh_parent_form"] = True
 
     # Older fixtures predate online signatures. In current databases, a saved
     # signature is authoritative even if PDF generation left the contract Sent.
