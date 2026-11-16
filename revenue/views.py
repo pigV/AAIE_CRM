@@ -1567,6 +1567,66 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
         source = row.get("intake_source")
         return escape(f'{row["intake"]}（{source}）' if source else str(row["intake"]))
 
+    def institution_text(row):
+        source = row.get("institution_source")
+        name = row["institution"]
+        return escape(f"{name}（{source}）" if source == "Offer 院校" else str(name))
+
+    def aud(cents):
+        amount = _money(cents)
+        return "A" + amount.removesuffix(".00")
+
+    def fee_text(fee):
+        if fee is None:
+            return "尚未创建收费"
+        received, due = fee["received_cents"], fee["outstanding_cents"]
+        gst = fee.get("gst_received_cents", 0)
+        amount = f"{aud(received)}（另收 GST {aud(gst)}）" if gst else aud(received)
+        if legacy_gross := fee.get("legacy_gross_received_cents"):
+            recorded = f"已收 {amount}，另有" if received else ""
+            return f"{recorded}旧发票入账 {aud(legacy_gross)}，等核对含税余额"
+        if not due:
+            return f"已收清 {amount}" if received else "无需收费"
+        return f"已收 {amount}，还差 {aud(due)}"
+
+    def commission_text(summary):
+        if not summary:
+            return "尚未建立学校佣金"
+        label = summary["label"]
+        received = summary.get("received_cents", 0)
+        outstanding = summary.get("outstanding_cents", 0)
+        if received and label == "已到账":
+            return f"已到账 {aud(received)}"
+        parts = [label]
+        if received:
+            parts.append(f"已到账 {aud(received)}")
+        if outstanding:
+            parts.append(f"还差 {aud(outstanding)}")
+        return " · ".join(parts)
+
+    financial_columns = (
+        ("客户服务费", "client_service_fee", fee_text),
+        ("签证服务费", "visa_service_fee", fee_text),
+        ("学校佣金", "school_commission", commission_text),
+    )
+
+    def financial_values(row, *, card=False):
+        values = []
+        for label, key, formatter in financial_columns:
+            summary = row.get(key)
+            value = formatter(summary)
+            if summary and summary.get("possible_duplicate"):
+                value += "（疑似重复收费，待核对）"
+            value = escape(value)
+            if card:
+                values.append(f'<span class="revenue-mobile-case__states">{label}　{value}</span>')
+            else:
+                values.append(f'<td class="revenue-recent-finance">{value}</td>')
+        return "".join(values)
+
+    def other_fees(row):
+        return ' · <small>另有收费项目，见档案</small>' if row.get("other_fee_count") else ""
+
     variant = " revenue-workspace--mobile" if mobile else ""
     recent = data.get("recent_cases") or []
     cases_href = str(data.get("cases_href") or "/revenue/cases")
@@ -1592,26 +1652,26 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
     )
     desktop_rows = "".join(
         f'<tr><td><a class="revenue-row-link" href="{escape(str(row["href"]), quote=True)}">{escape(str(row["student_name"]))}</a></td>'
-        f'<td>{escape(str(row["student_id"]))}</td><td>{escape(str(row["classification"]))}</td><td>{escape(str(row["business_type"]))}</td><td>{escape(str(row["institution"]))}</td>'
-        f'<td>{intake_text(row)}</td><td>{escape(str(row["billing_status"]))}</td>'
-        f'<td>{escape(str(row["commission_status"]))}</td><td>{escape(str(row["status"]))}</td>'
-        f'<td>{escape(str(row["updated_at_display"]))}</td></tr>'
+        f'<td>{escape(str(row["student_id"]))}</td><td>{escape(str(row["classification"]))}</td><td>{escape(str(row["business_type"]))}</td><td>{institution_text(row)}</td>'
+        f'<td>{intake_text(row)}</td>{financial_values(row)}'
+        f'<td>{escape(str(row["updated_at_display"]))}{other_fees(row)}</td></tr>'
         for row in recent
     ) or '<tr><td colspan="10" class="revenue-empty">暂无收费与佣金档案。</td></tr>'
     mobile_cases = "".join(
         f'<a class="revenue-mobile-case" href="{escape(str(row["href"]), quote=True)}">'
-        f'<span class="revenue-mobile-case__top"><strong>{escape(str(row["student_name"]))}</strong><small>{escape(str(row["status"]))}</small></span>'
+        f'<span class="revenue-mobile-case__top"><strong>{escape(str(row["student_name"]))}</strong></span>'
         f'<span>学生编号 {escape(str(row["student_id"]))}</span>'
         f'<span>{escape(str(row["business_type"]))} · {escape(str(row["classification"]))}</span>'
-        f'<span>{escape(str(row["institution"]))} · {intake_text(row)}</span>'
-        f'<span class="revenue-mobile-case__states">{escape(str(row["billing_status"]))} · {escape(str(row["commission_status"]))}</span>'
-        f'<small>最后更新 {escape(str(row["updated_at_display"]))}</small></a>'
+        f'<span>{institution_text(row)} · {intake_text(row)}</span>'
+        f'{financial_values(row, card=True)}'
+        f'<small>最后更新 {escape(str(row["updated_at_display"]))}</small>{other_fees(row)}</a>'
         for row in recent
     ) or '<p class="revenue-empty">暂无收费与佣金档案。</p>'
+    financial_headers = "".join(f"<th>{label}</th>" for label, _, _ in financial_columns)
     recent_content = (
         f'<div class="revenue-mobile-cases">{mobile_cases}</div>'
         if mobile
-        else f'<div class="revenue-table-scroll"><table><thead><tr><th>学生</th><th>学生编号</th><th>客户分类</th><th>业务类型</th><th>院校</th><th>入学期</th><th>收费状态</th><th>佣金状态</th><th>档案状态</th><th>最后更新</th></tr></thead><tbody>{desktop_rows}</tbody></table></div>'
+        else f'<div class="revenue-table-scroll"><table><thead><tr><th>学生</th><th>学生编号</th><th>客户分类</th><th>业务类型</th><th>院校</th><th>入学期</th>{financial_headers}<th>最后更新</th></tr></thead><tbody>{desktop_rows}</tbody></table></div>'
     )
     access_badge = "仅限管理员" if data.get("can_administer", True) else "已授权用户"
     school_contract_href = data.get("school_contract_href")

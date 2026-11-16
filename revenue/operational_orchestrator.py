@@ -326,17 +326,10 @@ class RevenueOperationalOrchestrator:
                 "fee_items": [],
             }
         decision = resolved.snapshot()
-        if resolved.net_cents is None:
-            return {
-                **event,
-                "fee_status": "INCLUDED",
-                "visa_fee_policy": decision,
-                "visa_fee_cents": None, "fee_items": [],
-            }
         account = self.service.ensure_student_billing_account(
             cycle.student_id, self.actor_user_id,
             f"revenue-billing-account:{cycle.student_id}", cycle.version[:10],
-        )
+        ) if resolved.net_cents is not None else None
         item = {
             "milestone_code": resolved.milestone_code,
             "description": "Visa service fee",
@@ -346,14 +339,20 @@ class RevenueOperationalOrchestrator:
             "visa_case_id": fact.id,
             "application_cycle_id": cycle.id,
         }
-        fees = self.service.create_fee_items(
-            case["uid"], account["uid"], [item], self.actor_user_id,
-            f"revenue-fee:visa:{fact.id}:{resolved.rule_uid}",
-            resolved.rule_uid,
+        fee_status, fees = self.service.ensure_visa_fee(
+            case["uid"], account["uid"] if account else None, item, self.actor_user_id,
+            f"revenue-fee:visa:{fact.id}:{resolved.rule_uid}", resolved.rule_uid,
         )
+        if fee_status == "NEEDS_ATTENTION":
+            exception = self.open_exception(
+                "visa_fee_conflict", "commercial_case", case["uid"],
+                f"签证案件 #{fact.id} 的收费有重复或金额不同，请核对现有收费。",
+            )
+            return {**event, "fee_status": fee_status, "reason": "visa_fee_conflict",
+                    "exception": exception, "visa_fee_cents": None, "fee_items": []}
         return {
             **event,
-            "fee_status": "CREATED",
+            "fee_status": fee_status,
             "visa_fee_policy": decision,
             "visa_fee_cents": resolved.net_cents,
             "fee_items": fees,

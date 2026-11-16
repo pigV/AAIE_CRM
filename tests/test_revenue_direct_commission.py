@@ -162,6 +162,17 @@ class RevenueDirectCommissionTests(RevenueDatabaseFixture, unittest.TestCase):
                 )["rows"]],
             )
             self.assertEqual("已申领", models.dashboard()["recent_cases"][0]["commission_status"])
+            self.assertEqual({
+                "label": "已申领，等学校付款 · 可以向学校申领",
+                "received_cents": 0, "outstanding_cents": 110000,
+            }, models.dashboard()["recent_cases"][0]["school_commission"])
+            service.reconcile_direct_commission_payment(
+                line["uid"], 80000, entity["uid"], "2026-08-31", 1, "Admin", "home-school-payment",
+            )
+            self.assertEqual({
+                "label": "已申领，等学校付款 · 可以向学校申领",
+                "received_cents": 80000, "outstanding_cents": 30000,
+            }, models.dashboard()["recent_cases"][0]["school_commission"])
             clawback = service.record_clawback(
                 line["uid"], 20_000, "WITHDRAWAL", "withdrawal", 9,
                 1, "Admin", "clawback",

@@ -9,12 +9,19 @@ import json
 
 from revenue.ai import ProviderUnavailable
 from revenue.claim_eligibility import ClaimEligibilityResolver
-from revenue.client_fee_rules import DatabaseClientFeeRuleResolver
+from revenue.client_fee_rules import CLIENT_FEE_RULES_2026, DatabaseClientFeeRuleResolver
 from revenue.facts import RevenueFactAdapter
 from revenue.money import allocate_cents, apply_basis_points, gst_from_inclusive
 from revenue.repository import RevenueRepository, canonical_json, new_uid
 from revenue.rules import CommissionRuleEvaluator
 from revenue.school_commission_pilot import FORMAL_CONTRACT
+
+
+VISA_FEE_KINDS = {
+    rule["milestone_code"]: next(value for key, _, value in rule["conditions"] if key == "service_kind")
+    for rule in CLIENT_FEE_RULES_2026
+    if any(key == "service_kind" and value != "base" for key, _, value in rule["conditions"])
+}
 
 
 AUTHORITY_PRIORITY = {"estimated": 1, "manual": 2, "official": 3}
@@ -433,6 +440,100 @@ class RevenueService:
             (uid, rule_kind, source_rule_uid, canonical, digest, actor_user_id, self.repository.now()),
         )
         return self.repository.require_by_uid("revenue_rule_snapshots", uid)
+
+    def visa_fee_matches(self, case_id, visa_case_id, milestone):
+        fee_kind = VISA_FEE_KINDS.get(milestone, milestone)
+        milestones = {milestone, *(code for code, kind in VISA_FEE_KINDS.items() if kind == fee_kind)}
+        slots = ",".join("?" for _ in milestones)
+        return [dict(row) for row in self.connection.execute(
+            f"""SELECT f.* FROM revenue_fee_items f
+                  JOIN revenue_rule_snapshots s ON s.id=f.rule_snapshot_id
+                 WHERE f.commercial_case_id=? AND f.status<>'cancelled'
+                   AND f.milestone_code IN ({slots})
+                   AND EXISTS (SELECT 1 FROM json_each(s.canonical_json,'$.items') i
+                                WHERE json_extract(i.value,'$.milestone_code')=f.milestone_code
+                                  AND json_extract(i.value,'$.visa_case_id') IN (?,?))
+                 ORDER BY f.created_at,f.id""",
+            (case_id, *sorted(milestones), visa_case_id, str(visa_case_id)),
+        )]
+
+    @staticmethod
+    def visa_fee_matches_amount(fee, net, gst):
+        return (fee["net_cents"], fee["gst_cents"], fee["currency_code"]) == (net, gst, "AUD")
+
+    def ensure_visa_fee(self, case_uid, account_uid, item, actor, key, rule_uid):
+        with self.repository.fee_write_transaction():
+            case = self.repository.require_by_uid("revenue_commercial_cases", case_uid)
+            visa_id = item["visa_case_id"]
+            if not self.connection.execute(
+                "SELECT 1 FROM visa_cases WHERE id=? AND application_cycle_id=?",
+                (visa_id, case["application_cycle_id"]),
+            ).fetchone():
+                raise ValueError("签证案件与收费档案的申请轮次不一致。")
+            existing = self.visa_fee_matches(case["id"], visa_id, item["milestone_code"])
+            if existing:
+                if len(existing) != 1 or not self.visa_fee_matches_amount(
+                    existing[0], item["net_cents"], item["gst_cents"]
+                ):
+                    return "NEEDS_ATTENTION", []
+                replay = self.connection.execute(
+                    """SELECT 1 FROM revenue_idempotency_receipts r
+                         JOIN json_each(r.result_json,'$.items') i
+                        WHERE r.idempotency_key=? AND r.command_type='fee_items_created'
+                          AND json_extract(i.value,'$.uid')=?""",
+                    (key, existing[0]["uid"]),
+                ).fetchone()
+                return ("CREATED" if replay else "EXISTING"), existing
+            if item["net_cents"] is None:
+                return "INCLUDED", []
+            created = self.create_fee_items(case_uid, account_uid, [item], actor, key, rule_uid)
+            # A new fee must never be inferred from an old command receipt.
+            active = self.visa_fee_matches(case["id"], visa_id, item["milestone_code"])
+            return ("CREATED", active) if active and active[0]["uid"] == created[0]["uid"] else ("NEEDS_ATTENTION", [])
+
+    def cancel_duplicate_visa_fee(self, keep_id, cancel_id, visa_case_id, actor, role, key):
+        if role != "Admin":
+            raise PermissionError("仅管理员可取消重复签证收费。")
+        payload = {"kept_fee_id": keep_id, "cancelled_fee_id": cancel_id, "visa_case_id": visa_case_id}
+
+        def operation():
+            keep = self.connection.execute("SELECT * FROM revenue_fee_items WHERE id=?", (keep_id,)).fetchone()
+            duplicate = self.connection.execute(
+                "SELECT * FROM revenue_fee_items WHERE id=?", (cancel_id,),
+            ).fetchone()
+            if not keep or not duplicate or keep["status"] == "cancelled" or duplicate["status"] != "unbilled":
+                raise ValueError("收费记录缺失或状态已变化，请重新核对。")
+            if not self.connection.execute(
+                """SELECT 1 FROM visa_cases v JOIN revenue_commercial_cases c
+                     ON c.application_cycle_id=v.application_cycle_id WHERE v.id=? AND c.id=?""",
+                (visa_case_id, keep["commercial_case_id"]),
+            ).fetchone():
+                raise ValueError("签证案件与保留收费的档案不一致。")
+            matches = self.visa_fee_matches(keep["commercial_case_id"], visa_case_id, keep["milestone_code"])
+            if [row["id"] for row in matches] != [keep_id, cancel_id] or not (
+                self.visa_fee_matches_amount(duplicate, keep["net_cents"], keep["gst_cents"])
+                and keep["currency_code"] == "AUD"
+                and keep["student_id"] == duplicate["student_id"]
+                and keep["billing_account_id"] == duplicate["billing_account_id"]
+            ):
+                raise ValueError("两笔收费的来源、顺序或金额不一致，请人工核对。")
+            if self.connection.execute(
+                """SELECT 1 FROM revenue_invoice_lines WHERE source_kind='fee_item' AND source_uid=?
+                   UNION ALL SELECT 1 FROM revenue_client_payment_allocations WHERE fee_item_id=?
+                   UNION ALL SELECT 1 FROM revenue_discount_allocations WHERE fee_item_id=?
+                   UNION ALL SELECT 1 FROM revenue_receipt_snapshots WHERE fee_item_id=?""",
+                (duplicate["uid"], cancel_id, cancel_id, cancel_id),
+            ).fetchone():
+                raise ValueError("后建收费已有发票、收款、折扣或收据，请人工核对。")
+            self.connection.execute("UPDATE revenue_fee_items SET status='cancelled' WHERE id=?", (cancel_id,))
+            return {"uid": duplicate["uid"], **payload, "kept_fee_uid": keep["uid"],
+                    "status": "cancelled", "reason": "同一签证案件已保留先建收费"}
+
+        with self.repository.fee_write_transaction():
+            return self.repository.command(
+                idempotency_key=key, command_type="duplicate_visa_fee_cancelled", aggregate_type="fee_item",
+                payload=payload, actor_user_id=actor, operation=operation,
+            )
 
     def create_fee_items(
         self, commercial_case_uid: str, billing_account_uid: str, items: list[dict],

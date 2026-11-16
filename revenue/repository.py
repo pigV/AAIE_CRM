@@ -53,6 +53,25 @@ class RevenueRepository:
         else:
             self.connection.execute(f"RELEASE {name}")
 
+    @contextmanager
+    def fee_write_transaction(self):
+        """Take SQLite's writer lock before deciding whether a fee exists."""
+        if self.connection.in_transaction:
+            with self.transaction():
+                # A savepoint cannot issue BEGIN IMMEDIATE. A no-op write takes
+                # the same writer lock or fails if this outer snapshot is stale.
+                self.connection.execute("UPDATE revenue_module_state SET status=status WHERE 0")
+                yield
+            return
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except Exception:
+            self.connection.rollback()
+            raise
+        else:
+            self.connection.commit()
+
     def command(
         self,
         *,

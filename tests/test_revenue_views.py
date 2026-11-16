@@ -96,6 +96,26 @@ class RevenueViewTests(RevenueDatabaseFixture, unittest.TestCase):
                 self.assertIn('href="/revenue/cases">查看收费与佣金档案</a>', markup)
                 self.assertIn("待办事项", markup)
 
+    def test_home_three_financial_columns_are_plain_in_desktop_and_mobile(self):
+        data = self._dashboard_data()
+        data["recent_cases"][0].update(
+            client_service_fee={"received_cents": 100000, "outstanding_cents": 140000,
+                                "gst_received_cents": 10000},
+            visa_service_fee={"received_cents": 0, "outstanding_cents": 90000,
+                              "possible_duplicate": True},
+            school_commission={"label": "已申领，等学校付款", "received_cents": 80000,
+                               "outstanding_cents": 40000},
+        )
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                html = render_revenue_workspace(data, csrf="csrf", mobile=mobile)
+                for value in ("客户服务费", "签证服务费", "学校佣金", "已收 A$1,000",
+                              "另收 GST A$100", "还差 A$1,400", "还差 A$900", "疑似重复收费，待核对",
+                              "已申领，等学校付款", "已到账 A$800", "还差 A$400"):
+                    self.assertIn(value, html)
+                self.assertNotIn("档案状态", html)
+                self.assertNotIn("进行中", html)
+
     def test_dashboard_renders_additional_school_claim_workspace_without_key(self):
         data = self._dashboard_data()
         data["workspace_links"].append({

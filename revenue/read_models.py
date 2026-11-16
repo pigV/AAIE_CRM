@@ -14,8 +14,52 @@ from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo
 
 from canonical_acceptance import active_acceptance_predicate
+from revenue.client_fee_rules import CLIENT_FEE_RULES_2026
 from revenue.operational_visibility import RevenueOperationalVisibility
 from revenue.urls import case_url, cases_url, revenue_home_url
+
+
+_FEE_GROUPS = {
+    rule["milestone_code"]: (
+        "client_service_fee" if ("service_kind", "eq", "base") in rule["conditions"]
+        else "visa_service_fee"
+    )
+    for rule in CLIENT_FEE_RULES_2026
+}
+_FEE_GROUPS.update({"visa": "visa_service_fee"})
+_FEE_DESCRIPTIONS = {
+    "client service fee": "client_service_fee",
+    "visa service fee": "visa_service_fee",
+    "服务费": "client_service_fee",
+    "签证费": "visa_service_fee",
+    "签证服务费": "visa_service_fee",
+}
+
+
+# Issued draft invoices retain the student-period source in the audited draft.
+_SCHOOL_DRAFT_INVOICE_LINES = """
+    SELECT e.commercial_case_id,il.id,il.gross_cents,inv.uid invoice_uid,inv.issued_at
+      FROM revenue_invoices inv
+      JOIN revenue_audit_events issue ON issue.aggregate_uid=inv.uid
+        AND issue.action IN ('institution_commission_invoice_issued','authority_commission_invoice_issued')
+        AND json_extract(issue.after_json,'$.simulation')=0
+      JOIN revenue_invoice_lines il ON il.invoice_id=inv.id
+        AND il.source_kind IN ('institution_draft_line','authority_draft_line')
+      JOIN revenue_audit_events draft ON draft.id=(
+        SELECT version.id FROM revenue_audit_events version
+         WHERE version.aggregate_uid=json_extract(issue.after_json,'$.draft_uid')
+           AND version.action IN ('institution_commission_invoice_draft_created',
+                                  'institution_commission_invoice_draft_gst_changed',
+                                  'institution_commission_invoice_draft_repreviewed')
+           AND version.id<issue.id
+         ORDER BY version.id DESC LIMIT 1
+      )
+      JOIN json_each(draft.after_json,'$.lines') detail
+        ON json_extract(detail.value,'$.uid')=il.source_uid
+      JOIN revenue_enrolment_components e ON e.uid=json_extract(detail.value,'$.component_uid')
+      JOIN revenue_commercial_cases c ON c.id=e.commercial_case_id AND c.student_id=il.student_id
+     WHERE inv.status='issued' AND inv.document_kind='direct_commission_invoice'
+"""
 
 
 METRIC_DEFINITIONS = (
@@ -119,6 +163,7 @@ EXCEPTION_CODE_LABELS = {
     "ambiguous_engagement_contract": "存在多份已签服务合同，请确认有效合同",
     "missing_engagement_contract": "缺少已签服务合同",
     "missing_fee_rule": "缺少适用收费规则",
+    "visa_fee_conflict": "签证收费待核对",
     "unresolved_fee_classification": "收费类型待确认",
     "missing_he_application": "缺少高等教育申请资料",
     "missing_revenue_entity": "缺少佣金结算机构",
@@ -1549,8 +1594,26 @@ class RevenueReadModels:
         }
 
     def _recent_cases(self) -> list[dict[str, Any]]:
+        rcti_activity = ""
+        if self._table_exists("revenue_vic_rcti_student"):
+            rcti_activity = """
+                UNION ALL
+                SELECT e.commercial_case_id,json_extract(r.confirmed_json,'$.confirmed_at')
+                  FROM revenue_vic_rcti_student s
+                  JOIN revenue_enrolment_components e ON e.uid=s.component_uid
+                  JOIN revenue_vic_rcti r ON r.uid=s.rcti_uid AND r.simulation=0
+                 WHERE s.simulation=0 AND r.details_confirmed=1
+                UNION ALL
+                SELECT e.commercial_case_id,b.confirmed_at
+                  FROM revenue_vic_rcti_student s
+                  JOIN revenue_enrolment_components e ON e.uid=s.component_uid
+                  JOIN revenue_vic_rcti r ON r.uid=s.rcti_uid AND r.simulation=0
+                  JOIN revenue_vic_rcti_bank b ON b.rcti_uid=r.uid AND b.simulation=0
+                 WHERE s.simulation=0 AND r.details_confirmed=1
+            """
         rows = self.connection.execute(
-            """WITH activity(case_id, occurred_at) AS (
+            """WITH draft_invoice_lines AS (""" + _SCHOOL_DRAFT_INVOICE_LINES + """),
+               activity(case_id, occurred_at) AS (
                    SELECT commercial_case_id,created_at FROM revenue_fee_items
                     WHERE status<>'cancelled'
                    UNION ALL
@@ -1586,7 +1649,34 @@ class RevenueReadModels:
                    UNION ALL
                    SELECT commercial_case_id,issued_at FROM revenue_invoices
                     WHERE status='issued' AND commercial_case_id IS NOT NULL
-               ), latest AS (
+                   UNION ALL
+                   SELECT l.commercial_case_id,inv.issued_at
+                     FROM revenue_invoice_lines il
+                     JOIN revenue_invoices inv ON inv.id=il.invoice_id AND inv.status='issued'
+                     JOIN revenue_claims q ON il.source_kind='claim' AND il.source_uid=q.uid AND q.status='issued'
+                     JOIN revenue_claim_allocations ca ON ca.claim_id=q.id
+                     JOIN revenue_commission_instalments i ON i.id=ca.commission_instalment_id
+                     JOIN revenue_commission_lines l ON l.id=i.commission_line_id
+                   UNION ALL
+                   SELECT l.commercial_case_id,a.confirmed_at
+                     FROM revenue_payment_allocations a
+                     JOIN revenue_payments p ON p.id=a.payment_id AND p.status='confirmed'
+                       AND p.payment_direction='received'
+                     JOIN revenue_invoice_lines il ON il.id=a.invoice_line_id
+                     JOIN revenue_invoices inv ON inv.id=il.invoice_id AND inv.status='issued'
+                     JOIN revenue_claims q ON il.source_kind='claim' AND il.source_uid=q.uid AND q.status='issued'
+                     JOIN revenue_claim_allocations ca ON ca.claim_id=q.id
+                     JOIN revenue_commission_instalments i ON i.id=ca.commission_instalment_id
+                     JOIN revenue_commission_lines l ON l.id=i.commission_line_id
+                   UNION ALL
+                   SELECT commercial_case_id,issued_at FROM draft_invoice_lines
+                   UNION ALL
+                   SELECT il.commercial_case_id,a.confirmed_at
+                     FROM draft_invoice_lines il
+                     JOIN revenue_payment_allocations a ON a.invoice_line_id=il.id
+                     JOIN revenue_payments p ON p.id=a.payment_id AND p.status='confirmed'
+                       AND p.payment_direction='received' AND p.counterparty_kind='institution'
+               """ + rcti_activity + """), latest AS (
                    SELECT case_id,occurred_at,julianday(occurred_at) activity_time,
                           ROW_NUMBER() OVER (
                               PARTITION BY case_id ORDER BY julianday(occurred_at) DESC, occurred_at DESC
@@ -1607,8 +1697,317 @@ class RevenueReadModels:
             item["updated_at"] = row["occurred_at"]
             item["updated_at_display"] = melbourne_datetime_display(row["occurred_at"])
             item["intake"], item["intake_source"] = self._recent_case_intake(row, item["intake"])
+            item["institution"], item["institution_source"] = self._recent_case_institution(row)
+            item.update(self._recent_case_fees(row["id"]))
+            item["school_commission"] = self._recent_school_commission(
+                row["id"], item["institution_source"]
+            )
             recent.append(item)
         return recent
+
+    def _recent_case_institution(self, row: sqlite3.Row) -> tuple[str, str]:
+        cycle_id, student_id = row["application_cycle_id"], row["student_id"]
+        sources = (
+            ("student_school_enrolments", "已确认入学", "status='active'",
+             "school_name_snapshot"),
+            ("cycle_final_acceptances", "已接受 Offer", "acceptance_status='active'",
+             "school_name_snapshot"),
+            ("offers", "Offer 院校",
+             """lower(trim(COALESCE(offer_status,''))) NOT IN
+                 ('withdrawn','cancelled','canceled','rejected','declined','expired','voided','superseded')""",
+             "school_name"),
+        )
+        for table, label, predicate, name_column in sources:
+            if table == "offers":
+                providers = self.connection.execute(
+                    """SELECT DISTINCT h.provider_id FROM revenue_enrolment_components e
+                       JOIN higher_education_applications h ON h.id=e.higher_education_application_id
+                       WHERE e.commercial_case_id=? AND e.status='active'
+                         AND h.application_cycle_id=? AND h.provider_id IS NOT NULL""",
+                    (row["id"], cycle_id),
+                ).fetchall()
+                if len(providers) > 1:
+                    return "待确认", ""
+                if providers:
+                    provider_id = providers[0][0]
+                    return (self._entity_display("higher_education_providers", provider_id)
+                            or f"院校 #{provider_id}"), "高等教育申请"
+
+            columns = self._columns(table)
+            required = {"application_cycle_id", "student_id"}
+            required.add({"student_school_enrolments": "status",
+                          "cycle_final_acceptances": "acceptance_status",
+                          "offers": "offer_status"}[table])
+            if not required <= columns:
+                continue
+            school_id = "school_id" if "school_id" in columns else "NULL"
+            school_name = name_column if name_column in columns else "NULL"
+            names = {}
+            for record in self.connection.execute(
+                f"""SELECT DISTINCT {school_id}, {school_name} FROM {table}
+                    WHERE application_cycle_id=? AND student_id=? AND {predicate}""",
+                (cycle_id, student_id),
+            ):
+                entity_id, snapshot = record
+                name = (self._entity_display("schools", entity_id)
+                        or str(snapshot or "").strip()
+                        or (f"学校 #{entity_id}" if entity_id else ""))
+                if name:
+                    names[name.casefold()] = name
+            if len(names) == 1:
+                return next(iter(names.values())), label
+            if len(names) > 1:
+                return "待确认", ""
+        return "未关联", ""
+
+    def _recent_case_fees(self, case_id: int) -> dict[str, Any]:
+        result = dict.fromkeys(("client_service_fee", "visa_service_fee"))
+        other_count = 0
+        rows = self.connection.execute(
+            """SELECT f.id,f.milestone_code,f.description,f.net_cents,
+                      COALESCE(SUM(a.allocated_base_cents) FILTER (WHERE p.id IS NOT NULL),0),
+                      COALESCE(SUM(a.gst_cents) FILTER (WHERE p.id IS NOT NULL),0),
+                      (SELECT MAX(json_extract(item.value,'$.visa_case_id'))
+                         FROM json_each(s.canonical_json,'$.items') item
+                        WHERE json_extract(item.value,'$.milestone_code')=f.milestone_code
+                       HAVING COUNT(*)=1) visa_case_id
+                 FROM revenue_fee_items f
+                 JOIN revenue_rule_snapshots s ON s.id=f.rule_snapshot_id
+                 LEFT JOIN revenue_client_payment_allocations a ON a.fee_item_id=f.id
+                 LEFT JOIN revenue_payments p ON p.id=a.payment_id AND p.status='confirmed'
+                    AND p.payment_direction='received' AND p.counterparty_kind='client'
+                WHERE f.commercial_case_id=? AND f.status<>'cancelled'
+                GROUP BY f.id""",
+            (case_id,),
+        )
+        legacy_payments = {}
+        for entry in self.connection.execute(
+            """SELECT f.id,il.net_cents,il.gross_cents,SUM(a.allocated_cents) AS received
+                 FROM revenue_fee_items f
+                 JOIN revenue_invoice_lines il ON il.source_kind='fee_item' AND il.source_uid=f.uid
+                   AND il.student_id=f.student_id
+                 JOIN revenue_invoices i ON i.id=il.invoice_id AND i.commercial_case_id=f.commercial_case_id
+                   AND i.document_kind='client_invoice' AND i.status='issued'
+                 JOIN revenue_payment_allocations a ON a.invoice_line_id=il.id
+                 JOIN revenue_payments p ON p.id=a.payment_id AND p.status='confirmed'
+                   AND p.payment_direction='received' AND p.counterparty_kind='client'
+                 WHERE f.commercial_case_id=? AND f.status<>'cancelled'
+                   AND NOT EXISTS (SELECT 1 FROM revenue_client_payment_allocations ca
+                                   WHERE ca.payment_id=p.id AND ca.fee_item_id=f.id)
+                 GROUP BY f.id,il.id""",
+            (case_id,),
+        ):
+            legacy_payments.setdefault(entry["id"], []).append(entry)
+        visa_sources = set()
+        for fee_id, milestone, description, net, received, gst, visa_case_id in rows:
+            key = _FEE_GROUPS.get(milestone) or _FEE_DESCRIPTIONS.get(str(description).strip().casefold())
+            if not key:
+                other_count += 1
+                continue
+            totals = result[key] or {"received_cents": 0, "outstanding_cents": 0}
+            unverified_gst = 0
+            for entry in legacy_payments.get(fee_id, ()):
+                if entry["net_cents"] == entry["gross_cents"]:
+                    received += entry["received"]
+                elif entry["received"] >= entry["gross_cents"]:
+                    received += entry["net_cents"]
+                    gst += entry["gross_cents"] - entry["net_cents"]
+                else:
+                    unverified_gst += entry["received"]
+            totals["received_cents"] += received
+            totals["outstanding_cents"] += max(0, net - received)
+            if gst:
+                totals["gst_received_cents"] = totals.get("gst_received_cents", 0) + gst
+            if unverified_gst:
+                totals["legacy_gross_received_cents"] = totals.get("legacy_gross_received_cents", 0) + unverified_gst
+            if key == "visa_service_fee" and visa_case_id is not None and net > 0:
+                source = (str(visa_case_id), milestone)
+                if source in visa_sources:
+                    totals["possible_duplicate"] = True
+                visa_sources.add(source)
+            result[key] = totals
+        if other_count:
+            result["other_fee_count"] = other_count
+        return result
+
+    def _recent_school_commission(self, case_id: int, institution_source: str) -> dict[str, Any]:
+        lines = self.connection.execute(
+            """SELECT l.status,l.gross_cents,g.contract_kind,
+                   COALESCE((SELECT SUM(MAX(0,i.eligible_cents-i.claimed_cents))
+                       FROM revenue_commission_instalments i
+                       WHERE i.commission_line_id=l.id AND i.status IN ('eligible','partial')),0) AS claimable,
+                   json_extract(snap.canonical_json,'$.school_commission_formal')=1 AS formal,
+                   EXISTS(SELECT 1 FROM revenue_commission_instalments i
+                       JOIN revenue_claim_allocations ca ON ca.commission_instalment_id=i.id
+                       JOIN revenue_claims q ON q.id=ca.claim_id AND q.status='issued'
+                       LEFT JOIN revenue_invoice_lines il ON il.source_kind='claim' AND il.source_uid=q.uid
+                       LEFT JOIN revenue_invoices inv ON inv.id=il.invoice_id AND inv.status='issued'
+                       WHERE i.commission_line_id=l.id AND inv.id IS NULL) AS unbilled_claim,
+                   COALESCE((SELECT SUM(a.claimed_cents)
+                       FROM revenue_commission_instalments i
+                       JOIN revenue_claim_allocations a ON a.commission_instalment_id=i.id
+                       JOIN revenue_claims q ON q.id=a.claim_id AND q.status='issued'
+                       WHERE i.commission_line_id=l.id),0) AS claimed,
+                   COALESCE((SELECT SUM(a.allocated_cents)
+                       FROM revenue_payment_allocations a
+                       JOIN revenue_payments p ON p.id=a.payment_id
+                       WHERE p.status='confirmed' AND p.payment_direction='received'
+                         AND p.counterparty_kind='institution' AND (
+                           a.commission_line_id=l.id OR a.invoice_line_id IN (
+                             SELECT il.id FROM revenue_invoice_lines il
+                             JOIN revenue_invoices inv ON inv.id=il.invoice_id AND inv.status='issued'
+                             JOIN revenue_claims q ON il.source_kind='claim'
+                                 AND il.source_uid=q.uid AND q.status='issued'
+                             JOIN revenue_claim_allocations ca ON ca.claim_id=q.id
+                             JOIN revenue_commission_instalments i ON i.id=ca.commission_instalment_id
+                             WHERE i.commission_line_id=l.id
+                               AND NOT EXISTS (
+                                 SELECT 1 FROM revenue_claim_allocations other
+                                 JOIN revenue_commission_instalments oi ON oi.id=other.commission_instalment_id
+                                 WHERE other.claim_id=q.id AND oi.commission_line_id<>l.id
+                               )
+                           )
+                         )),0) AS received
+                 FROM revenue_commission_lines l
+                 JOIN revenue_enrolment_components e ON e.id=l.enrolment_component_id
+                 JOIN revenue_rule_snapshots snap ON snap.id=l.rule_snapshot_id
+                 JOIN revenue_commission_rule_versions rule ON rule.id=l.commission_rule_version_id
+                 JOIN revenue_contract_versions v ON v.id=rule.contract_version_id
+                 JOIN revenue_contract_groups g ON g.id=v.contract_group_id
+                WHERE l.commercial_case_id=? AND e.component_kind IN ('school','higher_education','package_segment')
+                  AND COALESCE(json_extract(snap.canonical_json,'$.school_commission_simulation'),0)=0
+                  AND (COALESCE(json_extract(snap.canonical_json,'$.toorak_forecast'),0)=0
+                       OR json_extract(snap.canonical_json,'$.school_commission_formal')=1)
+                  AND (e.status='active' OR l.status IN ('claimed','paid'))""",
+            (case_id,),
+        ).fetchall()
+        direct_lines = [line for line in lines if line["contract_kind"] != "master_agent"]
+        agents = self._recent_agent_commission(case_id)
+        rcti = self._recent_rcti_receipts(case_id)
+        invoices = self._recent_school_draft_invoices(case_id)
+        received = sum(line["received"] for line in direct_lines)
+        received += sum(item["received"] for item in [*rcti, *invoices, *agents])
+        claim_due = sum(max(0, line["claimed"] - line["received"]) for line in direct_lines)
+        rcti_due = sum(item["due"] for item in rcti)
+        agent_due = sum(max(0, item["payable_cents"] - item["received"]) for item in agents)
+        invoice_due = sum(max(0, item["gross_cents"] - item["received"]) for item in invoices)
+        claimable = any(line["claimable"] or line["status"] == "claimable" for line in direct_lines)
+        needs_invoice = any(line["formal"] and line["unbilled_claim"] for line in lines)
+        awaiting_claim = any(line["status"] in ("forecast", "accrued") and line["gross_cents"]
+                             for line in direct_lines)
+
+        labels = []
+        if needs_invoice:
+            labels.append("已生成申领，等开票")
+        if any(item["unallocated"] for item in rcti):
+            labels.append("学校已付部分款，等核对学生分账")
+        if claim_due and not needs_invoice:
+            labels.append("已申领，等学校付款")
+        if rcti_due:
+            labels.append("学校已出结算单，等付款")
+        if agent_due:
+            labels.append("等一级代理付款")
+        elif not agents and any(line["contract_kind"] == "master_agent" and line["gross_cents"] for line in lines):
+            labels.append("等核对一级代理结算单")
+        unpaid_invoices = [item for item in invoices if item["received"] < item["gross_cents"]]
+        if any(not invoice["delivered"] and not invoice["received"] for invoice in unpaid_invoices):
+            labels.append("已开票，等确认发给学校")
+        if any(invoice["delivered"] or invoice["received"] for invoice in unpaid_invoices):
+            labels.append("已开票，等学校付款")
+        if claimable:
+            labels.append("可以向学校申领")
+        elif awaiting_claim:
+            labels.append("已计算佣金，等确认申领条件")
+
+        if not labels:
+            if received:
+                labels.append("已到账")
+            elif not lines and not rcti and not invoices:
+                if institution_source in ("已确认入学", "已接受 Offer", "高等教育申请"):
+                    labels.append("尚未建立学校佣金")
+                else:
+                    labels.append("等确认最终院校")
+            elif lines and all(line["gross_cents"] == 0 for line in lines):
+                labels.append("无需申领学校佣金")
+            elif all(line["status"] == "closed" for line in lines) and not rcti:
+                labels.append("佣金已关闭")
+            else:
+                labels.append("等核对佣金到账记录")
+
+        return {"label": " · ".join(labels), "received_cents": received,
+                "outstanding_cents": claim_due + rcti_due + agent_due + invoice_due}
+
+    def _recent_agent_commission(self, case_id: int) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            """SELECT item.payable_cents,
+                      COALESCE((SELECT SUM(a.allocated_cents)
+                         FROM revenue_payment_allocations a
+                         JOIN revenue_payments p ON p.id=a.payment_id
+                        WHERE p.status='confirmed' AND p.counterparty_kind='master_agent'
+                          AND p.payment_direction='received' AND p.revenue_entity_id=s.master_agent_entity_id
+                          AND (a.statement_item_uid=item.uid OR a.invoice_line_id IN (
+                              SELECT il.id FROM revenue_invoice_lines il
+                              JOIN revenue_invoices inv ON inv.id=il.invoice_id AND inv.status='issued'
+                              WHERE il.source_kind='master_agent_statement_item' AND il.source_uid=item.uid
+                                AND inv.document_kind='master_agent_invoice'
+                          ))),0) received
+                 FROM revenue_master_agent_statement_items item
+                 JOIN revenue_master_agent_statements s ON s.id=item.statement_id AND s.status<>'superseded'
+                 JOIN revenue_statement_matches m ON m.statement_item_id=item.id AND m.match_status='confirmed'
+                 JOIN revenue_commission_lines l ON l.id=m.commission_line_id
+                WHERE l.commercial_case_id=? AND NOT EXISTS (
+                    SELECT 1 FROM revenue_statement_matches other WHERE other.statement_item_id=item.id
+                      AND other.match_status='confirmed' AND other.id<>m.id
+                )""",
+            (case_id,),
+        ).fetchall()
+
+    def _recent_school_draft_invoices(self, case_id: int) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            """WITH lines AS (""" + _SCHOOL_DRAFT_INVOICE_LINES + """)
+               SELECT il.gross_cents,
+                      COALESCE((SELECT SUM(a.allocated_cents) FROM revenue_payment_allocations a
+                          JOIN revenue_payments p ON p.id=a.payment_id
+                         WHERE a.invoice_line_id=il.id AND p.status='confirmed'
+                           AND p.payment_direction='received' AND p.counterparty_kind='institution'),0) received,
+                      EXISTS(SELECT 1 FROM revenue_audit_events a WHERE a.aggregate_uid=il.invoice_uid
+                              AND a.action='school_commission_delivery_confirmed')
+                      OR EXISTS(SELECT 1 FROM revenue_outbox_events o WHERE o.aggregate_uid=il.invoice_uid
+                                 AND o.event_type='school_invoice_test_mail_queued'
+                                 AND o.dispatched_at IS NOT NULL
+                                 AND json_extract(o.payload_json,'$.transport')='smtp') delivered
+                 FROM lines il WHERE il.commercial_case_id=?""",
+            (case_id,),
+        ).fetchall()
+
+    def _recent_rcti_receipts(self, case_id: int) -> list[dict[str, Any]]:
+        if not self._table_exists("revenue_vic_rcti_student"):
+            return []
+        rows = self.connection.execute(
+            """SELECT r.uid, SUM(CAST(json_extract(detail.value,'$.actual.gross_cents') AS INTEGER)) AS due,
+                      CAST(json_extract(r.confirmed_json,'$.gross_cents') AS INTEGER) AS statement_total,
+                      COALESCE((SELECT SUM(b.cents) FROM revenue_vic_rcti_bank b
+                                 WHERE b.rcti_uid=r.uid AND b.simulation=0),0) AS bank_total
+                 FROM revenue_vic_rcti_student s
+                 JOIN revenue_enrolment_components e ON e.uid=s.component_uid
+                 JOIN revenue_vic_rcti r ON r.uid=s.rcti_uid AND r.simulation=0
+                 JOIN json_each(r.confirmed_json,'$.comparison.lines') detail
+                   ON json_extract(detail.value,'$.expected.component_uid')=s.component_uid
+                   AND json_extract(detail.value,'$.actual.period')=s.period
+                WHERE e.commercial_case_id=? AND s.simulation=0 AND r.details_confirmed=1
+                GROUP BY r.uid HAVING due>0 AND statement_total>0""",
+            (case_id,),
+        )
+        result = []
+        for _, due, statement_total, bank_total in rows:
+            # The statement total is attributable only when fully matched in this case or fully paid.
+            if bank_total >= statement_total:
+                result.append({"received": due, "due": 0, "unallocated": False})
+            elif due == statement_total or not bank_total:
+                result.append({"received": bank_total, "due": max(0, due - bank_total), "unallocated": False})
+            else:
+                result.append({"received": 0, "due": 0, "unallocated": True})
+        return result
 
     def _recent_case_intake(self, row: sqlite3.Row, cycle_intake: str) -> tuple[str, str]:
         cycle_id, student_id = row["application_cycle_id"], row["student_id"]
