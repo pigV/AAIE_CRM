@@ -62396,12 +62396,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return None
         return case
 
-    def visa_material_initialize_checklist(self, case):
+    def visa_material_initialize_checklist(self, case, *, connection=None):
+        if connection is None:
+            with db.transaction() as connection:
+                return self.visa_material_initialize_checklist(case, connection=connection)
         stamp = now_iso()
-        columns = {row["name"] for row in db.all("PRAGMA table_info(visa_checklist_items)")}
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(visa_checklist_items)")}
         existing_keys = {
             row["item_key"]
-            for row in db.all("SELECT item_key FROM visa_checklist_items WHERE visa_case_id=? AND item_key IS NOT NULL", (case["id"],))
+            for row in connection.execute("SELECT item_key FROM visa_checklist_items WHERE visa_case_id=? AND item_key IS NOT NULL", (case["id"],))
             if str(row["item_key"] or "").strip()
         }
         ordered_columns = (
@@ -62446,14 +62449,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             }
             insert_columns = [column for column in ordered_columns if column in columns]
             placeholders = ",".join("?" for _ in insert_columns)
-            db.execute(
+            connection.execute(
                 f"""INSERT OR IGNORE INTO visa_checklist_items
                    ({",".join(insert_columns)})
                    VALUES({placeholders})""",
                 [data[column] for column in insert_columns],
             )
             existing_keys.add(item["item_key"])
-        count_row = db.one("SELECT COUNT(*) total FROM visa_checklist_items WHERE visa_case_id=?", (case["id"],))
+        count_row = connection.execute("SELECT COUNT(*) total FROM visa_checklist_items WHERE visa_case_id=?", (case["id"],)).fetchone()
         return count_row["total"] if count_row else 0
 
     def visa_material_checklist_rows(self, case):
@@ -64803,7 +64806,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if guardian_applicant and guardian_applicant not in self.visa_case_guardian_applicant_options():
             return self.flash_redirect(
                 self.visa_case_return_path(student_id, case_id, self.visa_case_active_tab(), "case-overview"),
-                "Guardian Applicant 只能选择 School、Relative + 590 或 Parents' Nomination。",
+                "请选择有效的 Guardian Applicant 选项。",
                 "error",
             )
         db.execute(
@@ -67583,9 +67586,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 rows = [row for row in rows if visible_in_material_tab(row)]
             initialized_rows = [row for row in rows if row["is_initialized"]]
         initialized = bool(initialized_rows)
-        summary = self.visa_material_summary_counts(initialized_rows)
+        independent = not student_id
+        summary = self.visa_material_summary_counts(rows if independent and not initialized else initialized_rows)
         total = summary["total"]
-        description = description or f"申请类型：{self.visa_material_profile_label(case)}。VISA 显示系统已有文件引用，也支持补充上传。"
+        description = description or (
+            f"申请类型：{self.visa_material_profile_label(case)}。"
+            + ("在本案件上传和归类材料。" if independent else "VISA 显示系统已有文件引用，也支持补充上传。")
+        )
         summary_cards = "".join(
             f'<div class="visa-material-summary-card"><span>{esc(label)}</span><strong>{esc(value)}</strong></div>'
             for label, value in (
@@ -67597,18 +67604,25 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 ("完成度", f"{summary['completion']}%"),
             )
         )
+        smart_batch_link = (
+            f'<a class="secondary button-link" href="/students/{quote(student_id)}/visa-cases/{case["id"]}/material-batch-upload?visa_tab={quote(tab_key)}">Smart Batch Upload / 智能批量上传</a>'
+            if show_smart_batch else ""
+        )
         if not initialized:
+            initial_upload = smart_batch_link if independent else ""
+            initial_summary = "上传材料时会生成此签证类型的材料清单，也可以先初始化清单。" if independent else "点击初始化后，系统会按当前申请类型生成 Phase 2A 材料清单。此阶段只记录材料状态和备注。"
+            source_note = "" if independent else '<p class="visa-material-phase-note">初始化后将自动显示系统已有来源文件；VISA 不复制、不移动源文件，只做签证材料视角引用。</p>'
             return f"""
         <section class="panel visa-material-checklist-panel" id="{esc(panel_id)}">
           <div class="panel-head">
             <div><h2>{esc(title)}</h2><p>当前 Visa Case 还没有生成材料清单。</p></div>
-            <span class="visa-management-section-count">0 项</span>
+            <div class="row-actions">{initial_upload}<span class="visa-management-section-count">{total} 项</span></div>
           </div>
           <div class="visa-material-summary-grid">{summary_cards}</div>
           <div class="visa-management-empty visa-material-empty">
             <h3>暂无材料清单</h3>
-            <p>点击初始化后，系统会按当前申请类型生成 Phase 2A 材料清单。此阶段只记录材料状态和备注。</p>
-            <p class="visa-material-phase-note">初始化后将自动显示系统已有来源文件；VISA 不复制、不移动源文件，只做签证材料视角引用。</p>
+            <p>{initial_summary}</p>
+            {source_note}
             <form method="post" action="/students/{quote(student_id)}/visa-cases/{case['id']}/material-items/init">
               <input type="hidden" name="csrf" value="{esc(self.csrf)}">
               <button class="primary" type="submit">初始化材料清单</button>
@@ -67671,9 +67685,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           {''.join(category_sections)}
           <div class="dialog-actions visa-material-bottom-actions"><button class="primary" form="{esc(save_form_id)}">保存材料状态</button></div>
         """
-        smart_batch_link = (
-            f'<a class="secondary button-link" href="/students/{quote(student_id)}/visa-cases/{case["id"]}/material-batch-upload?visa_tab={quote(tab_key)}">Smart Batch Upload / 智能批量上传</a>'
-            if show_smart_batch else ""
+        source_note = (
+            '<p class="visa-material-phase-note">已确认的材料存放在当前签证案件中。</p>'
+            if independent else
+            '<p class="visa-material-phase-note">系统会从 Application / Offer / COE+OSHC / Homestay 等来源自动引用匹配文件；源文件仍保留在原模块。</p>'
         )
         return f"""
         <section class="panel visa-material-checklist-panel" id="{esc(panel_id)}">
@@ -67684,7 +67699,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <span class="visa-management-section-count">{total} 项</span>
             </div>
           </div>
-            <p class="visa-material-phase-note">系统会从 Application / Offer / COE+OSHC / Homestay 等来源自动引用匹配文件；源文件仍保留在原模块。</p>
+            {source_note}
           <div class="visa-material-summary-grid">{summary_cards}</div>
           {filter_bar}
           {form_start}
@@ -67720,7 +67735,19 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return ("Pending", "Granted", "Refused", "Withdrawn")
 
     def visa_case_guardian_applicant_options(self):
-        return ("School", "Relative + 590", "Parents' Nomination")
+        return {
+            "No": "No / 不需要监护",
+            "School": "School",
+            "Relative + 590": "Relative + 590",
+            "Parents' Nomination": "Parents' Nomination",
+        }
+
+    def visa_case_guardian_applicant_options_html(self, current=""):
+        options = ['<option value="">Please select / 请选择</option>']
+        for value, label in self.visa_case_guardian_applicant_options().items():
+            selected = " selected" if value == current else ""
+            options.append(f'<option value="{esc(value)}"{selected}>{esc(label)}</option>')
+        return "".join(options)
 
     def visa_case_select_options(self, options, current=""):
         current = str(current or "")
@@ -67760,7 +67787,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             {self.visa_case_cycle_field(student_id, values.get("application_cycle_id", ""))}
             <label>Visa Type<select name="visa_type" required><option value="">请选择</option>{self.visa_case_select_options(self.visa_case_type_options(), values.get("visa_type", ""))}</select></label>
             <label>Application Type<input name="application_type" value="{value("application_type", "New Application")}"></label>
-            <label>Guardian Applicant<select name="guardian_applicant"><option value="">Please select / 请选择</option>{self.visa_case_select_options(self.visa_case_guardian_applicant_options(), values.get("guardian_applicant", ""))}</select></label>
+            <label>Guardian Applicant<select name="guardian_applicant">{self.visa_case_guardian_applicant_options_html(values.get("guardian_applicant", ""))}</select></label>
             <label>Main Applicant<input name="main_applicant" value="{value("main_applicant", student_name)}"></label>
             <label>Applicant Count<input type="number" min="1" name="applicant_count" value="{applicant_count}"></label>
             <label>Status<select name="status" required>{self.visa_case_select_options(self.visa_case_status_options(), values.get("status", "Draft"))}</select></label>
@@ -67788,11 +67815,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def student_visa_case_foundation_field_card_html(self, student_id, case, label, value):
         if label == "Guardian Applicant":
-            current = str(value or "")
-            options = '<option value="">Please select / 请选择</option>' + self.visa_case_select_options(
-                self.visa_case_guardian_applicant_options(),
-                current if current in self.visa_case_guardian_applicant_options() else "",
-            )
+            options = self.visa_case_guardian_applicant_options_html(value)
             return f"""
             <div class="visa-management-field-card visa-management-field-card-form">
               <dt>Guardian Applicant</dt>
@@ -68015,7 +68038,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if guardian_applicant and guardian_applicant not in self.visa_case_guardian_applicant_options():
             return self.flash_redirect(
                 f"/students/{quote(student_id)}/visa-cases/new",
-                "Guardian Applicant 只能选择 School、Relative + 590 或 Parents' Nomination。",
+                "请选择有效的 Guardian Applicant 选项。",
                 "error",
             )
         case_owner = form_text_value(form, "case_owner", self.user.get("display_name", "") if self.user else "")
