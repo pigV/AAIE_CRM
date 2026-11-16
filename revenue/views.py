@@ -1563,6 +1563,10 @@ def render_revenue_initialization_page(data: dict) -> str:
 
 
 def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str:
+    def intake_text(row):
+        source = row.get("intake_source")
+        return escape(f'{row["intake"]}（{source}）' if source else str(row["intake"]))
+
     variant = " revenue-workspace--mobile" if mobile else ""
     recent = data.get("recent_cases") or []
     cases_href = str(data.get("cases_href") or "/revenue/cases")
@@ -1584,12 +1588,12 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
         f'<a class="revenue-workspace-link" href="{escape(str(item["href"]), quote=True)}">'
         f'<strong>{escape(str(item["label"]))}</strong><span>进入工作区</span></a>'
         for item in data.get("workspace_links") or []
-        if item["key"] not in {"cases", "billing", "direct-commission", "reconciliation"}
+        if item.get("key") not in {"cases", "billing", "direct-commission", "reconciliation"}
     )
     desktop_rows = "".join(
         f'<tr><td><a class="revenue-row-link" href="{escape(str(row["href"]), quote=True)}">{escape(str(row["student_name"]))}</a></td>'
         f'<td>{escape(str(row["student_id"]))}</td><td>{escape(str(row["classification"]))}</td><td>{escape(str(row["business_type"]))}</td><td>{escape(str(row["institution"]))}</td>'
-        f'<td>{escape(str(row["intake"]))}</td><td>{escape(str(row["billing_status"]))}</td>'
+        f'<td>{intake_text(row)}</td><td>{escape(str(row["billing_status"]))}</td>'
         f'<td>{escape(str(row["commission_status"]))}</td><td>{escape(str(row["status"]))}</td>'
         f'<td>{escape(str(row["updated_at_display"]))}</td></tr>'
         for row in recent
@@ -1599,7 +1603,7 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
         f'<span class="revenue-mobile-case__top"><strong>{escape(str(row["student_name"]))}</strong><small>{escape(str(row["status"]))}</small></span>'
         f'<span>学生编号 {escape(str(row["student_id"]))}</span>'
         f'<span>{escape(str(row["business_type"]))} · {escape(str(row["classification"]))}</span>'
-        f'<span>{escape(str(row["institution"]))} · {escape(str(row["intake"]))}</span>'
+        f'<span>{escape(str(row["institution"]))} · {intake_text(row)}</span>'
         f'<span class="revenue-mobile-case__states">{escape(str(row["billing_status"]))} · {escape(str(row["commission_status"]))}</span>'
         f'<small>最后更新 {escape(str(row["updated_at_display"]))}</small></a>'
         for row in recent

@@ -92,6 +92,8 @@ class RevenueOperationalVisibilityTests(RevenueDatabaseFixture, unittest.TestCas
                 first_name="Test",
                 last_name="Family",
             )
+            for case in (active_case, deleted_case, synthetic_case, name_only_test_case):
+                self.seed_dashboard_invoice(connection, case["id"])
             connection.commit()
 
             models = RevenueReadModels(connection)

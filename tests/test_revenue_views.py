@@ -96,6 +96,19 @@ class RevenueViewTests(RevenueDatabaseFixture, unittest.TestCase):
                 self.assertIn('href="/revenue/cases">查看收费与佣金档案</a>', markup)
                 self.assertIn("待办事项", markup)
 
+    def test_dashboard_renders_additional_school_claim_workspace_without_key(self):
+        data = self._dashboard_data()
+        data["workspace_links"].append({
+            "label": "学校佣金申领清单", "href": "/revenue/school-commission-candidates",
+        })
+        data["recent_cases"][0]["intake_source"] = "意向入学"
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                markup = render_revenue_workspace(data, csrf="csrf", mobile=mobile)
+                self.assertIn('href="/revenue/school-commission-candidates"', markup)
+                self.assertIn("学校佣金申领清单", markup)
+                self.assertIn("2027 Term 1（意向入学）", markup)
+
     def test_mobile_workspace_page_server_side_omits_desktop_only_actions(self):
         from revenue.views import render_revenue_workspace_page
 

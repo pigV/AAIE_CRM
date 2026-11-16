@@ -174,11 +174,10 @@ class RevenueReadModelTests(RevenueDatabaseFixture, unittest.TestCase):
                 "UPDATE students SET passport_first_name='Jimmy',passport_last_name='Zhang' "
                 "WHERE student_id='S-REVENUE'"
             )
-            service = RevenueService(RevenueRepository(connection))
-            case = service.open_case(100, 1, "student-name-time-case")
+            case_uid, fee = self._seed_authoritative_fee(connection, "student-name-time-case")
             connection.execute(
-                "UPDATE revenue_commercial_cases SET opened_at=? WHERE uid=?",
-                ("2026-08-30T13:29:22+00:00", case["uid"]),
+                "UPDATE revenue_fee_items SET created_at=? WHERE uid=?",
+                ("2026-08-30T13:29:22+00:00", fee["uid"]),
             )
             connection.commit()
 
@@ -188,6 +187,97 @@ class RevenueReadModelTests(RevenueDatabaseFixture, unittest.TestCase):
         self.assertEqual("S-REVENUE", recent["student_id"])
         self.assertEqual("30/08/2026 23:29", recent["updated_at_display"])
         self.assertEqual("2026-08-30T13:29:22+00:00", recent["updated_at"])
+
+    def test_recent_activity_excludes_empty_cases_and_prefers_confirmed_payment_time(self):
+        with self.connect() as connection:
+            case_uid, fee = self._seed_authoritative_fee(connection, "recent-activity-fee")
+            connection.execute(
+                "UPDATE revenue_commercial_cases SET opened_at='2026-08-01T03:00:00Z' WHERE uid=?",
+                (case_uid,),
+            )
+            connection.execute(
+                "UPDATE revenue_fee_items SET created_at='2026-08-02T03:00:00Z' WHERE uid=?",
+                (fee["uid"],),
+            )
+            self.seed_prior_existing_cycle(connection)
+            empty_case = RevenueService(RevenueRepository(connection)).open_case(90, 1, "recent-empty-case")
+            connection.execute(
+                "UPDATE revenue_commercial_cases SET opened_at='2030-01-01T00:00:00Z' WHERE uid=?",
+                (empty_case["uid"],),
+            )
+            ClientPaymentService(RevenueRepository(connection)).record_client_payment(
+                fee_item_uid=fee["uid"], payment_method_code="au_personal_account",
+                actual_currency_code="AUD", actual_amount_cents=100_000, allocated_base_cents=100_000,
+                received_date="2026-08-30", external_reference="RECENT-PAY",
+                evidence_document_uid=None, actor_user_id=1, actor_role="Admin",
+                actor_has_revenue_access=True, idempotency_key="recent-confirmed-payment",
+            )
+            connection.execute("UPDATE revenue_payments SET confirmed_at='2031-09-04T23:00:00+10:00'")
+            connection.commit()
+            model = RevenueReadModels(connection)
+            actual = model.dashboard()["recent_cases"]
+            self.assertEqual([case_uid], [row["uid"] for row in actual])
+            self.assertEqual("2031-09-04T23:00:00+10:00", actual[0]["updated_at"])
+            self.assertEqual("04/09/2031 23:00", actual[0]["updated_at_display"])
+            connection.execute("UPDATE revenue_payments SET status='reversed'")
+            self.assertEqual("2026-08-02T03:00:00Z", model.dashboard()["recent_cases"][0]["updated_at"])
+
+    def test_recent_activity_limits_to_ten_financial_updates_in_time_order(self):
+        with self.connect() as connection:
+            service = RevenueService(RevenueRepository(connection))
+            cases = {}
+            for day in range(1, 13):
+                student_id = f"S-{day}"
+                cycle_id = 100 + day
+                connection.execute("INSERT INTO students VALUES (?)", (student_id,))
+                connection.execute(
+                    "INSERT INTO application_cycles VALUES(?,?,?,'initial','active','school_education','2026-08-01')",
+                    (cycle_id, f"recent-cycle-{day}", student_id),
+                )
+                case = service.open_case(cycle_id, 1, f"recent-case-{day}")
+                cases[day] = case["uid"]
+                self.seed_dashboard_invoice(connection, case["id"], f"2026-08-{day:02d}T12:00:00+10:00")
+            connection.commit()
+
+            recent = RevenueReadModels(connection).dashboard()["recent_cases"]
+            self.assertEqual([cases[day] for day in range(12, 2, -1)], [row["uid"] for row in recent])
+
+    def test_recent_intake_distinguishes_confirmed_enrolment_offer_and_preference(self):
+        with self.connect() as connection:
+            case = RevenueService(RevenueRepository(connection)).open_case(100, 1, "recent-intake")
+            self.seed_dashboard_invoice(connection, case["id"])
+            connection.executescript("""
+                ALTER TABLE students ADD preferred_intake_year TEXT;
+                ALTER TABLE students ADD preferred_intake_term TEXT;
+                UPDATE students SET preferred_intake_year='2027', preferred_intake_term='07';
+                ALTER TABLE student_school_enrolments ADD student_id TEXT;
+                ALTER TABLE student_school_enrolments ADD start_date TEXT;
+                ALTER TABLE student_school_enrolments ADD status TEXT;
+                ALTER TABLE cycle_final_acceptances ADD acceptance_status TEXT;
+                ALTER TABLE offer_received_events ADD legacy_offer_id INTEGER;
+                CREATE TABLE offers (id INTEGER PRIMARY KEY, application_cycle_id INTEGER,
+                  student_id TEXT, course_start_date TEXT, offer_status TEXT);
+            """)
+            model = RevenueReadModels(connection)
+
+            def intake():
+                entry = model.dashboard()["recent_cases"][0]
+                return entry["intake"], entry["intake_source"]
+
+            self.assertEqual(("2027 年 7 月", "意向入学"), intake())
+            connection.execute("INSERT INTO offers VALUES(1,100,'S-REVENUE','2027-02-03','Received')")
+            connection.execute("INSERT INTO offers VALUES(2,999,'S-REVENUE','2099-01-01','Received')")
+            self.assertEqual(("2027-02-03", "Offer 开学"), intake())
+            connection.execute("INSERT INTO offers VALUES(3,100,'S-REVENUE','2027-03-03','Received')")
+            self.assertEqual(("2027 年 7 月", "意向入学"), intake())
+            connection.execute("INSERT INTO offer_received_events(id,application_cycle_id,legacy_offer_id) VALUES(11,100,3)")
+            connection.execute("""INSERT INTO cycle_final_acceptances(id,application_cycle_id,
+                                offer_received_event_id,acceptance_status) VALUES(21,100,11,'active')""")
+            self.assertEqual(("2027-03-03", "已接受 Offer 开学"), intake())
+            connection.execute("""INSERT INTO student_school_enrolments(
+                                  id,application_cycle_id,student_id,start_date,status)
+                                  VALUES(31,100,'S-REVENUE','2027-03-05','active')""")
+            self.assertEqual(("2027-03-05", "已确认入学"), intake())
 
     def test_requested_exception_codes_use_business_chinese_labels(self):
         expected = {
