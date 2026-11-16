@@ -293,9 +293,13 @@ def activate_lifecycle(
 def cancel_lifecycle(
     connection: sqlite3.Connection, gateway: LifecycleGateway, *, case_id: int,
     actor_user_id: int, reason: str, idempotency_key: str, occurred_at: str,
+    cycle_outcome: str = "cancelled",
 ) -> LifecycleResult:
     current = repository.load_result(connection, case_id)
-    digest = repository.payload_hash({"case_id": int(case_id), "reason": reason})
+    payload = {"case_id": int(case_id), "reason": reason}
+    if cycle_outcome != "cancelled":
+        payload["cycle_outcome"] = cycle_outcome
+    digest = repository.payload_hash(payload)
     replay = repository.replay_receipt(
         connection, student_id=current.student_id, operation="cancel",
         idempotency_key=idempotency_key, expected_hash=digest,
@@ -314,7 +318,7 @@ def cancel_lifecycle(
     cycle_id = current.cycle_id
     if cycle_id is not None:
         gateway.close(
-            connection, cycle_id=cycle_id, outcome="cancelled",
+            connection, cycle_id=cycle_id, outcome=cycle_outcome,
             occurred_at=occurred_at, actor_user_id=actor_user_id,
         )
     result = repository.load_result(connection, case_id)

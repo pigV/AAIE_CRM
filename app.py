@@ -341,6 +341,14 @@ from student_detail_summary_cards import (
 from lifecycle_workspace_ui import WorkspaceStep, render_lifecycle_stepper
 from student_workflow_projection import load_student_workflow_projection_map
 from student_management_summary import load_student_management_summary_map
+from application_withdrawal import (
+    ApplicationWithdrawalConflict,
+    can_start_reapplication,
+    count_withdrawn_students,
+    list_withdrawn_applications,
+    reapplication_cycle,
+    withdraw_application,
+)
 from student_lifecycle.transfer_payment_proof_append import (
     PaymentProofAppendError,
     append_payment_proof,
@@ -4178,6 +4186,55 @@ def data_from_template_bytes(payload):
     return data
 
 
+def submit_parent_reapplication(data, token_row, draft_revision):
+    student_id = token_row["student_id"]
+    if not student_id:
+        return None
+    token = token_row["token"]
+    with db.transaction() as conn:
+        if not is_workflow_v2_active(conn):
+            return None
+        cycle_id = reapplication_cycle(conn, token, student_id)
+        if cycle_id is None:
+            return None
+        student = conn.execute(
+            "SELECT * FROM students WHERE student_id=? AND deleted_at IS NULL",
+            (student_id,),
+        ).fetchone()
+        if student is None:
+            raise ParentFormRevoked("student record is unavailable")
+        stamp = now_iso()
+        current_token = conn.execute(
+            "SELECT * FROM parent_form_tokens WHERE token=? AND student_id=?",
+            (token, student_id),
+        ).fetchone()
+        status = parent_token_status(current_token)
+        if status == "Submitted":
+            raise ParentFormSubmitted("parent form has already been submitted")
+        if status == "Expired":
+            raise ParentFormExpired("parent form link has expired")
+        if status != "Pending":
+            raise ParentFormRevoked("parent form link has been revoked")
+        saved_draft = conn.execute(
+            "SELECT revision FROM parent_form_drafts WHERE token=?",
+            (token,),
+        ).fetchone()
+        if saved_draft is None or saved_draft["revision"] != draft_revision:
+            raise ApplicationWithdrawalConflict("草稿版本已更新，请重新载入后再递交。")
+        record_application_lifecycle_event(
+            conn, "PARENT_FORM_SUBMITTED", occurred_at=stamp, actor_user_id=None,
+            student_id=student_id, parent_form_token=token,
+            education_stream=data.get("application_stream") or "school_education",
+        )
+        write_student_profile(conn, student, data, None, stamp)
+        conn.execute(
+            "UPDATE parent_form_tokens SET submitted_at=? WHERE token=?",
+            (stamp, token),
+        )
+        ParentFormRepository(db).delete_draft(conn, token)
+    return student_id
+
+
 def create_student_from_form(data, token_row=None, consultant_id=None, source_token=""):
     year = local_year()
     encrypted_password = ""
@@ -4995,14 +5052,15 @@ def role_module_presets_json():
     return json.dumps(ROLE_MODULE_PRESETS, ensure_ascii=False)
 
 
-def student_form_values(student):
+def student_form_values(student, *, include_account_password=True):
     try:
         data = json.loads(student["form_data_json"] or "{}")
     except Exception:
         data = {}
     values = {name: ([] if meta["type"] == "checkbox" else "") for name, meta in FIELD_MAP.items()}
     values.update({key: value for key, value in data.items() if key in FIELD_MAP})
-    values["account_password"] = student_account_password(student["student_id"])
+    if include_account_password:
+        values["account_password"] = student_account_password(student["student_id"])
     return values
 
 
@@ -5129,8 +5187,8 @@ def replace_student_related_records(conn, student_id, data_for_storage, account_
     )
 
 
-def update_student_profile(student, data, user, ip="", user_agent=""):
-    old_data = student_form_values(student)
+def write_student_profile(conn, student, data, user, changed_at):
+    old_data = student_form_values(student, include_account_password=False)
     account_password = str(data.get("account_password") or "")
     data_for_storage = dict(data)
     data_for_storage.pop("account_password", None)
@@ -5139,39 +5197,45 @@ def update_student_profile(student, data, user, ip="", user_agent=""):
         data_for_storage.get("higher_education_package_combination"),
     ) if data_for_storage.get("application_stream") == "higher_education" else ""
     changes = student_profile_changes(old_data, data_for_storage)
-    changed_at = now_iso()
-    with db.transaction() as conn:
+    actor_id = user["id"] if user else None
+    actor_name = user["username"] if user else "parent"
+    conn.execute(
+        """UPDATE students SET passport_last_name=?,passport_first_name=?,english_nickname=?,gender=?,
+           date_of_birth=?,current_year_level=?,application_stream=?,higher_education_course_type=?,higher_education_package_combination=?,parent_requested_pathway=?,preferred_intake_year=?,preferred_intake_term=?,
+           applying_year_level=?,preferred_cities_json=?,visa_status=?,previous_name=?,home_address=?,
+           home_postcode=?,australia_address=?,australia_postcode=?,home_phone=?,mobile_phone=?,
+           student_email=?,general_notes=?,updated_at=?,updated_by=?,form_data_json=? WHERE student_id=?""",
+        (
+            data_for_storage["passport_last_name"], data_for_storage["passport_first_name"],
+            data_for_storage.get("english_nickname"), data_for_storage.get("gender"),
+            data_for_storage.get("date_of_birth"), data_for_storage.get("current_year_level"),
+            data_for_storage.get("application_stream"), data_for_storage.get("higher_education_course_type"),
+            data_for_storage.get("higher_education_package_combination"), data_for_storage.get("parent_requested_pathway"),
+            data_for_storage.get("preferred_intake_year"), data_for_storage.get("preferred_intake_term"),
+            data_for_storage.get("applying_year_level"), json.dumps(data_for_storage.get("preferred_cities", []), ensure_ascii=False),
+            data_for_storage.get("visa_status"), data_for_storage.get("previous_name"), data_for_storage.get("home_address"),
+            data_for_storage.get("home_postcode"), data_for_storage.get("australia_address"), data_for_storage.get("australia_postcode"),
+            data_for_storage.get("home_phone"), data_for_storage.get("mobile_phone"), data_for_storage.get("student_email"),
+            data_for_storage.get("general_notes"), changed_at, actor_id, json.dumps(data_for_storage, ensure_ascii=False),
+            student["student_id"],
+        ),
+    )
+    replace_student_related_records(conn, student["student_id"], data_for_storage, account_password)
+    for change in changes:
         conn.execute(
-            """UPDATE students SET passport_last_name=?,passport_first_name=?,english_nickname=?,gender=?,
-               date_of_birth=?,current_year_level=?,application_stream=?,higher_education_course_type=?,higher_education_package_combination=?,parent_requested_pathway=?,preferred_intake_year=?,preferred_intake_term=?,
-               applying_year_level=?,preferred_cities_json=?,visa_status=?,previous_name=?,home_address=?,
-               home_postcode=?,australia_address=?,australia_postcode=?,home_phone=?,mobile_phone=?,
-               student_email=?,general_notes=?,updated_at=?,updated_by=?,form_data_json=? WHERE student_id=?""",
+            """INSERT INTO student_change_logs(student_id,changed_by,changed_by_username,section,field_name,old_value,new_value,changed_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
             (
-                data_for_storage["passport_last_name"], data_for_storage["passport_first_name"],
-                data_for_storage.get("english_nickname"), data_for_storage.get("gender"),
-                data_for_storage.get("date_of_birth"), data_for_storage.get("current_year_level"),
-                data_for_storage.get("application_stream"), data_for_storage.get("higher_education_course_type"),
-                data_for_storage.get("higher_education_package_combination"), data_for_storage.get("parent_requested_pathway"),
-                data_for_storage.get("preferred_intake_year"), data_for_storage.get("preferred_intake_term"),
-                data_for_storage.get("applying_year_level"), json.dumps(data_for_storage.get("preferred_cities", []), ensure_ascii=False),
-                data_for_storage.get("visa_status"), data_for_storage.get("previous_name"), data_for_storage.get("home_address"),
-                data_for_storage.get("home_postcode"), data_for_storage.get("australia_address"), data_for_storage.get("australia_postcode"),
-                data_for_storage.get("home_phone"), data_for_storage.get("mobile_phone"), data_for_storage.get("student_email"),
-                data_for_storage.get("general_notes"), changed_at, user["id"], json.dumps(data_for_storage, ensure_ascii=False),
-                student["student_id"],
+                student["student_id"], actor_id, actor_name, change["section"], change["field_name"],
+                change["old_value"], change["new_value"], changed_at,
             ),
         )
-        replace_student_related_records(conn, student["student_id"], data_for_storage, account_password)
-        for change in changes:
-            conn.execute(
-                """INSERT INTO student_change_logs(student_id,changed_by,changed_by_username,section,field_name,old_value,new_value,changed_at)
-                   VALUES(?,?,?,?,?,?,?,?)""",
-                (
-                    student["student_id"], user["id"], user["username"], change["section"], change["field_name"],
-                    change["old_value"], change["new_value"], changed_at,
-                ),
-            )
+    return changes
+
+
+def update_student_profile(student, data, user, ip="", user_agent=""):
+    with db.transaction() as conn:
+        changes = write_student_profile(conn, student, data, user, now_iso())
     if changes:
         db.audit(
             user, "student_profile_updated", "students", student["student_id"],
@@ -8726,9 +8790,14 @@ def workflow_stage_label(stage):
     return dict(WORKFLOW_STAGES).get(stage, stage or "建档")
 
 
-def dashboard_kpi_cards_html(kpis, *, metric_details=False):
+def dashboard_kpi_cards_html(kpis, *, metric_details=False, withdrawn_students=None):
     def detail_link(metric, period, fallback):
         return f"/dashboard/metrics/{metric}/{period}" if metric_details else fallback
+
+    withdrawal_card = ""
+    if withdrawn_students is not None:
+        withdrawal_card = f"""<div class="metric"><span>累计终止申请</span><strong>{withdrawn_students} 人</strong>
+          <div class="metric-links"><a href="/students/withdrawn-applications">查看名单</a></div></div>"""
 
     return f"""
         <section class="metrics dashboard-metrics dashboard-kpi-grid">
@@ -8737,6 +8806,7 @@ def dashboard_kpi_cards_html(kpis, *, metric_details=False):
           <div class="metric"><span>本周下签</span><strong>{kpis.visa_granted_this_week}</strong><small>本周按获签日期去重统计</small><div class="metric-links"><a href="{detail_link("grants", "week", "/students?sort=visa_expiry")}">查看签证学生</a></div></div>
           <div class="metric"><span>本月下签</span><strong>{kpis.visa_granted_this_month}</strong><small>本月按获签日期去重统计</small><div class="metric-links"><a href="{detail_link("grants", "month", "/students?sort=visa_expiry")}">查看签证学生</a></div></div>
           <div class="metric"><span>本周 OFFER</span><strong>{kpis.offers_uploaded_this_week}</strong><small>本周正式 Offer 接收事件（份）</small><div class="metric-links"><a href="{detail_link("offers", "week", "/students?sort=offer_expiry")}">查看 OFFER</a></div></div>
+          {withdrawal_card}
         </section>"""
 
 
@@ -11342,12 +11412,19 @@ def run_reminder_engine():
     generated = int(transfer_reconcile["created"])
     now_value = datetime.now().astimezone()
     missing_due_at = datetime.combine(date.today(), datetime.min.time()).replace(hour=9).astimezone().isoformat()
+    cycle_reminder_filter = (
+        """ AND NOT EXISTS (SELECT 1 FROM application_cycles ended
+            WHERE ended.id={alias}.application_cycle_id AND ended.status='closed'
+              AND ended.outcome='withdrawn')"""
+        if is_workflow_v2_active(db) else ""
+    )
     if bool_setting("reminder_contract_enabled", True):
         days_after = int(db.setting("reminder_contract_days_after_sent", "3") or 3)
         for row in db.all(
             f"""SELECT c.*,s.passport_first_name,s.passport_last_name,s.consultant_id
                 FROM contracts c LEFT JOIN students s ON s.student_id=c.student_id
                 WHERE c.student_id IS NOT NULL AND {CONTRACT_WAITING_SQL}
+                  {cycle_reminder_filter.format(alias="c")}
                   AND NOT EXISTS (
                       SELECT 1 FROM reminders r WHERE r.source_type='contract'
                         AND r.source_record_id=CAST(c.id AS TEXT)
@@ -11376,11 +11453,12 @@ def run_reminder_engine():
     if bool_setting("reminder_offer_enabled", True):
         days_list = setting_int_list("reminder_offer_days_before_expiry", [14, 7, 3, 1])
         for row in db.all(
-            """SELECT o.*,s.passport_first_name,s.passport_last_name,s.consultant_id
+            f"""SELECT o.*,s.passport_first_name,s.passport_last_name,s.consultant_id
                FROM offers o LEFT JOIN students s ON s.student_id=o.student_id
                WHERE COALESCE(lower(o.offer_status),'') NOT IN ('accepted','offeraccepted','signed','rejected','expired')
                  AND COALESCE(o.signed_offer_file_path,'') = ''
                  AND COALESCE(o.accepted_date,'') = ''
+                 {cycle_reminder_filter.format(alias="o")}
                  AND NOT EXISTS (
                     SELECT 1 FROM offers accepted_offer
                     WHERE accepted_offer.student_id=o.student_id
@@ -27595,6 +27673,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/reminders/settings$", self.reminder_settings),
                 (r"^/reminders/(\d+)/(complete|dismiss|snooze|cancel|copy-to-mine|open|defer)$", self.reminder_action),
                 (r"^/students$", self.students),
+                (r"^/students/withdrawn-applications$", self.withdrawn_applications),
+                (r"^/students/(\d+)/applications/(\d+)/withdraw$", self.student_application_withdraw),
                 (r"^/students/external-transfer/new$", self.student_external_intake),
                 (r"^/students/external-progression/new$", self.student_external_intake),
                 (r"^/students/new$", self.student_new),
@@ -31104,10 +31184,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 workflow_stage_aliases=WORKFLOW_STAGE_ALIASES,
                 read_context=read_context,
             )
+            withdrawn_students = (
+                count_withdrawn_students(kpi_connection)
+                if allowed(self.user, "students.view") and is_workflow_v2_active(kpi_connection)
+                else None
+            )
         finally:
             db._release_connection(kpi_connection)
         kpi_cards_html = dashboard_kpi_cards_html(
-            dashboard_kpis, metric_details=is_workflow_v2_active(db)
+            dashboard_kpis, metric_details=is_workflow_v2_active(db),
+            withdrawn_students=withdrawn_students,
         )
         stage_connection = db.connect()
         try:
@@ -54501,6 +54587,126 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         </div>"""
         self.send_html(page("提醒规则设置", body, self.user, self.csrf, "reminders", nas.status()))
 
+    def student_application_withdraw(self, method, student_id, cycle_id):
+        if method not in {"GET", "POST"}:
+            return self.error_page("操作方式无效。", HTTPStatus.METHOD_NOT_ALLOWED)
+        if not self.require("students.edit"):
+            return
+        student = db.one(
+            "SELECT * FROM students WHERE student_id=? AND deleted_at IS NULL",
+            (student_id,),
+        )
+        if student is None or not can_edit_student_profile(self.user):
+            return self.error_page("无法操作此学生的申请。", HTTPStatus.FORBIDDEN)
+        if self.user["role_name"] not in {"Admin", "Manager"} and student["consultant_id"] != self.user["id"]:
+            return self.error_page("只有负责顾问、经理或管理员可以终止申请。", HTTPStatus.FORBIDDEN)
+        if not is_workflow_v2_active(db):
+            return self.error_page("申请周期功能尚未启用。", HTTPStatus.CONFLICT)
+        cycle_id = int(cycle_id)
+        href = f"/students/{quote(student_id)}?application_cycle_id={cycle_id}"
+        cycle = db.one(
+            """SELECT cycle_type,status,source_student_case_id FROM application_cycles
+               WHERE id=? AND student_id=?""",
+            (cycle_id, student_id),
+        )
+        if not cycle or cycle["cycle_type"] not in {"initial", "progression", "transfer"}:
+            return self.error_page("未找到可终止的本轮申请。", HTTPStatus.NOT_FOUND)
+        try:
+            if method == "POST":
+                reason = form_text_value(self.form, "reason").strip()
+                if not reason or len(reason) > 1000:
+                    raise ApplicationWithdrawalConflict("请填写终止原因，最多 1000 字。")
+                if cycle["cycle_type"] == "transfer":
+                    connection = db.connect()
+                    try:
+                        projection = load_student_workflow_projection_map(
+                            connection, (student_id,), cycle_id=cycle_id
+                        ).get(student_id)
+                    finally:
+                        db._release_connection(connection)
+                    TransferCaseService(db.path).cancel_transfer_case(
+                        case_id=cycle["source_student_case_id"], actor_user_id=self.user["id"],
+                        reason=reason, idempotency_key=f"withdrawal:{cycle_id}",
+                        withdrawal=(cycle_id, self.user["username"],
+                                    projection.stage_label if projection else "阶段未记录"),
+                    )
+                    return self.flash_redirect(href, "本轮申请已终止。")
+                with db.transaction() as connection:
+                    projection = load_student_workflow_projection_map(
+                        connection, (student_id,), cycle_id=cycle_id
+                    ).get(student_id)
+                    withdraw_application(
+                        connection, student_id=student_id, cycle_id=cycle_id,
+                        actor_id=self.user["id"], actor_name=self.user["username"],
+                        reason=reason,
+                        stage=projection.stage_label if projection else "阶段未记录",
+                        timestamp=now_iso(),
+                    )
+                return self.flash_redirect(href, "本轮申请已终止。")
+            connection = db.connect()
+            try:
+                projection = load_student_workflow_projection_map(
+                    connection, (student_id,), cycle_id=cycle_id
+                ).get(student_id)
+            finally:
+                db._release_connection(connection)
+            if (
+                projection is None or projection.cycle_id != cycle_id
+                or cycle["status"] != "active"
+            ):
+                raise ApplicationWithdrawalConflict("这轮申请目前无法终止。")
+        except ApplicationWithdrawalConflict as error:
+            return self.error_page(str(error), HTTPStatus.CONFLICT)
+        except (StudentLifecycleError, TransferCaseError, CycleConflictError):
+            return self.error_page("本轮申请目前无法终止，请刷新页面。", HTTPStatus.CONFLICT)
+        body = f"""<section class="panel">
+          <h2>终止本轮申请</h2>
+          <p>{esc(student_display_name(student))} · {esc(projection.stage_label)}</p>
+          <p>系统会保留已签合同和历史资料。若资料已经正式递交，请另行联系学校或相关机构办理撤回。</p>
+          <form method="post">
+            <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+            <label>终止原因<textarea name="reason" maxlength="1000" required></textarea></label>
+            <div class="row-actions"><button class="danger" type="submit">确认终止</button>
+              <a class="secondary button-link" href="{esc(href)}">返回申请</a></div>
+          </form></section>"""
+        return self.send_html(page("终止本轮申请", body, self.user, self.csrf, "students", nas.status()))
+
+    def withdrawn_applications(self, method):
+        if method != "GET":
+            return self.error_page("只支持查看。", HTTPStatus.METHOD_NOT_ALLOWED)
+        if not self.require("students.view"):
+            return
+        connection = db.connect()
+        try:
+            records = (
+                list_withdrawn_applications(connection)
+                if is_workflow_v2_active(connection)
+                else []
+            )
+        finally:
+            db._release_connection(connection)
+        rows = []
+        for record in records:
+            student_id = str(record["student_id"])
+            name = student_display_name(record)
+            href = f'/students/{quote(student_id)}?application_cycle_id={record["cycle_id"]}'
+            rows.append(f"""<tr>
+                <td>{esc(student_id)}</td><td><a href="{esc(href)}">{esc(name)}</a></td>
+                <td>{esc(record["sequence_no"])}</td><td>{esc(record["stage"])}</td>
+                <td>{esc(display_datetime(record["closed_at"]))}</td>
+                <td>{esc(record["reason"])}</td><td>{esc(record["operator"])}</td>
+              </tr>""")
+        rows_html = "".join(rows) or '<tr><td colspan="7" class="empty">暂无已终止的申请</td></tr>'
+        count = len({record["student_id"] for record in records})
+        body = f"""<section class="panel">
+          <div class="panel-head"><div><h2>已终止申请</h2><p>累计 {count} 名学生</p></div>
+            <a class="secondary button-link" href="/">返回首页</a></div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>学生号</th><th>学生</th><th>申请轮次</th><th>终止前阶段</th>
+              <th>终止时间</th><th>原因</th><th>操作人</th></tr></thead>
+            <tbody>{rows_html}</tbody></table></div></section>"""
+        return self.send_html(page("已终止申请", body, self.user, self.csrf, "students", nas.status()))
+
     def students(self, method):
         if not self.require("students.view"):
             return
@@ -59904,6 +60110,40 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if can_delete_student_record(self.user) else ""
         )
         current_status_text = student_stage_display_label(card_summary.stage_label)
+        withdrawal_button = ""
+        withdrawal_projection = (workflow_projection_map or {}).get(str(student_id))
+        can_manage_withdrawal = (
+            allowed(self.user, "students.edit")
+            and can_edit_student_profile(self.user)
+            and (
+                self.user["role_name"] in {"Admin", "Manager"}
+                or student["consultant_id"] == self.user["id"]
+            )
+        )
+        if (
+            can_manage_withdrawal and withdrawal_projection is not None
+            and withdrawal_projection.cycle_id is not None
+        ):
+            withdrawal_cycle_id = withdrawal_projection.cycle_id
+            if (
+                withdrawal_projection.state == "active"
+                and withdrawal_projection.cycle_type in {"initial", "progression", "transfer"}
+            ):
+                withdrawal_url = f"/students/{quote(str(student_id))}/applications/{withdrawal_cycle_id}/withdraw"
+                withdrawal_button = f'<a class="danger button-link" href="{esc(withdrawal_url)}">终止本轮申请</a>'
+            elif withdrawal_projection.state == "closed" and withdrawal_projection.outcome == "withdrawn":
+                connection = db.connect()
+                try:
+                    can_reapply = can_start_reapplication(connection, str(student_id), withdrawal_cycle_id)
+                finally:
+                    db._release_connection(connection)
+                if can_reapply:
+                    current_status_text = "申请已终止"
+                    withdrawal_button = f"""<form method="post" action="/students/{esc(student_id)}/parent-link">
+                      <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                      <input type="hidden" name="intake_type" value="ordinary_new_application">
+                      <button class="secondary" type="submit">重新生成家长表单</button>
+                    </form>"""
         school_names_html = ""
         if card_summary.schools.is_final:
             final_school_name = card_summary.schools.final_school_name or (
@@ -60028,7 +60268,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <div class="student-summary-main">
             <a class="back-link" href="/students">← 学生列表</a>
             <div class="student-title"><div class="avatar">{esc(student["passport_first_name"][:1])}</div><div><h2>{esc(student["passport_first_name"])} {esc(student["passport_last_name"])}</h2><p>{esc(student_id)} · {esc(current_status_text)}</p></div></div>
-            <div class="alerts">{alert_html}</div><div class="student-actions" id="workflow-progress">{school_plan_button}{primary_action_grid}{edit_profile_button}{delete_student_button}{business_operations}</div>
+            <div class="alerts">{alert_html}</div><div class="student-actions" id="workflow-progress">{school_plan_button}{primary_action_grid}{edit_profile_button}{withdrawal_button}{delete_student_button}{business_operations}</div>
           </div>
           <div class="student-summary-facts">
             {transfer_summary_fact_html}
@@ -78587,7 +78827,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 422,
             )
         try:
-            student_id = create_student_from_form(data, token_row)
+            student_id = submit_parent_reapplication(data, token_row, draft.revision)
+            if student_id is None:
+                student_id = create_student_from_form(data, token_row)
+        except (ApplicationWithdrawalConflict, CycleConflictError):
+            message = "申请或草稿状态已变更，请重新打开链接后再递交，或联系顾问。"
+            if wants_json:
+                return self.parent_form_submit_json_response(False, HTTPStatus.CONFLICT, status="conflict", message=message)
+            return self.parent_result_page("申请状态已变更", message, HTTPStatus.CONFLICT)
         except ParentFormSubmitted:
             if wants_json:
                 return self.parent_form_submit_json_response(

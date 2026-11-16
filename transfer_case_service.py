@@ -6450,6 +6450,7 @@ class TransferCaseService:
         actor_user_id: int,
         reason: str | None,
         idempotency_key: str | None,
+        withdrawal: tuple[int, str, str] | None = None,
     ) -> TransferCaseDTO:
         errors = {
             "pause": TransferPauseNotAllowedError,
@@ -6471,6 +6472,8 @@ class TransferCaseService:
             "actor_user_id": int(actor_user_id),
             "reason": normalized_reason,
         }
+        if withdrawal is not None:
+            payload["withdrawal_cycle_id"] = withdrawal[0]
         payload_hash = self._payload_hash(payload)
         timestamp = self.clock()
         try:
@@ -6608,7 +6611,7 @@ class TransferCaseService:
                     resume_state = None
 
                 if action == "cancel":
-                    cancel_lifecycle_command(
+                    cancelled_lifecycle = cancel_lifecycle_command(
                         connection,
                         ApplicationCycleGateway(),
                         case_id=case_id,
@@ -6616,7 +6619,19 @@ class TransferCaseService:
                         reason=normalized_reason,
                         idempotency_key=key,
                         occurred_at=timestamp,
+                        cycle_outcome="withdrawn" if withdrawal else "cancelled",
                     )
+                    if withdrawal is not None:
+                        from application_withdrawal import record_completed_withdrawal
+
+                        cycle_id, actor_name, stage = withdrawal
+                        if cancelled_lifecycle.cycle_id != cycle_id:
+                            raise error_type()
+                        record_completed_withdrawal(
+                            connection, student_id=case.student_id, cycle_id=cycle_id,
+                            actor_id=actor_user_id, actor_name=actor_name,
+                            reason=normalized_reason, stage=stage, timestamp=timestamp,
+                        )
                     case_updated = True
                 else:
                     case_updated = common_repository.update_case_status(
@@ -6708,6 +6723,7 @@ class TransferCaseService:
         actor_user_id: int,
         reason: str,
         idempotency_key: str,
+        withdrawal: tuple[int, str, str] | None = None,
     ) -> TransferCaseDTO:
         return self._status_lifecycle(
             "cancel",
@@ -6715,6 +6731,7 @@ class TransferCaseService:
             actor_user_id=actor_user_id,
             reason=reason,
             idempotency_key=idempotency_key,
+            withdrawal=withdrawal,
         )
 
     def fail_transfer_case(

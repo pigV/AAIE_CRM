@@ -61,6 +61,7 @@ class WorkflowFacts:
     contract_execution_pending: bool = False
     final_school_coe_confirmed: bool | None = None
     final_school_coe_issue: str | None = None
+    requires_fresh_parent_form: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,8 @@ def resolve_workflow_stage(facts: WorkflowFacts) -> WorkflowStageResult:
             outcome=outcome,
             issue_codes=issues,
         )
+    if facts.requires_fresh_parent_form and not facts.parent_form_submitted:
+        return _active_result(facts, 1, "等待家长提交新一轮申请表单", issues)
     if facts.cycle_type == "progression":
         if facts.contract_gate_status == "unclassified":
             return _active_result(

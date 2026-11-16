@@ -493,6 +493,24 @@ def attach_contract(
             raise CycleConflictError("contract application cycle ownership mismatch")
         return cycle
     cycle = get_current_cycle(conn, student)
+    audit_columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_logs)")}
+    if {"id", "record_id", "student_id", "module_name", "action_type", "status"} <= audit_columns:
+        from application_withdrawal import can_start_reapplication, reapplication_cycle
+
+        if cycle is None:
+            latest = conn.execute(
+                "SELECT id FROM application_cycles WHERE student_id=? ORDER BY sequence_no DESC LIMIT 1",
+                (student,),
+            ).fetchone()
+            if latest and can_start_reapplication(conn, student, latest[0]):
+                raise CycleConflictError("请先重新发送家长表单，并等待家长提交。")
+        elif cycle.parent_form_token and reapplication_cycle(conn, cycle.parent_form_token, student):
+            form = conn.execute(
+                "SELECT submitted_at FROM parent_form_tokens WHERE token=?",
+                (cycle.parent_form_token,),
+            ).fetchone()
+            if not form or not form[0]:
+                raise CycleConflictError("请等待家长提交新一轮申请表单，再建立合同。")
     if cycle is None:
         cycle = ensure_active_application_cycle(
             conn, student, "initial", timestamp, actor_user_id, actor_name=actor_name

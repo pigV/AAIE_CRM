@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from application_withdrawal import count_withdrawn_students, list_withdrawn_applications, withdraw_application
 from student_case_feature_flags import StudentCaseFeatureFlags
 from progression_case_service import ProgressionCaseService
 from student_lifecycle.enrolment import SchoolEnrolmentService
@@ -70,6 +71,57 @@ class StudentLifecycleCaseIntegrationTests(unittest.TestCase):
             for item in self.lifecycle.list_student_lifecycles("student-1")
             if item.case_id == case_id
         )
+
+    def test_transfer_and_progression_withdrawals_share_student_count(self):
+        # The lifecycle fixture stubs base application tables prior to migration.
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            missing_base_columns = {
+                "students": ("passport_first_name", "passport_last_name", "deleted_at"),
+                "contract_signing_links": ("status", "signed_at", "invalidated_at",
+                                           "invalidated_reason", "updated_at"),
+                "school_plan_report_links": ("status", "confirmed_at", "invalidated_at",
+                                             "invalidated_reason"),
+                "reminders": ("student_id", "updated_by", "updated_at"),
+            }
+            for table, columns in missing_base_columns.items():
+                existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+                for column in columns:
+                    if column not in existing:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS audit_logs (
+                   id INTEGER PRIMARY KEY, user_id INTEGER, username TEXT, action_type TEXT,
+                   module_name TEXT, module_key TEXT, student_id TEXT, record_id TEXT,
+                   status TEXT, new_value TEXT, created_at TEXT)"""
+            )
+            connection.commit()
+        transfer = activate_transfer(self.service, self.create_transfer_draft())
+        transfer_cycle = self.lifecycle_result(transfer.case_id).cycle_id
+        self.service.cancel_transfer_case(
+            transfer.case_id, actor_user_id=1, reason="Family plans",
+            idempotency_key=f"withdrawal:{transfer_cycle}",
+            withdrawal=(transfer_cycle, "admin", "转学申请"),
+        )
+        progression = activate_progression(self.progression_service, self.create_progression_draft())
+        progression_cycle = self.lifecycle_result(progression.case_id).cycle_id
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            with connection:
+                withdraw_application(
+                    connection, student_id="student-1", cycle_id=progression_cycle,
+                    actor_id=1, actor_name="admin", reason="Family plans",
+                    stage="升学申请", timestamp="2026-11-16T10:00:00+11:00",
+                )
+            self.assertEqual(count_withdrawn_students(connection), 1)
+            self.assertEqual(
+                {row["cycle_id"] for row in list_withdrawn_applications(connection)},
+                {transfer_cycle, progression_cycle},
+            )
+        for case_id in (transfer.case_id, progression.case_id):
+            result = self.lifecycle_result(case_id)
+            self.assertEqual((result.case_status, result.active_slot, result.cycle_status, result.cycle_outcome),
+                             ("cancelled", 0, "closed", "withdrawn"))
 
     def test_transfer_create_has_active_cycle_and_activation_is_compatible(self):
         created = self.create_transfer_draft()
