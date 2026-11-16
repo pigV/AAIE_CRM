@@ -65,7 +65,7 @@
 }
 .revenue-school-billing-editor[open] > summary { margin-bottom: 12px; }
 
-.revenue-metrics { display: grid; gap: 12px; grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.revenue-metrics { display: grid; gap: 12px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .revenue-metric { background: var(--revenue-card); border: 1px solid var(--revenue-line); border-radius: 16px; box-shadow: 0 8px 24px rgb(32 42 60 / 5%); display: flex; flex-direction: column; min-height: 132px; min-width: 0; padding: 17px; text-decoration: none; }
 .revenue-metric:hover { border-color: #cbd6ff; box-shadow: 0 12px 28px rgb(49 91 239 / 10%); transform: translateY(-2px); }
 .revenue-metric span { color: var(--revenue-muted); font-size: 12px; font-weight: 650; min-height: 34px; }
@@ -75,19 +75,12 @@
 .revenue-metric--claimable_commission_cents strong { color: var(--revenue-success); }
 .revenue-metric--unmatched_statement_items strong { color: var(--revenue-warning); }
 
-.revenue-workspace-links { display: grid; gap: 10px; grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.revenue-workspace-links { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .revenue-workspace-link { align-items: flex-start; background: var(--revenue-primary-soft); border: 1px solid transparent; border-radius: 12px; display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 13px 14px; text-decoration: none; }
 .revenue-workspace-link strong { color: var(--revenue-text); font-size: 13px; overflow-wrap: anywhere; }
 .revenue-workspace-link span { color: var(--revenue-primary); font-size: 11px; font-weight: 700; }
 .revenue-workspace-link:hover { background: #dfe8ff; border-color: #cbd6ff; }
 
-.revenue-quick-panel { padding-bottom: 18px; padding-top: 18px; }
-.revenue-quick-panel .revenue-panel-heading { margin-bottom: 12px; }
-.revenue-quick-actions { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.revenue-quick-action { background: #f8faff; border: 1px solid var(--revenue-line); border-radius: 12px; display: grid; gap: 5px; min-width: 0; padding: 13px 14px; text-decoration: none; }
-.revenue-quick-action strong { color: var(--revenue-primary); font-size: 13px; }
-.revenue-quick-action span { color: var(--revenue-muted); font-size: 11px; line-height: 1.45; }
-.revenue-quick-action:hover { border-color: #cbd6ff; box-shadow: 0 8px 18px rgb(49 91 239 / 8%); transform: translateY(-1px); }
 
 .revenue-dashboard-grid { display: grid; gap: 16px; grid-template-columns: minmax(0, 1.75fr) minmax(280px, .75fr); }
 .revenue-panel, .revenue-action-panel, .revenue-action-note { background: var(--revenue-card); border: 1px solid var(--revenue-line); border-radius: 16px; box-shadow: 0 8px 24px rgb(32 42 60 / 5%); min-width: 0; padding: 20px; }
@@ -198,7 +191,7 @@ a.revenue-coverage-card:hover { border-color: #cbd6ff; box-shadow: 0 7px 16px rg
 .revenue-evidence-row a { color: var(--revenue-primary); flex: 0 0 auto; font-size: 12px; font-weight: 750; }
 
 @media (max-width: 1220px) {
-  .revenue-metrics, .revenue-workspace-links, .revenue-quick-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .revenue-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .revenue-coverage-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .revenue-search-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -218,12 +211,9 @@ a.revenue-coverage-card:hover { border-color: #cbd6ff; box-shadow: 0 7px 16px rg
   .revenue-dashboard-heading p, .revenue-page-heading p { font-size: 13px; line-height: 1.5; }
   .revenue-primary-link, .revenue-back-link { justify-self: start; }
   .revenue-dashboard-actions { justify-content: flex-start; }
-  .revenue-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .revenue-metric { min-height: 116px; padding: 14px; }
   .revenue-metric span { min-height: 31px; }
   .revenue-metric strong { font-size: 21px; }
-  .revenue-workspace-links { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .revenue-quick-actions { grid-template-columns: 1fr; }
   .revenue-coverage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .revenue-search-form { grid-template-columns: 1fr; }
   .revenue-panel, .revenue-action-panel, .revenue-action-note { border-radius: 14px; padding: 16px; }

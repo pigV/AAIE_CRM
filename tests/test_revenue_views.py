@@ -39,7 +39,7 @@ class RevenueViewTests(RevenueDatabaseFixture, unittest.TestCase):
         self.assertIn("$3,300.00", html)
         self.assertIn("$1,100.00", html)
         for href in (
-            "/revenue/cases", "/revenue/billing", "/revenue/direct-commission",
+            "/revenue/cases", "/revenue/billing?filter=outstanding", "/revenue/direct-commission?filter=forecast",
             "/revenue/master-agent", "/revenue/contracts", "/revenue/reconciliation",
         ):
             self.assertIn(f'href="{href}"', html)
@@ -58,7 +58,7 @@ class RevenueViewTests(RevenueDatabaseFixture, unittest.TestCase):
         self.assertNotIn("2026-08-30T13:29:22+00:00", html)
         self.assertIn("系统设置", html)
         self.assertIn("收费规则与数据接入检查", html)
-        self.assertIn("快捷操作", html)
+        self.assertNotIn("快捷操作", html)
         self.assertIn("业务类型", html)
         self.assertIn("最后更新", html)
         self.assertIn("K–12 学校教育", html)
@@ -73,12 +73,28 @@ class RevenueViewTests(RevenueDatabaseFixture, unittest.TestCase):
         self.assertNotIn('method="post"', html.lower())
         self.assertNotIn("登记佣金合同", html)
         self.assertIn("收入与佣金", html)
-        self.assertIn("快捷操作", html)
-        self.assertIn("查看待收客户费用", html)
+        self.assertNotIn("快捷操作", html)
+        self.assertNotIn("查看待收客户费用", html)
         self.assertNotIn("记录客户收款", html)
         self.assertIn("Jimmy Zhang", html)
         self.assertIn("20260139", html)
         self.assertIn("30/08/2026 23:29", html)
+
+    def test_dashboard_omits_only_the_selected_metrics_and_workspace_links(self):
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                markup = render_revenue_workspace(self._dashboard_data(), csrf="csrf", mobile=mobile)
+                self.assertEqual(
+                    re.findall(r'class="revenue-metric revenue-metric--([^"]+)"', markup),
+                    ["open_cases", "client_receivable_cents", "commission_forecast_cents", "claimable_commission_cents"],
+                )
+                self.assertEqual(
+                    re.findall(r'class="revenue-workspace-link" href="([^"]+)"', markup),
+                    ["/revenue/master-agent", "/revenue/contracts"],
+                )
+                self.assertNotIn("revenue-quick-panel", markup)
+                self.assertIn('href="/revenue/cases">查看收费与佣金档案</a>', markup)
+                self.assertIn("待办事项", markup)
 
     def test_mobile_workspace_page_server_side_omits_desktop_only_actions(self):
         from revenue.views import render_revenue_workspace_page

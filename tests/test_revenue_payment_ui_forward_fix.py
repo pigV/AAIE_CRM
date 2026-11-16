@@ -34,7 +34,8 @@ class RevenuePaymentUIForwardFixTests(RevenueDatabaseFixture, unittest.TestCase)
         with self.connect() as connection:
             html = render_revenue_workspace(RevenueReadModels(connection).dashboard(), "csrf")
 
-        self.assertIn("查看待收客户费用", html)
+        self.assertIn('href="/revenue/billing?filter=outstanding"', html)
+        self.assertIn("客户应收", html)
         self.assertNotIn("尚未结清的客户发票", html)
         self.assertNotIn("签发客户发票", html)
 
