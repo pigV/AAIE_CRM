@@ -1562,7 +1562,38 @@ def render_revenue_initialization_page(data: dict) -> str:
     </main>"""
 
 
-def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str:
+_RECENT_CASE_SORTS = {
+    "unpaid": "未付款优先",
+    "paid": "已付款优先",
+    "recent": "最近更新",
+}
+
+
+def _recent_case_payment_rank(row):
+    fees = [row.get(key) or {} for key in ("client_service_fee", "visa_service_fee")]
+    has_payment = any(
+        fee.get("received_cents", 0) > 0 or fee.get("legacy_gross_received_cents", 0) > 0
+        for fee in fees
+    )
+    has_balance = any(fee.get("outstanding_cents", 0) > 0 for fee in fees)
+    if has_balance:
+        return 1 if has_payment else 0
+    return 2 if has_payment else 3
+
+
+def _order_recent_revenue_cases(rows, sort):
+    # The read model has already selected and ordered the ten newest records.
+    # Stable sorting preserves activity order within each payment group.
+    if sort == "recent":
+        return rows
+    if sort == "paid":
+        return sorted(rows, key=lambda row: (2, 1, 0, 3)[_recent_case_payment_rank(row)])
+    return sorted(rows, key=_recent_case_payment_rank)
+
+
+def render_revenue_workspace(
+    data: dict, csrf: str, mobile: bool = False, *, recent_sort: str = "unpaid",
+) -> str:
     def intake_text(row):
         source = row.get("intake_source")
         return escape(f'{row["intake"]}（{source}）' if source else str(row["intake"]))
@@ -1651,8 +1682,18 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
         return ' · <small>另有收费项目，见档案</small>' if row.get("other_fee_count") else ""
 
     variant = " revenue-workspace--mobile" if mobile else ""
-    recent = data.get("recent_cases") or []
+    recent_sort = recent_sort if recent_sort in _RECENT_CASE_SORTS else "unpaid"
+    recent = _order_recent_revenue_cases(data.get("recent_cases") or [], recent_sort)
     cases_href = str(data.get("cases_href") or "/revenue/cases")
+    home_href = revenue_home_url("mobile" if mobile else "desktop")
+    sort_options = ""
+    for key, label in _RECENT_CASE_SORTS.items():
+        current = ' aria-current="true"' if key == recent_sort else ""
+        sort_options += f'<a href="{home_href}?sort={key}#revenue-recent-students"{current}>{label}</a>'
+    sort_control = (
+        f'<details class="revenue-recent-sort"><summary>排序 · {_RECENT_CASE_SORTS[recent_sort]}</summary>'
+        f'<nav aria-label="最近记录排序">{sort_options}</nav></details>'
+    )
     metrics = "".join(
         f'<a class="revenue-metric revenue-metric--{escape(str(item["key"]), quote=True)}" '
         f'href="{escape(str(item["href"]), quote=True)}">'
@@ -1662,11 +1703,6 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
         for item in data.get("metrics") or []
         if item["key"] not in {"unmatched_statement_items", "open_exceptions"}
     )
-    pending = "".join(
-        f'<a class="revenue-pending-item" href="{escape(str(item["href"]), quote=True)}">'
-        f'<span>{escape(str(item["label"]))}</span><strong>{int(item["count"])}</strong></a>'
-        for item in data.get("pending_items") or []
-    ) or '<p class="revenue-empty">当前没有待办事项。</p>'
     workspace_links = "".join(
         f'<a class="revenue-workspace-link" href="{escape(str(item["href"]), quote=True)}">'
         f'<strong>{escape(str(item["label"]))}</strong><span>进入工作区</span></a>'
@@ -1732,10 +1768,16 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
       </header>
       <section class="revenue-metrics" aria-label="收入与佣金摘要">{metrics}</section>
       <nav class="revenue-workspace-links" aria-label="收入与佣金工作区">{workspace_links}</nav>
-      <section class="revenue-dashboard-grid">
-        <article class="revenue-panel revenue-recent-panel"><div class="revenue-panel-heading"><div><span class="revenue-eyebrow">实时数据</span><h2>最近有收费/佣金记录的学生</h2><p>仅显示近期已有收费或佣金档案的学生。查看完整学生名单，请点击“查看全部学生”。</p></div><a href="{escape(cases_href, quote=True)}">查看全部学生</a></div>{recent_content}</article>
-        <aside class="revenue-panel revenue-pending-panel"><div class="revenue-panel-heading"><div><span class="revenue-eyebrow">需要关注</span><h2>待办事项</h2></div><a href="/revenue/reconciliation">进入对账</a></div><div class="revenue-pending-list">{pending}</div></aside>
-      </section>
+      <article class="revenue-panel revenue-recent-panel" id="revenue-recent-students">
+        <div class="revenue-panel-heading">
+          <div><span class="revenue-eyebrow">实时数据</span><h2>最近有收费/佣金记录的学生</h2>
+            <p>显示最近 10 条记录。</p></div>
+          <div class="revenue-recent-controls">{sort_control}
+            <a href="{escape(cases_href, quote=True)}">查看全部学生</a>
+            <a href="/revenue/reconciliation">进入对账</a>
+          </div>
+        </div>{recent_content}
+      </article>
       {system_tools}
       <input type="hidden" name="csrf" value="{escape(str(csrf), quote=True)}">
     </main>"""

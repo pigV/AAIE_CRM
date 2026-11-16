@@ -48,7 +48,6 @@ class RevenueViewTests(RevenueDatabaseFixture, unittest.TestCase):
         self.assertNotIn("onclick=", html)
         self.assertNotIn("data-rate", html)
         self.assertNotIn("eval(", html)
-        self.assertIn("待办事项", html)
         self.assertIn("最近有收费/佣金记录的学生", html)
         self.assertIn("收费与佣金档案", html)
         self.assertNotIn("商业案例", html)
@@ -94,7 +93,10 @@ class RevenueViewTests(RevenueDatabaseFixture, unittest.TestCase):
                 )
                 self.assertNotIn("revenue-quick-panel", markup)
                 self.assertIn('href="/revenue/cases">查看收费与佣金档案</a>', markup)
-                self.assertIn("待办事项", markup)
+                self.assertNotIn("待办事项", markup)
+                self.assertNotIn("revenue-pending-panel", markup)
+                self.assertNotIn("revenue-dashboard-grid", markup)
+                self.assertEqual(1, markup.count('href="/revenue/reconciliation">进入对账</a>'))
 
     def test_home_three_financial_columns_are_plain_in_desktop_and_mobile(self):
         data = self._dashboard_data()
@@ -115,6 +117,49 @@ class RevenueViewTests(RevenueDatabaseFixture, unittest.TestCase):
                     self.assertIn(value, html)
                 self.assertNotIn("档案状态", html)
                 self.assertNotIn("进行中", html)
+
+    def test_home_payment_sorting_preserves_recency_within_groups(self):
+        data = self._dashboard_data()
+        base = data["recent_cases"][0]
+
+        def fee(received, outstanding, **extra):
+            return {"received_cents": received, "outstanding_cents": outstanding, **extra}
+
+        examples = (
+            ("签证套餐无需另收", None, None),
+            ("样本已收清", fee(240000, 0), None),
+            ("样本部分付款", fee(240000, 0), fee(0, 90000)),
+            ("样本较新未付款", fee(0, 240000), None),
+            ("旧发票有实收", fee(0, 240000, legacy_gross_received_cents=50000), None),
+            ("样本较早未付款", None, fee(0, 90000)),
+            ("样本零收费", fee(0, 0), None),
+        )
+        data["recent_cases"] = [
+            dict(base, student_name=name, uid=f"case-{index}",
+                 client_service_fee=client, visa_service_fee=visa)
+            for index, (name, client, visa) in enumerate(examples)
+        ]
+        expected = {
+            "unpaid": (3, 5, 2, 4, 1, 0, 6),
+            "paid": (1, 2, 4, 3, 5, 0, 6),
+            "recent": tuple(range(len(examples))),
+            "invalid": (3, 5, 2, 4, 1, 0, 6),
+        }
+        for mobile in (False, True):
+            path = "/mobile/revenue" if mobile else "/revenue"
+            for sort, order in expected.items():
+                with self.subTest(mobile=mobile, sort=sort):
+                    markup = render_revenue_workspace(data, "csrf", mobile, recent_sort=sort)
+                    self.assertEqual(list(order), sorted(range(len(examples)),
+                                     key=lambda i: markup.index(examples[i][0])))
+                    self.assertIn("<summary>排序", markup)
+                    for option in ("unpaid", "paid", "recent"):
+                        self.assertIn(f'href="{path}?sort={option}#revenue-recent-students"', markup)
+                    active = "unpaid" if sort == "invalid" else sort
+                    self.assertIn(f'?sort={active}#revenue-recent-students" aria-current="true"', markup)
+        default = render_revenue_workspace(data, "csrf")
+        self.assertLess(default.index("样本较新未付款"), default.index("样本已收清"))
+        self.assertEqual([row["student_name"] for row in data["recent_cases"]], [r[0] for r in examples])
 
     def test_dashboard_renders_additional_school_claim_workspace_without_key(self):
         data = self._dashboard_data()

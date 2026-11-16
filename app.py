@@ -28757,7 +28757,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             data["workspace_links"] = [*data["workspace_links"], {
                 "label": "学校佣金申领清单", "href": "/revenue/school-commission-candidates",
             }]
-        body = render_revenue_workspace(data, csrf=self.csrf, mobile=False)
+        body = render_revenue_workspace(
+            data, csrf=self.csrf, recent_sort=(self.query.get("sort") or [""])[0],
+        )
         return self.send_html(
             page("收入与佣金", body, self.user, self.csrf,
                  REVENUE_MODULE_KEY, nas.status())
@@ -31040,6 +31042,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             self._revenue_dashboard_data(case_surface="mobile"),
             csrf=self.csrf,
             mobile=True,
+            recent_sort=(self.query.get("sort") or [""])[0],
         )
         return self.send_html(self.mobile_shell("收入与佣金", body, ""))
 
