@@ -28876,8 +28876,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("州／领地教育局合同入口尚未开放。", HTTPStatus.FORBIDDEN)
         return self._revenue_school_contract_page(intake, upload=True)
 
+    def _school_commission_formal_overview(self, connection, school_id):
+        from revenue.school_claim_candidates import SchoolClaimCandidates
+
+        if not can_perform_revenue_action(self.user, "school-claim-candidates"):
+            return None
+        scope = school_commission_authority(self.user, "contracts", school_id=school_id)
+        if not scope or not (scope.simulation or scope.toorak_claim_drafts):
+            return None
+        actions = RevenueUIActions(
+            connection, None, int(self.user["id"]), self.user["role_name"],
+            legacy_document_root=Path(db.path).parent / "revenue_documents", school_pilot=scope,
+        )
+        return SchoolClaimCandidates(actions._toorak_claims(), toorak_draft_release=scope.toorak_claim_drafts).list()
+
     def _revenue_school_contract_page(self, intake, *, upload, method="GET"):
         from html import escape
+        from revenue.school_commission_overview import SchoolCommissionOverview
+        from revenue.school_contract_pages import render_school_commission_students
         from revenue.views import render_contract_analysis
 
         pilot = school_commission_authority(self.user, "contracts")
@@ -28957,6 +28973,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 if billing_step and method == "POST" and any(key in self.form for key in TARGET_FIELDS.values()):
                     return self.error_page("请选择已确认的学校或教育局。", HTTPStatus.BAD_REQUEST)
                 title = CONFIRMED_TITLE
+                student_view = (self.query.get("students") or [""])[0]
+                overview = None
+                if student_view or target is None:
+                    overview = SchoolCommissionOverview(
+                        connection, intake, int(self.user["id"]),
+                        can_view_claims=can_perform_revenue_action(self.user, "contracts/school/register"),
+                        formal_candidates=lambda school_id: self._school_commission_formal_overview(connection, school_id),
+                    )
+                if student_view:
+                    if method != "GET" or billing_step or target is None or student_view not in {"all", "claimable"}:
+                        return self.error_page("请选择学校和学生明细类型。", HTTPStatus.BAD_REQUEST)
+                    summary = overview.read(target, schools[target], view=student_view)
+                    body = render_school_commission_students(target, schools[target]["name"], summary, student_view)
+                    return self.send_html(
+                        page(title, body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                        headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop",
+                    )
+                summaries = {key: overview.read(key, school) for key, school in schools.items()} if overview else None
                 authority_finance = ""
                 if target and target[0] == "authority":
                     from revenue.authority_formal import authority_payer, authority_schema_ready
@@ -28997,7 +29031,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 body = render_confirmed_contracts(schools, target, authority_finance=authority_finance,
                                                   claim_href=claim_href, reviewed_nsw=reviewed_nsw,
                                                   can_edit=can_edit, billing_href=billing_url(target) if target and can_edit else "",
-                                                  billing_settings=billing_settings)
+                                                  billing_settings=billing_settings, summaries=summaries)
         finally:
             db._release_connection(connection)
         message, message_kind = self.message()

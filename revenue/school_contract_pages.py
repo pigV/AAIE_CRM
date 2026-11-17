@@ -17,7 +17,7 @@ from revenue.school_contract_review import review_state
 from revenue.school_invoice_release import REHEARSAL_RECIPIENT
 from revenue.school_invoice_reminders import EMAIL
 from revenue.state_school_commission import DISCARDED_CONTRACT_UPLOAD
-from revenue.views import _hidden_security
+from revenue.views import _aud_money, _hidden_security
 from ui import ASSET_VERSION
 
 CONFIRMED_ROOT = "/revenue/contracts"
@@ -303,25 +303,77 @@ def _billing_recipient_label(settings):
     return f"{recipient} · {status}"
 
 
-def _contract_list_item(href, name, category, state, *, pending=False):
+def _contract_list_item(href, name, category, state, *, pending=False, summary=None):
     tone = "pending" if pending else "success"
     accessible_label = f"{name} · {state} · {category}"
+    statistics = _school_student_statistics(href, summary) if summary is not None else ""
+    item_class = ' class="revenue-contract-item-with-statistics"' if statistics else ""
     return (
-        f'<li><a href="{escape(href, quote=True)}" aria-label="{escape(accessible_label, quote=True)}">'
+        f'<li{item_class}><a href="{escape(href, quote=True)}" aria-label="{escape(accessible_label, quote=True)}">'
         f'<span class="revenue-contract-item-name">{escape(name)}</span>'
         f'<span class="revenue-contract-item-category">{escape(category)}</span>'
         f'<span class="revenue-status-pill revenue-status-pill--{tone}">{escape(state)}</span>'
-        '</a></li>'
+        f'</a>{statistics}</li>'
     )
+
+
+def _school_student_statistics(href, summary):
+    count = summary["claimable"]
+    claimable = (
+        f'<a href="{escape(href + "&students=claimable", quote=True)}">'
+        f'可申领学生 <strong>{count}</strong> 人</a>'
+        if count is not None else f'<span>可申领 · {escape(summary["status"])}</span>'
+    )
+    return (
+        '<div class="revenue-school-student-statistics">'
+        f'<a href="{escape(href + "&students=all", quote=True)}">'
+        f'总学生 <strong>{summary["students"]}</strong> 人</a>{claimable}</div>'
+    )
+
+
+def render_school_commission_students(target, name, summary, view):
+    title = "可申领学生" if view == "claimable" else "总学生"
+    href = confirmed_url(target)
+    cards = []
+    for row in summary["rows"]:
+        projects = "".join(
+            f'<li>{escape(project.get("school_name") or project.get("course") or "")}'
+            f' {escape(FEE_PERIODS.get(period, period or "入学项目"))} · {_aud_money(project["gross_cents"])}</li>'
+            for project in row["projects"] for period in (project.get("academic_period"),)
+        )
+        if projects:
+            details = f'<strong>可申领 · {len(row["projects"])} 个项目</strong><ul>{projects}</ul>'
+        else:
+            reason = summary["status"] or "；".join(row["reasons"]) or "暂无可申领项目"
+            details = f'<span>{escape(reason)}</span>'
+        cards.append(
+            f'<li><a href="{escape(row["href"], quote=True)}">{escape(row["name"])}</a>'
+            f' <span>{escape(row["id"])}</span>'
+            f'<dl><div><dt>学校关联</dt><dd>{escape(row["sources"])}</dd></div>'
+            f'<div><dt>入学期</dt><dd>{escape(row["intake"] or "—")}</dd></div></dl>'
+            f'{details}</li>'
+        )
+    results = (
+        f'<ul class="revenue-school-student-results" role="list">{"".join(cards)}</ul>' if cards else
+        f'<p class="revenue-empty">{escape(summary["status"] if view == "claimable" and summary["status"] else "暂无符合条件的学生。")}</p>'
+    )
+    body = (
+        f'<section class="revenue-panel" aria-label="{title}明细"><h2>{escape(name)}</h2>'
+        f'{_school_student_statistics(href, summary)}{results}</section>'
+    )
+    return _page(title, body, back_href=CONFIRMED_ROOT, back_label=f"返回{CONFIRMED_TITLE}")
 
 
 def render_confirmed_contracts(schools, target=None, *, mail_form="", authority_finance="", claim_href="",
                                title=CONFIRMED_TITLE, reviewed_nsw=(), can_edit=False, billing_href="",
-                               billing_settings=None):
+                               billing_settings=None, summaries=None):
     if target is None:
         ordered = sorted(schools.items(), key=lambda pair: (pair[1]["name"].casefold(), pair[0]))
         entries = [
-            _contract_list_item(confirmed_url(key), school["name"], TARGET_LABELS[key[0]], "已确认")
+            _contract_list_item(
+                confirmed_url(key), school["name"], TARGET_LABELS[key[0]], "已确认",
+                summary=(summaries or {}).get(key),
+            )
             for key, school in ordered
         ]
         entries.extend(

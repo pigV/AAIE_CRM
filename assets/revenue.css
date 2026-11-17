@@ -722,7 +722,7 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
   margin: 0;
   padding: 0;
 }
-.revenue-contract-list a {
+.revenue-contract-list > li > a {
   align-items: center;
   border: 1px solid var(--revenue-line);
   border-radius: 12px;
@@ -734,7 +734,7 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
   padding: 10px 14px;
   text-decoration: none;
 }
-.revenue-contract-list a:hover { background: #f4f6fb; border-color: #cbd6ff; }
+.revenue-contract-list > li > a:hover { background: #f4f6fb; border-color: #cbd6ff; }
 .revenue-contract-item-name { color: var(--revenue-primary); font-size: 14px; font-weight: 700; }
 .revenue-contract-item-category { color: #40526b; font-size: 13px; }
 .revenue-contract-list .revenue-status-pill {
@@ -767,6 +767,60 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
 
 @media (max-width: 700px) {
   .revenue-school-contract-page .revenue-dashboard-heading { padding: 14px 16px; }
-  .revenue-contract-list a { grid-template-columns: minmax(0, 1fr) auto; }
+  .revenue-contract-list > li > a { grid-template-columns: minmax(0, 1fr) auto; }
   .revenue-contract-item-name { grid-column: 1 / -1; }
 }
+
+.revenue-school-student-statistics {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 10px 0 14px;
+}
+.revenue-school-student-statistics > :is(a, span) {
+  background: #f4f6fb;
+  border: 1px solid var(--revenue-line);
+  border-radius: 8px;
+  color: #40526b;
+  display: inline-flex;
+  gap: 4px;
+  min-height: 40px;
+  padding: 8px 12px;
+}
+.revenue-school-student-statistics > a { color: var(--revenue-primary); }
+.revenue-school-student-statistics > a:hover { background: var(--revenue-primary-soft); }
+.revenue-contract-item-with-statistics {
+  border: 1px solid var(--revenue-line);
+  border-radius: 12px;
+  min-width: 0;
+}
+.revenue-contract-list > .revenue-contract-item-with-statistics > a { border-color: transparent; }
+.revenue-contract-item-with-statistics > .revenue-school-student-statistics { margin: 0 12px 10px; }
+@media (min-width: 1050px) {
+  .revenue-contract-item-with-statistics {
+    align-items: center;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(284px, .45fr);
+  }
+  .revenue-contract-item-with-statistics > .revenue-school-student-statistics { margin: 8px 12px; }
+}
+.revenue-school-student-results {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+}
+.revenue-school-student-results > li {
+  border: 1px solid var(--revenue-line);
+  border-radius: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: 12px 14px;
+}
+.revenue-school-student-results > li > a { color: var(--revenue-primary); font-weight: 700; }
+.revenue-school-student-results > li > span { color: #40526b; }
+.revenue-school-student-results dl { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 8px 0; }
+.revenue-school-student-results dt { color: #40526b; font-size: 12px; }
+.revenue-school-student-results dd { margin: 2px 0 0; }
