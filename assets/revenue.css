@@ -690,3 +690,83 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
   [data-revenue-workspace="cases"] .revenue-student-cards[hidden] { display: grid; }
   [data-revenue-workspace="cases"] .revenue-list-panel { padding-inline: 12px; }
 }
+
+/* School commission and contract intake. */
+.revenue-school-contract-page { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.revenue-school-contract-page .revenue-dashboard-heading {
+  border: 0;
+  box-shadow: 0 6px 20px rgb(32 42 60 / 5%);
+  gap: 12px;
+  padding: 16px 20px;
+}
+.revenue-school-contract-page .revenue-dashboard-heading h1 {
+  font-size: 28px;
+  letter-spacing: normal;
+  line-height: 1.25;
+  margin: 0;
+}
+.revenue-school-contract-page .revenue-back-link {
+  background: var(--revenue-card);
+  border: 1px solid #dce4f3;
+  font-size: 14px;
+  min-height: 44px;
+}
+.revenue-school-contract-page .revenue-panel h2 { font-size: 18px; margin: 0 0 12px; }
+.revenue-school-contract-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.revenue-school-contract-actions p { margin: 0 0 12px; }
+
+.revenue-contract-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.revenue-contract-list a {
+  align-items: center;
+  border: 1px solid var(--revenue-line);
+  border-radius: 12px;
+  display: grid;
+  gap: 6px 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(110px, .3fr) auto;
+  min-height: 52px;
+  overflow-wrap: anywhere;
+  padding: 10px 14px;
+  text-decoration: none;
+}
+.revenue-contract-list a:hover { background: #f4f6fb; border-color: #cbd6ff; }
+.revenue-contract-item-name { color: var(--revenue-primary); font-size: 14px; font-weight: 700; }
+.revenue-contract-item-category { color: #40526b; font-size: 13px; }
+.revenue-contract-list .revenue-status-pill {
+  background: var(--revenue-status-bg, #edf1f7);
+  color: var(--revenue-status-text, #40526b);
+  font-size: 12px;
+  justify-self: start;
+  white-space: normal;
+}
+.revenue-contract-upload [data-contract-upload-fields] {
+  border: 1px solid var(--revenue-line);
+  border-radius: 12px;
+  margin: 0;
+  min-inline-size: 0;
+  padding: 12px 14px;
+}
+.revenue-contract-upload [data-contract-upload-fields] legend {
+  font-size: 14px;
+  font-weight: 600;
+  padding-inline: 4px;
+}
+.revenue-contract-upload [data-school-contract-drop] {
+  background: #f4f6fb;
+  border-color: #cbd6ff;
+  border-radius: 10px;
+  margin-bottom: 12px;
+  overflow-wrap: anywhere;
+}
+.revenue-contract-upload .revenue-action-form :is(input:not([type="hidden"]), select, button) { min-height: 44px; }
+
+@media (max-width: 700px) {
+  .revenue-school-contract-page .revenue-dashboard-heading { padding: 14px 16px; }
+  .revenue-contract-list a { grid-template-columns: minmax(0, 1fr) auto; }
+  .revenue-contract-item-name { grid-column: 1 / -1; }
+}

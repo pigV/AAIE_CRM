@@ -18,6 +18,7 @@ from revenue.school_invoice_release import REHEARSAL_RECIPIENT
 from revenue.school_invoice_reminders import EMAIL
 from revenue.state_school_commission import DISCARDED_CONTRACT_UPLOAD
 from revenue.views import _hidden_security
+from ui import ASSET_VERSION
 
 CONFIRMED_ROOT = "/revenue/contracts"
 UPLOAD_ROOT = CONFIRMED_ROOT + "/upload-school"
@@ -150,11 +151,11 @@ def reviewed_nsw_contracts(connection, scope, actor):
 
 
 def _page(title, body, *, back_href="/revenue", back_label="返回收入与佣金"):
-    return f'''<link rel="stylesheet" href="/assets/revenue.css">
-      <main class="revenue-workspace">
-        <header class="revenue-dashboard-heading"><h1>{title}</h1>
-          <a class="revenue-back-link" href="{back_href}">{back_label}</a></header>
-        <section class="revenue-panel">{body}</section>
+    return f'''<link rel="stylesheet" href="/assets/revenue.css?v={ASSET_VERSION}">
+      <main class="revenue-workspace revenue-school-contract-page">
+        <header class="revenue-dashboard-heading"><h1>{escape(title)}</h1>
+          <a class="revenue-back-link" href="{escape(back_href, quote=True)}">{escape(back_label)}</a></header>
+        {body}
       </main>'''
 
 
@@ -302,31 +303,49 @@ def _billing_recipient_label(settings):
     return f"{recipient} · {status}"
 
 
+def _contract_list_item(href, name, category, state, *, pending=False):
+    tone = "pending" if pending else "success"
+    accessible_label = f"{name} · {state} · {category}"
+    return (
+        f'<li><a href="{escape(href, quote=True)}" aria-label="{escape(accessible_label, quote=True)}">'
+        f'<span class="revenue-contract-item-name">{escape(name)}</span>'
+        f'<span class="revenue-contract-item-category">{escape(category)}</span>'
+        f'<span class="revenue-status-pill revenue-status-pill--{tone}">{escape(state)}</span>'
+        '</a></li>'
+    )
+
+
 def render_confirmed_contracts(schools, target=None, *, mail_form="", authority_finance="", claim_href="",
                                title=CONFIRMED_TITLE, reviewed_nsw=(), can_edit=False, billing_href="",
                                billing_settings=None):
     if target is None:
         ordered = sorted(schools.items(), key=lambda pair: (pair[1]["name"].casefold(), pair[0]))
-        entries = "".join(
-            f'<li><a href="{escape(confirmed_url(key), quote=True)}">{escape(school["name"])}</a>'
-            f' · {TARGET_LABELS[key[0]]}</li>'
+        entries = [
+            _contract_list_item(confirmed_url(key), school["name"], TARGET_LABELS[key[0]], "已确认")
             for key, school in ordered
-        )
-        entries += "".join(
-            f'<li><a href="{DRAFT_ROOT}/{quote(uid, safe="")}?contract_only=1">'
-            f'{escape(name)} · 已核对，待启用</a></li>'
+        ]
+        entries.extend(
+            _contract_list_item(
+                f"{DRAFT_ROOT}/{quote(uid, safe='')}?contract_only=1",
+                name, TARGET_LABELS["authority"], "已核对，待启用", pending=True,
+            )
             for name, uid in reviewed_nsw
         )
-        return _page(CONFIRMED_TITLE, f"<ul>{entries}</ul>" if entries else "<p>暂无已确认的学校佣金合同。</p>")
+        listing = (
+            f'<ul class="revenue-contract-list" role="list" data-school-contract-list>{"".join(entries)}</ul>'
+            if entries else '<p class="revenue-empty">暂无已确认的学校佣金合同。</p>'
+        )
+        return _page(CONFIRMED_TITLE, f'<section class="revenue-panel">{listing}</section>')
 
     school = schools[target]
     billing_recipient = _billing_recipient_label(billing_settings)
-    content = f'<h2>{escape(school["name"])}</h2>'
+    content = f'<h2>{escape(school["name"])}</h2><div class="revenue-school-contract-actions">'
     if billing_href:
         label = "返回学校佣金" if mail_form else "学校开票资料"
         content += f'<p><a class="button-link secondary" href="{escape(billing_href, quote=True)}">{label}</a></p>'
     if claim_href:
         content += f'<p><a class="button-link primary" href="{escape(claim_href, quote=True)}">选学生并生成发票草稿</a></p>'
+    content += "</div>"
     if school["active"]:
         edit_links = {uid: confirmed_url(target) + "&edit_commission=" + quote(uid, safe="")
                       for uid, *_ in school["active"]} if can_edit else {}
@@ -348,7 +367,8 @@ def render_confirmed_contracts(schools, target=None, *, mail_form="", authority_
           <a href="/revenue/documents/{quote(uid, safe="")}/view">查看原合同 PDF</a> {edit_link}{workflow_link}</article>'''
     if target[0] == "authority":
         content += f'<p><a href="{UPLOAD_ROOT}?education_authority={quote(target[1], safe="")}">上传续约合同</a></p>'
-    return _page(title, content + authority_finance + mail_form, back_href=CONFIRMED_ROOT, back_label="返回已确认学校佣金")
+    body = f'<section class="revenue-panel">{content}{authority_finance}{mail_form}</section>'
+    return _page(title, body, back_href=CONFIRMED_ROOT, back_label="返回已确认学校佣金")
 
 
 def render_contract_upload(schools, providers, csrf, token, *, authorities=(), renewal=False, pending=()):
@@ -378,13 +398,20 @@ def render_contract_upload(schools, providers, csrf, token, *, authorities=(), r
             <button class="primary" type="submit">上传并分析合同</button>
           </fieldset>
         </form><script src="/assets/school-contract-intake.js" defer></script>''' if groups else "<p>CRM 资料库中暂无尚未上传佣金合同的可选学校。</p>"
-    pending_links = "".join(
-        f'<li><a href="{DRAFT_ROOT}/{quote(uid, safe="")}?contract_only=1">继续核对 {escape(label)} 合同</a></li>'
-        for label, uid in pending
-    )
-    if pending_links:
-        form += f'<h2>已上传，待核对</h2><ul>{pending_links}</ul>'
-    return _page("上传教育局续约合同" if renewal else UPLOAD_TITLE, form)
+    body = f'<section class="revenue-panel revenue-contract-upload">{form}</section>'
+    if pending:
+        pending_links = "".join(
+            _contract_list_item(
+                f"{DRAFT_ROOT}/{quote(uid, safe='')}?contract_only=1",
+                label, "继续核对合同", "待核对", pending=True,
+            )
+            for label, uid in pending
+        )
+        body += (
+            '<section class="revenue-panel revenue-contract-pending"><h2>已上传，待核对</h2>'
+            f'<ul class="revenue-contract-list" role="list" data-pending-contracts>{pending_links}</ul></section>'
+        )
+    return _page("上传教育局续约合同" if renewal else UPLOAD_TITLE, body)
 
 
 def pending_contracts(connection, scope, actor):
