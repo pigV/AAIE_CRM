@@ -304,3 +304,389 @@ a.revenue-coverage-card:hover { border-color: #cbd6ff; box-shadow: 0 7px 16px rg
   .vic-rcti-amounts > div:first-child { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; padding: 8px 0; }
   .vic-rcti-amounts > div + div { border-inline-start: 0; border-block-start: 1px solid var(--revenue-line); }
 }
+
+/* CRM design system for Revenue workspaces. */
+:is(.revenue-home, .revenue-case-workbench, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"]) {
+  --revenue-control-height: 44px;
+  --revenue-body: #40526b;
+  gap: 16px;
+}
+
+:is(.revenue-home, .revenue-case-workbench, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"])
+  :is(.revenue-dashboard-heading, .revenue-page-heading) {
+  border: 0;
+  box-shadow: 0 6px 20px rgb(32 42 60 / 5%);
+  gap: 16px;
+  padding: 16px 20px;
+}
+
+:is(.revenue-home, .revenue-case-workbench, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"])
+  :is(.revenue-dashboard-heading, .revenue-page-heading) h1 {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: normal;
+  line-height: 1.25;
+  margin: 2px 0 4px;
+}
+
+:is(.revenue-home, .revenue-case-workbench, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"]) .revenue-eyebrow {
+  color: var(--revenue-body);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: normal;
+}
+
+.revenue-secondary-link {
+  align-items: center;
+  background: var(--revenue-card);
+  border: 1px solid #dce4f3;
+  border-radius: 10px;
+  color: var(--revenue-text) !important;
+  display: inline-flex;
+  font-size: 14px;
+  font-weight: 600;
+  min-height: var(--revenue-control-height);
+  padding: 8px 12px;
+  text-decoration: none;
+}
+
+.revenue-secondary-link:hover {
+  background: var(--revenue-primary-soft);
+  border-color: #cbd6ff;
+}
+
+:is(.revenue-home, .revenue-case-workbench, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"])
+  :is(.revenue-primary-link, .revenue-back-link) {
+  font-size: 14px;
+  font-weight: 600;
+  min-height: var(--revenue-control-height);
+}
+
+:is(.revenue-case-workbench, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"]) .revenue-back-link {
+  background: var(--revenue-card);
+  border: 1px solid #dce4f3;
+}
+
+.revenue-home .revenue-metric {
+  --revenue-metric-accent: var(--revenue-primary);
+  gap: 6px;
+  min-height: 0;
+  padding: 14px 16px;
+}
+
+.revenue-home .revenue-metric--client_receivable_cents { --revenue-metric-accent: var(--revenue-warning); }
+.revenue-home .revenue-metric--commission_forecast_cents { --revenue-metric-accent: #7557eb; }
+.revenue-home .revenue-metric--claimable_commission_cents { --revenue-metric-accent: var(--revenue-success); }
+
+.revenue-home .revenue-metric-label {
+  align-items: center;
+  color: var(--revenue-body);
+  display: flex;
+  gap: 8px;
+  min-height: 0;
+}
+
+.revenue-home .revenue-metric-label::before {
+  background: radial-gradient(circle, var(--revenue-metric-accent) 0 3px, var(--revenue-primary-soft) 3.5px);
+  border-radius: 8px;
+  content: "";
+  flex: 0 0 24px;
+  height: 24px;
+}
+
+.revenue-home .revenue-metric strong {
+  color: var(--revenue-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.revenue-home .revenue-metric small { padding-top: 2px; }
+
+.revenue-home .revenue-workspace-link {
+  align-items: center;
+  background: var(--revenue-card);
+  border-color: var(--revenue-line);
+  flex-direction: row;
+  justify-content: space-between;
+  min-height: var(--revenue-control-height);
+}
+
+.revenue-home .revenue-workspace-link:hover { background: var(--revenue-primary-soft); }
+
+:is(.revenue-home, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"]) .revenue-panel thead th {
+  background: #f4f6fb;
+  color: var(--revenue-body);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+:is(.revenue-home, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"]) .revenue-panel thead th:first-child {
+  border-start-start-radius: 8px;
+}
+:is(.revenue-home, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"]) .revenue-panel thead th:last-child {
+  border-start-end-radius: 8px;
+}
+
+.revenue-home .revenue-mobile-case {
+  background: var(--revenue-card);
+  border-radius: 16px;
+  padding: 14px;
+}
+
+:is(.revenue-home, .revenue-case-workbench, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"])
+  :is(.revenue-status-pill, .revenue-recent-status) {
+  background: var(--revenue-status-bg, #edf1f7);
+  border-radius: 999px;
+  color: var(--revenue-status-text, #40526b);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 8px;
+}
+
+.revenue-status-pill--success { --revenue-status-bg: #e6f5ed; --revenue-status-text: #186249; }
+.revenue-status-pill--progress { --revenue-status-bg: #eaf0ff; --revenue-status-text: #2146ba; }
+.revenue-status-pill--pending { --revenue-status-bg: #fff3dc; --revenue-status-text: #79500e; }
+
+.revenue-home .revenue-recent-status {
+  border-radius: 8px;
+  display: inline-block;
+  line-height: 1.45;
+  margin-block: 2px;
+}
+
+.revenue-case-workbench .revenue-case-identity p strong { font-size: 16px; }
+.revenue-case-workbench .revenue-case-contexts a {
+  background: var(--revenue-card);
+  border-color: var(--revenue-line);
+  border-radius: 8px;
+}
+.revenue-case-workbench .revenue-case-contexts a:hover { background: var(--revenue-primary-soft); }
+.revenue-case-workbench .revenue-case-record {
+  background: #f4f6fb;
+  border: 0;
+  border-radius: 10px;
+}
+.revenue-case-workbench .revenue-billing-card { border-radius: 16px; }
+.revenue-case-workbench .revenue-billing-card .revenue-primary-link { justify-self: start; }
+
+[data-revenue-workspace="billing"] .revenue-amount-cell {
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+  white-space: nowrap;
+}
+
+[data-revenue-workspace="billing"] :is(.revenue-tab, .revenue-filter) {
+  align-items: center;
+  display: inline-flex;
+  font-size: 13px;
+  min-height: var(--revenue-control-height);
+}
+
+[data-revenue-workspace="billing"] .revenue-filter { border-radius: 8px; }
+[data-revenue-workspace="billing"] .revenue-tabs:empty { display: none; }
+
+[data-revenue-workspace="billing"] .revenue-payment-form :is(input:not([type="hidden"]), select, button) {
+  min-height: var(--revenue-control-height);
+}
+
+[data-revenue-workspace="billing"] .revenue-payment-preview {
+  background: #f4f6fb;
+  border-radius: 16px;
+  font-variant-numeric: tabular-nums;
+  padding: 16px;
+}
+
+[data-revenue-workspace="billing"] .revenue-payment-form input[type="file"]::file-selector-button {
+  background: var(--revenue-primary-soft);
+  border: 0;
+  border-radius: 6px;
+  color: var(--revenue-text);
+  font: inherit;
+  margin-inline-end: 8px;
+  padding: 6px 8px;
+}
+
+[data-revenue-workspace="billing"] .revenue-payment-form .notice.error {
+  background: #fbecee;
+  border: 1px solid #f6cdd3;
+  border-radius: 10px;
+  color: #922c37;
+  padding: 10px 12px;
+}
+
+.revenue-home .revenue-recent-sort summary:focus-visible,
+[data-revenue-workspace="billing"] .revenue-money-input:focus-within {
+  outline: 2px solid var(--revenue-primary);
+  outline-offset: 2px;
+}
+
+@media (max-width: 700px) {
+  :is(.revenue-home, .revenue-case-workbench, [data-revenue-workspace="billing"], [data-revenue-workspace="cases"])
+    :is(.revenue-dashboard-heading, .revenue-page-heading) {
+    padding: 14px 16px;
+  }
+
+  .revenue-home.revenue-workspace--mobile .revenue-dashboard-actions .revenue-primary-link {
+    display: inline-flex;
+  }
+
+  .revenue-home .revenue-metric { padding: 12px; }
+  .revenue-home .revenue-metric-label::before { flex-basis: 20px; height: 20px; }
+
+  [data-revenue-workspace="billing"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  [data-revenue-workspace="billing"] > .revenue-panel {
+    min-width: 0;
+  }
+}
+
+[data-revenue-workspace="cases"] { grid-template-columns: minmax(0, 1fr); }
+[data-revenue-workspace="cases"] .revenue-tabs:empty { display: none; }
+
+.revenue-student-list-toolbar {
+  align-items: end;
+  display: grid;
+  gap: 12px 20px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin-bottom: 16px;
+}
+
+.revenue-student-list-toolbar .revenue-search-form {
+  background: none;
+  border: 0;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin: 0;
+  max-width: 440px;
+  padding: 0;
+}
+
+.revenue-student-list-toolbar .revenue-search-form label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.revenue-student-list-toolbar :is(.revenue-search-form input, .revenue-search-form button, .revenue-filter),
+[data-revenue-workspace="cases"] .revenue-pagination a {
+  min-height: var(--revenue-control-height);
+}
+
+.revenue-student-list-toolbar .revenue-search-form input { font-size: 14px; }
+
+.revenue-student-list-toolbar .revenue-search-form button {
+  background: var(--revenue-primary);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 8px 14px;
+}
+
+.revenue-student-list-toolbar .revenue-search-form button:hover { background: #244bd6; }
+
+.revenue-student-list-toolbar .revenue-filter,
+[data-revenue-workspace="cases"] .revenue-pagination a {
+  align-items: center;
+  border-radius: 8px;
+  display: inline-flex;
+  font-size: 13px;
+  padding: 8px 12px;
+}
+
+[data-revenue-workspace="cases"] .revenue-pagination {
+  align-items: center;
+  color: var(--revenue-body);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 8px 16px;
+  justify-content: space-between;
+  margin-top: 16px;
+}
+
+[data-revenue-workspace="cases"] .revenue-pagination__links {
+  display: flex;
+  gap: 8px;
+}
+
+[data-revenue-workspace="cases"] .revenue-pagination a {
+  border: 1px solid var(--revenue-line);
+  color: var(--revenue-primary);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+[data-revenue-workspace="cases"] .revenue-pagination a:hover { background: var(--revenue-primary-soft); }
+[data-revenue-workspace="cases"] .revenue-status-pill { display: inline-block; white-space: normal; }
+[data-revenue-workspace="cases"] .revenue-student-cards {
+  display: none;
+  gap: 12px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.revenue-student-card {
+  background: var(--revenue-card);
+  border: 1px solid var(--revenue-line);
+  border-radius: 16px;
+  display: grid;
+  gap: 12px;
+  overflow-wrap: anywhere;
+  padding: 14px;
+  text-decoration: none;
+}
+
+a.revenue-student-card:hover { border-color: #cbd6ff; }
+
+.revenue-student-card__heading {
+  align-items: start;
+  display: flex;
+  gap: 6px 10px;
+  justify-content: space-between;
+}
+
+.revenue-student-card__heading > div { display: grid; gap: 3px; }
+.revenue-student-card__heading strong { color: var(--revenue-primary); font-size: 16px; }
+.revenue-student-card__heading > div span { color: var(--revenue-body); font-size: 12px; }
+.revenue-student-card__heading > .revenue-status-pill { flex: 0 1 auto; }
+
+.revenue-student-card dl {
+  display: grid;
+  gap: 8px 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.revenue-student-card__financial {
+  background: #f4f6fb;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.revenue-student-card dt { color: var(--revenue-body); font-size: 12px; }
+.revenue-student-card dd { color: var(--revenue-text); font-size: 13px; margin: 2px 0 0; }
+.revenue-student-card__details > div:last-child { grid-column: 1 / -1; }
+
+[data-revenue-workspace="cases"].revenue-workspace-page--mobile .revenue-student-cards {
+  display: grid;
+}
+
+@media (max-width: 700px) {
+  .revenue-student-list-toolbar {
+    align-items: start;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .revenue-student-list-toolbar .revenue-search-form { max-width: none; }
+  .revenue-student-list-toolbar .revenue-filters { justify-content: flex-start; }
+
+  [data-revenue-workspace="cases"] .revenue-list-panel > .revenue-table-scroll { display: none; }
+  /* Reveal the fallback cards on narrow desktop URLs after the stylesheet loads. */
+  [data-revenue-workspace="cases"] .revenue-student-cards[hidden] { display: grid; }
+  [data-revenue-workspace="cases"] .revenue-list-panel { padding-inline: 12px; }
+}

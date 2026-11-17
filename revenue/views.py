@@ -8,6 +8,7 @@ import sqlite3
 
 from revenue.read_models import RevenueReadModels, exception_code_label
 from revenue.urls import cases_url, revenue_home_url
+from ui import ASSET_VERSION
 
 
 def _money(cents: int) -> str:
@@ -28,6 +29,18 @@ def _currency_money(currency_code: str, cents: int) -> str:
 
 def _aud_money(cents: int) -> str:
     return f"AUD {_money(cents)}"
+
+
+_PAYMENT_STATUS_TONES = {
+    "已收清": "success",
+    "部分收款": "progress",
+    "待收款": "pending",
+}
+
+
+def _payment_status_badge(label: str) -> str:
+    tone = _PAYMENT_STATUS_TONES.get(label, "neutral")
+    return f'<span class="revenue-status-pill revenue-status-pill--{tone}">{escape(label)}</span>'
 
 
 def _first_year_tuition_summary(components):
@@ -691,15 +704,78 @@ def render_school_commission_preview(preview: dict, csrf: str, token: str) -> st
     </section>"""
 
 
+_STUDENT_CASE_STATUS_TONES = {
+    **_PAYMENT_STATUS_TONES,
+    "进行中": "progress",
+    "已暂停": "pending",
+    "可申领": "pending",
+    "已收款": "success",
+    "已申领": "progress",
+    "已确认": "success",
+    "预测中": "progress",
+}
+
+
+def _student_case_status_badge(label: str) -> str:
+    if label == "—":
+        return label
+    tone = _STUDENT_CASE_STATUS_TONES.get(label, "neutral")
+    return f'<span class="revenue-status-pill revenue-status-pill--{tone}">{escape(label)}</span>'
+
+
+def _student_case_cards(rows, columns, empty_message: str, *, hidden: bool) -> str:
+    labels = {column["key"]: column["label"] for column in columns}
+    cards = []
+    for row in rows:
+        name = escape(str(row.get("student_name") or "—"))
+        student_id = escape(str(row.get("student_id") or "—"))
+        status = _student_case_status_badge(str(row.get("status") or "—"))
+        financial = "".join(
+            f'<div><dt>{escape(labels[key])}</dt>'
+            f'<dd>{_student_case_status_badge(str(row.get(key) or "—"))}</dd></div>'
+            for key in ("billing_status", "commission_status")
+        )
+        details = "".join(
+            f'<div><dt>{escape(labels[key])}</dt><dd>{escape(str(row.get(key) or "—"))}</dd></div>'
+            for key in ("classification", "business_type", "institution", "intake", "updated_at_display")
+        )
+        body = (
+            '<div class="revenue-student-card__heading">'
+            f'<div><strong>{name}</strong><span>{student_id}</span></div>{status}</div>'
+            f'<dl class="revenue-student-card__financial">{financial}</dl>'
+            f'<dl class="revenue-student-card__details">{details}</dl>'
+        )
+        href = row.get("href")
+        if href:
+            card = f'<a class="revenue-student-card" href="{escape(str(href), quote=True)}">{body}</a>'
+        else:
+            card = f'<div class="revenue-student-card">{body}</div>'
+        cards.append(f"<li>{card}</li>")
+    content = "".join(cards) or f'<li class="revenue-empty">{escape(empty_message)}</li>'
+    visibility = " hidden" if hidden else ""
+    return f'<ul class="revenue-student-cards" role="list" aria-label="学生档案"{visibility}>{content}</ul>'
+
+
 def render_revenue_workspace_page(
     data: dict, csrf: str, action_token: str = "", mobile: bool = False
 ) -> str:
     """Render one of the six read-only Revenue workspaces."""
 
     columns = data.get("columns") or []
-    header = "".join(f'<th scope="col">{escape(str(column["label"]))}</th>' for column in columns)
+    case_list = data.get("name") == "cases"
+    result_rows = data.get("rows") or []
+    empty_message = str(data.get("empty_message") or "暂无记录。")
+    billing = data.get("name") == "billing"
+
+    def money_class(column):
+        return ' class="revenue-amount-cell"' if billing and column.get("kind") == "money" else ""
+
+    header = "".join(
+        f'<th scope="col"{money_class(column)}>{escape(str(column["label"]))}</th>'
+        for column in columns
+    )
     rows = []
-    for row in data.get("rows") or []:
+    for row in result_rows if not (case_list and mobile) else ():
         cells = []
         for index, column in enumerate(columns):
             key = str(column["key"])
@@ -714,13 +790,17 @@ def render_revenue_workspace_page(
                     f'<a class="revenue-row-link" href="{escape(str(row["href"]), quote=True)}">'
                     f'{content}</a>'
                 )
-            cells.append(f"<td>{content}</td>")
+            if billing and key == "status" and value in _PAYMENT_STATUS_TONES:
+                content = _payment_status_badge(value)
+            elif case_list and key in {"billing_status", "commission_status", "status"}:
+                content = _student_case_status_badge(value)
+            cells.append(f"<td{money_class(column)}>{content}</td>")
         selected = " is-selected" if row.get("selected") else ""
         rows.append(f'<tr class="revenue-data-row{selected}">{"".join(cells)}</tr>')
     if not rows:
         rows.append(
             f'<tr><td colspan="{max(1, len(columns))}" class="revenue-empty">'
-            f'{escape(str(data.get("empty_message") or "暂无记录。"))}</td></tr>'
+            f'{escape(empty_message)}</td></tr>'
         )
     filters = "".join(
         f'<a class="revenue-filter{" is-active" if item.get("active") else ""}" '
@@ -771,7 +851,7 @@ def render_revenue_workspace_page(
           <label>城市<input name="city" value="{escape(str(controls.get('city') or ''), quote=True)}" placeholder="例如 Melbourne"></label>
           <button type="submit" class="secondary">筛选</button>
         </form>"""
-    if data.get("name") == "cases":
+    if case_list:
         contract_search = f"""<form method="get" action="{escape(str(data.get('cases_href') or '/revenue/cases'), quote=True)}" class="revenue-search-form" aria-label="学生搜索">
           <input type="hidden" name="filter" value="{escape(str(data.get('active_filter') or 'all'), quote=True)}">
           <label>学生编号或姓名<input name="q" value="{escape(str(controls.get('q') or ''), quote=True)}" placeholder="Student Number / Student Name"></label>
@@ -781,7 +861,9 @@ def render_revenue_workspace_page(
     if pagination:
         links = " ".join(f'<a href="{escape(str(pagination[key]), quote=True)}">{label}</a>'
                          for key, label in (("previous", "上一页"), ("next", "下一页")) if pagination.get(key))
-        paging = f'<nav aria-label="学生分页">共 {int(pagination["total"])} 位学生 · 第 {int(pagination["page"])} / {int(pagination["pages"])} 页 {links}</nav>'
+        page_summary = f'共 {int(pagination["total"])} 位学生 · 第 {int(pagination["page"])} / {int(pagination["pages"])} 页'
+        page_links = f'<div class="revenue-pagination__links">{links}</div>' if links else ""
+        paging = f'<nav class="revenue-pagination" aria-label="学生分页"><span>{page_summary}</span>{page_links}</nav>'
     student_detail = ""
     detail = data.get("student_detail")
     if detail:
@@ -833,8 +915,27 @@ def render_revenue_workspace_page(
         )
         back_href = revenue_home_href
         back_label = "返回总览"
+    table = (
+        '<div class="revenue-table-scroll"><table>'
+        f'<thead><tr>{header}</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+    )
+    if case_list:
+        cards = _student_case_cards(result_rows, columns, empty_message, hidden=not mobile)
+        results = cards if mobile else table + cards
+        toolbar = (
+            '<div class="revenue-student-list-toolbar">'
+            f'{contract_search}<nav class="revenue-filters" aria-label="筛选">{filters}</nav></div>'
+        )
+    else:
+        results = table
+        toolbar = (
+            f'<div class="revenue-panel-toolbar"><h2>{escape(str(data["title"]))}</h2>'
+            f'<nav class="revenue-filters" aria-label="筛选">{filters}</nav></div>{contract_search}'
+        )
+    list_label = ' aria-label="学生档案列表"' if case_list else ""
+    stylesheet = f"/assets/revenue.css?v={ASSET_VERSION}" if case_list else "/assets/revenue.css"
     return f"""
-    <link rel="stylesheet" href="/assets/revenue.css">
+    <link rel="stylesheet" href="{stylesheet}">
     <script src="/assets/revenue-payment.js?v=3" defer></script>
     <main class="revenue-workspace revenue-workspace-page{mobile_variant}" data-revenue-schema="{escape(str(data['schema_version']))}" data-revenue-workspace="{escape(str(data['name']), quote=True)}">
       {breadcrumb}
@@ -846,10 +947,9 @@ def render_revenue_workspace_page(
       {school_list}
       {coverage}
       {student_detail}
-      <section class="revenue-panel revenue-list-panel">
-        <div class="revenue-panel-toolbar"><h2>{escape(str(data['title']))}</h2><nav class="revenue-filters" aria-label="筛选">{filters}</nav></div>
-        {contract_search}
-        <div class="revenue-table-scroll"><table><thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>
+      <section class="revenue-panel revenue-list-panel"{list_label}>
+        {toolbar}
+        {results}
         {paging}
       </section>
       {action_content}
@@ -1289,13 +1389,14 @@ def render_revenue_case_workbench(
             add_payment = ""
             if not mobile and int(item.get("outstanding_base_cents") or 0) > 0:
                 add_payment = (
-                    f'<a class="revenue-inline-action" href="{escape(str(item["add_payment_href"]), quote=True)}">'
+                    f'<a class="revenue-primary-link" href="{escape(str(item["add_payment_href"]), quote=True)}">'
                     '+ 添加收款记录</a>'
                 )
+            status = str(item.get("payment_status") or "待收款")
             cards.append(
                 '<article class="revenue-billing-card">'
                 f'<header><div><span class="revenue-eyebrow">基础服务费</span><h3>{escape(str(item.get("description") or "基础服务费"))}</h3></div>'
-                f'<span class="revenue-status-pill">{escape(str(item.get("payment_status") or "待收款"))}</span></header>'
+                f'{_payment_status_badge(status)}</header>'
                 '<dl class="revenue-money-summary">'
                 f'<div><dt>基础服务费</dt><dd>{_aud_money(int(item.get("final_base_cents") or 0))}</dd></div>'
                 f'<div><dt>基础服务费已收</dt><dd>{_aud_money(int(item.get("base_received_cents") or 0))}</dd></div>'
@@ -1491,7 +1592,7 @@ def render_revenue_case_workbench(
             '<section id="revenue-case-actions" class="revenue-panel revenue-case-actions"><div class="revenue-panel-heading">'
             '<h2>收入与佣金操作</h2></div><nav>'
             + "".join(
-                f'<a class="revenue-primary-link" href="{escape(str(item["href"]), quote=True)}">{escape(str(item["label"]))}</a>'
+                f'<a class="revenue-secondary-link" href="{escape(str(item["href"]), quote=True)}">{escape(str(item["label"]))}</a>'
                 for item in data.get("actions") or []
             )
             + f"</nav>{first_year_summary}</section>"
@@ -1667,11 +1768,19 @@ def render_revenue_workspace(
         ("学校佣金", "school_commission", commission_text),
     )
 
+    def financial_line(line):
+        tone = "neutral"
+        if line.startswith(("已收清", "已到账")):
+            tone = "success"
+        if "待核对" in line or "等核对" in line or "还差" in line or "等学校付款" in line:
+            tone = "pending"
+        return f'<span class="revenue-recent-status revenue-status-pill--{tone}">{escape(line)}</span>'
+
     def financial_values(row, *, card=False):
         values = []
         for label, key, formatter in financial_columns:
             lines = visa_fee_lines(row) if key == "visa_service_fee" else [formatter(row.get(key))]
-            value = "<br>".join(escape(line) for line in lines)
+            value = "<br>".join(financial_line(line) for line in lines)
             if card:
                 values.append(f'<span class="revenue-mobile-case__states">{label}　{value}</span>')
             else:
@@ -1697,7 +1806,7 @@ def render_revenue_workspace(
     metrics = "".join(
         f'<a class="revenue-metric revenue-metric--{escape(str(item["key"]), quote=True)}" '
         f'href="{escape(str(item["href"]), quote=True)}">'
-        f'<span>{escape(str(item["label"]))}</span>'
+        f'<span class="revenue-metric-label">{escape(str(item["label"]))}</span>'
         f'<strong>{_money(int(item["value"])) if str(item["key"]).endswith("_cents") else int(item["value"])}</strong>'
         f'<small>查看明细</small></a>'
         for item in data.get("metrics") or []
@@ -1705,7 +1814,7 @@ def render_revenue_workspace(
     )
     workspace_links = "".join(
         f'<a class="revenue-workspace-link" href="{escape(str(item["href"]), quote=True)}">'
-        f'<strong>{escape(str(item["label"]))}</strong><span>进入工作区</span></a>'
+        f'<strong>{escape(str(item["label"]))}</strong><span aria-hidden="true">→</span></a>'
         for item in data.get("workspace_links") or []
         if item.get("key") not in {"cases", "billing", "direct-commission", "reconciliation"}
     )
@@ -1735,20 +1844,19 @@ def render_revenue_workspace(
     access_badge = "仅限管理员" if data.get("can_administer", True) else "已授权用户"
     school_contract_href = data.get("school_contract_href")
     school_contract_button = (
-        f'<a class="revenue-primary-link" href="{escape(school_contract_href, quote=True)}">学校佣金合同</a>'
+        f'<a class="revenue-secondary-link" href="{escape(school_contract_href, quote=True)}">学校佣金合同</a>'
         if school_contract_href and not mobile else ""
     )
     if data.get("school_contract_links") and not mobile:
         school_contract_button = "".join(
-            f'<a class="revenue-primary-link" href="{escape(href, quote=True)}">{escape(label)}</a>'
+            f'<a class="revenue-secondary-link" href="{escape(href, quote=True)}">{escape(label)}</a>'
             for label, href in data["school_contract_links"]
         )
     template_href = data.get("commission_invoice_template_href")
     template_button = (
-        f'<a class="revenue-primary-link" href="{escape(template_href, quote=True)}">佣金发票模板</a>'
+        f'<a class="revenue-secondary-link" href="{escape(template_href, quote=True)}">佣金发票模板</a>'
         if template_href and not mobile else ""
     )
-    cases_link_style = "revenue-back-link" if school_contract_button or template_button else "revenue-primary-link"
     system_tools = (
         '<nav class="revenue-panel revenue-system-tools" aria-label="收入与佣金系统设置">'
         '<span class="revenue-eyebrow">系统设置</span>'
@@ -1757,13 +1865,14 @@ def render_revenue_workspace(
     )
     return f"""
     <link rel="stylesheet" href="/assets/revenue.css">
-    <main class="revenue-workspace{variant}" data-revenue-schema="{escape(data['schema_version'])}">
+    <main class="revenue-workspace revenue-home{variant}" data-revenue-schema="{escape(data['schema_version'])}">
       <header class="revenue-dashboard-heading">
         <div><span class="revenue-eyebrow">{access_badge}</span>
         <h1>收入与佣金</h1>
         <p>统一查看收费与佣金档案、客户收费、直接佣金、一级代理、合同与对账。</p></div>
-        <div class="revenue-dashboard-actions">{school_contract_button}{template_button}
-          <a class="{cases_link_style}" href="{escape(cases_href, quote=True)}">查看收费与佣金档案</a>
+        <div class="revenue-dashboard-actions">
+          <a class="revenue-primary-link" href="{escape(cases_href, quote=True)}">查看收费与佣金档案</a>
+          {school_contract_button}{template_button}
         </div>
       </header>
       <section class="revenue-metrics" aria-label="收入与佣金摘要">{metrics}</section>
