@@ -28974,6 +28974,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     return self.error_page("请选择已确认的学校或教育局。", HTTPStatus.BAD_REQUEST)
                 title = CONFIRMED_TITLE
                 student_view = (self.query.get("students") or [""])[0]
+                expand = (self.query.get("expand_authority") or [""])[0]
+                include_empty = self.query.get("include_empty") == ["1"]
+                expanded_target = ("authority", expand) if expand else None
+                if expanded_target and (target is not None or expanded_target not in schools):
+                    return self.error_page("找不到已确认的教育局合同。", HTTPStatus.NOT_FOUND)
+                school_drilldown = "authority_school_id" in self.query
+                authority_school_id = self._school_commission_scope_id("authority_school_id") if school_drilldown else None
+                if school_drilldown and (
+                    authority_school_id is None or target is None or target[0] != "authority" or not student_view
+                    or sum(key in self.query for key in TARGET_FIELDS.values()) != 1
+                ):
+                    return self.error_page("请选择教育局下的学校和学生明细类型。", HTTPStatus.BAD_REQUEST)
                 overview = None
                 if student_view or target is None:
                     overview = SchoolCommissionOverview(
@@ -28984,13 +28996,23 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 if student_view:
                     if method != "GET" or billing_step or target is None or student_view not in {"all", "claimable"}:
                         return self.error_page("请选择学校和学生明细类型。", HTTPStatus.BAD_REQUEST)
-                    summary = overview.read(target, schools[target], view=student_view)
-                    body = render_school_commission_students(target, schools[target]["name"], summary, student_view)
+                    try:
+                        summary = overview.read(target, schools[target], view=student_view,
+                                                authority_school_id=authority_school_id)
+                    except LookupError:
+                        return self.error_page("该学校不在此教育局的公校范围内。", HTTPStatus.NOT_FOUND)
+                    body = render_school_commission_students(
+                        target, schools[target]["name"], summary, student_view,
+                        authority_school_id=authority_school_id, include_empty=include_empty,
+                    )
                     return self.send_html(
                         page(title, body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
                         headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop",
                     )
                 summaries = {key: overview.read(key, school) for key, school in schools.items()} if overview else None
+                expanded_schools = overview.authority_schools(
+                    expanded_target, schools[expanded_target], include_empty=include_empty,
+                ) if expanded_target else ()
                 authority_finance = ""
                 if target and target[0] == "authority":
                     from revenue.authority_formal import authority_payer, authority_schema_ready
@@ -29031,7 +29053,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 body = render_confirmed_contracts(schools, target, authority_finance=authority_finance,
                                                   claim_href=claim_href, reviewed_nsw=reviewed_nsw,
                                                   can_edit=can_edit, billing_href=billing_url(target) if target and can_edit else "",
-                                                  billing_settings=billing_settings, summaries=summaries)
+                                                  billing_settings=billing_settings, summaries=summaries,
+                                                  expanded_authority=expand, expanded_schools=expanded_schools,
+                                                  include_empty=include_empty)
         finally:
             db._release_connection(connection)
         message, message_kind = self.message()

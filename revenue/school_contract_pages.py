@@ -303,10 +303,10 @@ def _billing_recipient_label(settings):
     return f"{recipient} · {status}"
 
 
-def _contract_list_item(href, name, category, state, *, pending=False, summary=None):
+def _contract_list_item(href, name, category, state, *, pending=False, summary=None, authority=""):
     tone = "pending" if pending else "success"
     accessible_label = f"{name} · {state} · {category}"
-    statistics = _school_student_statistics(href, summary) if summary is not None else ""
+    statistics = _school_student_statistics(href, summary, extra=authority) if summary is not None else ""
     item_class = ' class="revenue-contract-item-with-statistics"' if statistics else ""
     return (
         f'<li{item_class}><a href="{escape(href, quote=True)}" aria-label="{escape(accessible_label, quote=True)}">'
@@ -317,23 +317,106 @@ def _contract_list_item(href, name, category, state, *, pending=False, summary=N
     )
 
 
-def _school_student_statistics(href, summary):
+def _school_student_count_links(href, summary):
     count = summary["claimable"]
     claimable = (
         f'<a href="{escape(href + "&students=claimable", quote=True)}">'
         f'可申领学生 <strong>{count}</strong> 人</a>'
         if count is not None else f'<span>可申领 · {escape(summary["status"])}</span>'
     )
+    total = (f'<a href="{escape(href + "&students=all", quote=True)}">'
+             f'总学生 <strong>{summary["students"]}</strong> 人</a>')
+    return total, claimable
+
+
+def _school_student_statistics(href, summary, *, extra=""):
+    total, claimable = _school_student_count_links(href, summary)
+    return f'<div class="revenue-school-student-statistics">{total}{claimable}{extra}</div>'
+
+
+def _authority_register_href(state, *, include_empty=False):
+    query = {"expand_authority": state}
+    if include_empty:
+        query["include_empty"] = 1
+    return CONFIRMED_ROOT + "?" + urlencode(query) + "#authority-" + state
+
+
+def _authority_school_href(target, school_id, *, include_empty=False):
+    query = {"authority_school_id": school_id}
+    if include_empty:
+        query["include_empty"] = 1
+    return confirmed_url(target) + "&" + urlencode(query)
+
+
+# Keep the layout that protects count links with the markup so a cached or missing
+# Revenue stylesheet cannot apply the generic 720px table minimum on a phone.
+_AUTHORITY_SCHOOL_LAYOUT = """<style>
+.revenue-panel .revenue-authority-school-table { min-width: 0; }
+@media (max-width: 700px) {
+  .revenue-authority-school-table,
+  .revenue-authority-school-table tbody { display: block; }
+  .revenue-authority-school-table thead {
+    clip-path: inset(50%);
+    height: 1px;
+    overflow: hidden;
+    position: absolute;
+    width: 1px;
+  }
+  .revenue-authority-school-table tbody tr {
+    border: 1px solid var(--revenue-line);
+    border-radius: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 8px;
+    padding: 10px 12px;
+  }
+  .revenue-authority-school-table tbody :is(th, td) { border: 0; padding: 0; }
+  .revenue-authority-school-table tbody th { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
+  .revenue-authority-school-table tbody td { width: auto; }
+}
+</style>"""
+
+
+def _authority_school_breakdown(target, state_name, rows, *, include_empty):
+    state = target[1]
+    toggle = _authority_register_href(state, include_empty=not include_empty)
+    toggle_label = "隐藏零人学校" if include_empty else "显示零人学校"
+    items = []
+    for school in rows:
+        href = _authority_school_href(target, school["id"], include_empty=include_empty)
+        total, claimable = _school_student_count_links(href, school)
+        items.append(
+            f'<tr role="row"><th scope="row" role="rowheader">{escape(school["name"])}</th>'
+            f'<td role="cell"><div class="revenue-school-student-statistics">{total}</div></td>'
+            f'<td role="cell"><div class="revenue-school-student-statistics">{claimable}</div></td></tr>'
+        )
+    listing = (
+        '<table class="revenue-authority-school-table" role="table" aria-label="按学校统计">'
+        '<thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">学校</th>'
+        '<th scope="col" role="columnheader">总学生</th><th scope="col" role="columnheader">可申领学生</th>'
+        '</tr></thead><tbody role="rowgroup">' + "".join(items) + '</tbody></table>'
+        if items else '<p class="revenue-empty">暂没有学校有符合统计条件的学生。</p>'
+    )
     return (
-        '<div class="revenue-school-student-statistics">'
-        f'<a href="{escape(href + "&students=all", quote=True)}">'
-        f'总学生 <strong>{summary["students"]}</strong> 人</a>{claimable}</div>'
+        _AUTHORITY_SCHOOL_LAYOUT
+        + f'<section class="revenue-authority-breakdown" id="authority-{escape(state, quote=True)}" '
+        f'aria-label="{escape(state_name, quote=True)}学校汇总">'
+        f'<div class="revenue-authority-breakdown-heading"><h3>学校汇总</h3>'
+        f'<a href="{escape(toggle, quote=True)}">{toggle_label}</a></div>{listing}</section>'
     )
 
 
-def render_school_commission_students(target, name, summary, view):
+def render_school_commission_students(target, name, summary, view, *, authority_school_id=None, include_empty=False):
     title = "可申领学生" if view == "claimable" else "总学生"
     href = confirmed_url(target)
+    back = CONFIRMED_ROOT
+    school_heading = ""
+    if authority_school_id is not None:
+        href = _authority_school_href(target, authority_school_id, include_empty=include_empty)
+        back = _authority_register_href(target[1], include_empty=include_empty)
+        school_heading = f'<p class="revenue-authority-context">{escape(name)}</p>'
+        name = summary["school_name"]
     cards = []
     for row in summary["rows"]:
         projects = "".join(
@@ -358,24 +441,37 @@ def render_school_commission_students(target, name, summary, view):
         f'<p class="revenue-empty">{escape(summary["status"] if view == "claimable" and summary["status"] else "暂无符合条件的学生。")}</p>'
     )
     body = (
-        f'<section class="revenue-panel" aria-label="{title}明细"><h2>{escape(name)}</h2>'
+        f'<section class="revenue-panel" aria-label="{title}明细">{school_heading}<h2>{escape(name)}</h2>'
         f'{_school_student_statistics(href, summary)}{results}</section>'
     )
-    return _page(title, body, back_href=CONFIRMED_ROOT, back_label=f"返回{CONFIRMED_TITLE}")
+    return _page(title, body, back_href=back, back_label=f"返回{CONFIRMED_TITLE}")
 
 
 def render_confirmed_contracts(schools, target=None, *, mail_form="", authority_finance="", claim_href="",
                                title=CONFIRMED_TITLE, reviewed_nsw=(), can_edit=False, billing_href="",
-                               billing_settings=None, summaries=None):
+                               billing_settings=None, summaries=None, expanded_authority="", expanded_schools=(),
+                               include_empty=False):
     if target is None:
         ordered = sorted(schools.items(), key=lambda pair: (pair[1]["name"].casefold(), pair[0]))
-        entries = [
-            _contract_list_item(
+        entries = []
+        for key, school in ordered:
+            toggle = ""
+            expanded = key == ("authority", expanded_authority)
+            if key[0] == "authority":
+                href = CONFIRMED_ROOT if expanded else _authority_register_href(key[1])
+                label = "收起学校" if expanded else "展开学校"
+                toggle = (
+                    f'<a href="{escape(href, quote=True)}" aria-label="{label} · {escape(school["name"], quote=True)}">'
+                    f'{label}</a>'
+                )
+            entries.append(_contract_list_item(
                 confirmed_url(key), school["name"], TARGET_LABELS[key[0]], "已确认",
-                summary=(summaries or {}).get(key),
-            )
-            for key, school in ordered
-        ]
+                summary=(summaries or {}).get(key), authority=toggle,
+            ))
+            if expanded:
+                entries.append('<li class="revenue-authority-breakdown-item">'
+                               + _authority_school_breakdown(key, school["name"], expanded_schools,
+                                                            include_empty=include_empty) + '</li>')
         entries.extend(
             _contract_list_item(
                 f"{DRAFT_ROOT}/{quote(uid, safe='')}?contract_only=1",

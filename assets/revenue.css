@@ -824,3 +824,50 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
 .revenue-school-student-results dl { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 8px 0; }
 .revenue-school-student-results dt { color: #40526b; font-size: 12px; }
 .revenue-school-student-results dd { margin: 2px 0 0; }
+
+.revenue-authority-breakdown {
+  border: 1px solid var(--revenue-line);
+  border-radius: 12px;
+  margin: 0 0 8px;
+  min-width: 0;
+  padding: 14px;
+  scroll-margin-top: 16px;
+}
+.revenue-authority-breakdown-heading {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.revenue-authority-breakdown-heading h3,
+.revenue-authority-context { margin: 0; }
+.revenue-authority-breakdown-heading a {
+  align-items: center;
+  color: var(--revenue-primary);
+  display: inline-flex;
+  min-height: 40px;
+}
+.revenue-authority-context { color: #40526b; margin-bottom: 6px; }
+.revenue-panel .revenue-authority-school-table {
+  border-collapse: collapse;
+  table-layout: auto;
+  width: 100%;
+}
+.revenue-authority-school-table :is(th, td) {
+  border-bottom: 1px solid var(--revenue-line);
+  overflow-wrap: anywhere;
+  padding: 8px;
+  text-align: left;
+}
+.revenue-authority-school-table thead th { color: #40526b; font-size: 13px; }
+.revenue-authority-school-table tbody th {
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.revenue-authority-school-table tbody td { width: 155px; }
+.revenue-authority-school-table .revenue-school-student-statistics { margin: 0; }

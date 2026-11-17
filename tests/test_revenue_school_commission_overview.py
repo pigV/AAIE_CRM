@@ -94,6 +94,40 @@ class SchoolStudentOverviewTests(unittest.TestCase):
             workflow.return_value.candidates.assert_not_called()
         self.assertEqual(self.overview.read(("school", 2), self.school)["status"], "由州／领地教育局结算")
 
+    def test_authority_school_breakdown_uses_membership_and_project_school(self):
+        connection = self.connection
+        connection.executescript("""
+            ALTER TABLE schools ADD COLUMN school_name TEXT;
+            UPDATE schools SET school_name='First Public School' WHERE id=3;
+            INSERT INTO schools VALUES(4,'NSW','Government','Second Public School'),
+                                      (5,'NSW','Government','Empty Public School'),
+                                      (6,'NSW','Independent','Private School');
+            INSERT INTO cycle_final_acceptances VALUES('QA-03',4,'active',30);
+        """)
+        target = ("authority", "NSW")
+        overview = SchoolCommissionOverview(connection, self.intake, 1, can_view_claims=True)
+        contract = {**self.school, "confirmed": [("document", [], "nsw-terms")]}
+        with patch("revenue.school_commission_overview.InstitutionCommissionDraft") as workflow:
+            workflow.return_value.terms.return_value = {"payment_mode": "nsw_claims_only"}
+            workflow.return_value.candidates.return_value = [
+                {"student_id": "QA-03", "school_id": 4, "component_uid": "project-4",
+                 "uid": "project-4:first_year", "gross_cents": 10000, "academic_period": "first_year"},
+                {"student_id": "QA-03", "school_id": 2, "component_uid": "other-state",
+                 "uid": "wrong:first_year", "gross_cents": 10000, "academic_period": "first_year"},
+            ]
+            rows = overview.authority_schools(target, contract)
+            self.assertEqual([(r["id"], r["students"], r["claimable"]) for r in rows], [(3, 1, 0), (4, 1, 1)])
+            all_rows = overview.authority_schools(target, contract, include_empty=True)
+            self.assertEqual([(r["id"], r["students"]) for r in all_rows], [(3, 1), (4, 1), (5, 0)])
+            self.assertEqual(overview.read(target, contract)["students"], 1)
+            self.assertEqual(overview.read(target, contract, view="claimable", authority_school_id=3)["rows"], [])
+            self.assertEqual(overview.read(target, contract, view="claimable", authority_school_id=4)["rows"][0]
+                             ["projects"][0]["component_uid"], "project-4")
+            for invalid in (1, 2, 6, 999):
+                with self.assertRaises(LookupError):
+                    overview.read(target, contract, view="all", authority_school_id=invalid)
+            self.assertEqual(overview.read(target, contract, view="all", authority_school_id=5)["students"], 0)
+
     def test_provider_reuses_candidates_and_distinguishes_zero_and_restricted(self):
         target = ("provider", 10)
         school = {**self.school, "confirmed": [("document", [], "provider-terms")]}

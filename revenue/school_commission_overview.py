@@ -21,7 +21,11 @@ class SchoolCommissionOverview:
         self.formal_candidates = formal_candidates
         self.assignment = school_commission_assignment(connection)
 
-    def _memberships(self, target):
+    def _authority_school_ids(self, state):
+        return [school_id for school_id, assignment in self.assignment.items()
+                if assignment == ("public", state)]
+
+    def _memberships(self, target, *, authority_school_id=None):
         kind, key = target
         visible = self.model.visibility.student_predicate("s")
         if kind == "provider":
@@ -38,27 +42,26 @@ class SchoolCommissionOverview:
                       AND {visible}
                     ORDER BY c.student_id,c.id DESC""", (key,),
             ).fetchall()
-        school_ids = [key] if kind == "school" else [
-            school_id for school_id, (sector, state) in self.assignment.items()
-            if state == key and sector == "public"
-        ]
+        school_ids = [key] if kind == "school" else self._authority_school_ids(key)
+        if authority_school_id is not None:
+            school_ids = [authority_school_id]
         if not school_ids:
             return []
         placeholders = ",".join("?" for _ in school_ids)
         return self.connection.execute(
             f"""WITH membership AS (
-                    SELECT student_id, '当前在读' AS source, start_date AS intake,
+                    SELECT student_id, school_id, '当前在读' AS source, start_date AS intake,
                            NULL AS case_id, NULL AS cycle_id, 0 AS priority
                     FROM student_school_enrolments
                     WHERE school_id IN ({placeholders}) AND status='active' AND enrolment_role='current'
                     UNION ALL
-                    SELECT a.student_id, '已最终确认', NULL, r.id, a.application_cycle_id, 1
+                    SELECT a.student_id, a.school_id, '已最终确认', NULL, r.id, a.application_cycle_id, 1
                     FROM cycle_final_acceptances a
                     LEFT JOIN revenue_commercial_cases r ON r.application_cycle_id=a.application_cycle_id
                          AND r.student_id=a.student_id
                     WHERE a.school_id IN ({placeholders}) AND a.acceptance_status='active'
                 )
-                SELECT m.student_id, m.source, m.intake, m.case_id, m.cycle_id
+                SELECT m.student_id, m.school_id, m.source, m.intake, m.case_id, m.cycle_id
                 FROM membership m JOIN students s ON s.student_id=m.student_id
                 WHERE {visible} ORDER BY m.student_id,m.priority,m.cycle_id DESC""",
             school_ids + school_ids,
@@ -96,16 +99,46 @@ class SchoolCommissionOverview:
                     })
         return ("" if available else "暂未开放申领"), candidates
 
-    def read(self, target, school, *, view=None):
-        members = defaultdict(list)
+    def authority_schools(self, target, contract, *, include_empty=False):
+        school_ids = self._authority_school_ids(target[1])
+        if not school_ids:
+            return []
+        members = defaultdict(set)
         for row in self._memberships(target):
+            members[row["school_id"]].add(row["student_id"])
+        status, candidates = self._candidates(target, contract)
+        eligible = defaultdict(set)
+        for row in candidates:
+            school_id = row.get("school_id")
+            if row.get("uid") and row["student_id"] in members.get(school_id, ()):
+                eligible[school_id].add(row["student_id"])
+        placeholders = ",".join("?" for _ in school_ids)
+        schools = self.connection.execute(
+            f"SELECT id, school_name FROM schools WHERE id IN ({placeholders})", school_ids,
+        ).fetchall()
+        rows = [
+            {"id": sid, "name": name, "students": len(members[sid]),
+             "claimable": None if status else len(eligible[sid]), "status": status}
+            for sid, name in schools if include_empty or sid in members
+        ]
+        return sorted(rows, key=lambda row: (not row["students"], row["name"].casefold(), row["id"]))
+
+    def read(self, target, school, *, view=None, authority_school_id=None):
+        if authority_school_id is not None and (
+            target[0] != "authority" or self.assignment.get(authority_school_id) != ("public", target[1])
+        ):
+            raise LookupError("School is outside this education authority")
+        members = defaultdict(list)
+        for row in self._memberships(target, authority_school_id=authority_school_id):
             members[row["student_id"]].append(row)
         status, candidates = self._candidates(target, school)
         projects = defaultdict(dict)
         blocked = defaultdict(list)
         for row in candidates:
             sid = row["student_id"]
-            if sid not in members:
+            if sid not in members or (
+                authority_school_id is not None and row.get("school_id") != authority_school_id
+            ):
                 continue
             if row.get("uid"):
                 period = row.get("academic_period")
@@ -117,6 +150,10 @@ class SchoolCommissionOverview:
         result = {"students": len(members), "claimable": len(projects) if not status else None, "status": status}
         if view is None:
             return result
+        if authority_school_id is not None:
+            result["school_name"] = self.connection.execute(
+                "SELECT school_name FROM schools WHERE id=?", (authority_school_id,),
+            ).fetchone()[0]
         rows = []
         for sid, memberships in members.items():
             if view == "claimable" and sid not in projects:
