@@ -325,8 +325,8 @@ def assign_offer_school(connection, offer_id: int, school_id: int, actor) -> Off
             int(offer_id),
         ),
     )
-    _attach_offer_to_active_cycle(connection, int(offer_id))
-    ensure_canonical_offer_event(connection, int(offer_id), actor)
+    if _attach_offer_to_active_cycle(connection, int(offer_id)):
+        ensure_canonical_offer_event(connection, int(offer_id), actor)
     return result
 
 
@@ -341,8 +341,8 @@ def apply_offer_classification(connection, offer_id: int, school_name: str) -> O
                 WHERE id=?""",
             (result.school_id, result.city_id, result.city_name, result.sector_key, int(offer_id)),
         )
-        _attach_offer_to_active_cycle(connection, int(offer_id))
-        ensure_canonical_offer_event(connection, int(offer_id))
+        if _attach_offer_to_active_cycle(connection, int(offer_id)):
+            ensure_canonical_offer_event(connection, int(offer_id))
     else:
         connection.execute(
             """UPDATE offers
@@ -354,26 +354,32 @@ def apply_offer_classification(connection, offer_id: int, school_name: str) -> O
     return result
 
 
-def _attach_offer_to_active_cycle(connection, offer_id: int) -> None:
-    """Use Workflow V2 ownership when available; classification remains usable without a cycle."""
+def _attach_offer_to_active_cycle(connection, offer_id: int) -> bool:
+    """Keep an existing owner or use the established school-education cycle."""
 
     if not connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='application_cycles'"
     ).fetchone():
-        return
-    offer_columns = {
-        str(row[1]) for row in connection.execute("PRAGMA table_info('offers')").fetchall()
-    }
-    if "application_cycle_id" not in offer_columns:
-        return
+        return False
+    if "application_cycle_id" not in _table_columns(connection, "offers"):
+        return False
     from application_cycle import attach_offer, get_current_cycle
 
-    student = connection.execute(
-        "SELECT student_id FROM offers WHERE id=?", (int(offer_id),)
+    offer = connection.execute(
+        "SELECT student_id,application_cycle_id FROM offers WHERE id=?", (offer_id,),
     ).fetchone()
-    if student is None or get_current_cycle(connection, str(student[0])) is None:
-        return
-    attach_offer(connection, int(offer_id), occurred_at=_now_iso())
+    if offer is None:
+        return False
+    if offer[1] is not None:
+        owner = connection.execute(
+            "SELECT 1 FROM application_cycles WHERE id=? AND student_id=? AND status='active'",
+            (offer[1], offer[0]),
+        ).fetchone()
+        return owner is not None
+    if get_current_cycle(connection, str(offer[0])) is None:
+        return False
+    attach_offer(connection, offer_id, occurred_at=_now_iso())
+    return True
 
 
 def get_current_accepted_offer(connection, student_id: str) -> AcceptedOffer | None:

@@ -61336,6 +61336,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 if classification_resolved
                 else '<span class="offer-classification-badge is-unresolved">待完善学校资料</span>'
             )
+            if (
+                classification_resolved and "application_cycle_id" in offer.keys()
+                and offer["application_cycle_id"] is None and transfer_binding is None
+                and offer_record_value(offer, "document_type") in {"Offer", "SignedOffer"}
+            ):
+                classification_badge += '<span class="offer-classification-badge is-unresolved">待核对学校申请周期</span>'
             accepted_badge = (
                 '<span class="offer-accepted-badge">Transfer 当前已接受</span>'
                 if transfer_is_accepted else
@@ -68321,6 +68327,21 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("Visa Case 不存在。", HTTPStatus.NOT_FOUND)
         if "lodgement_recorded_at" not in case.keys():
             return self.flash_redirect(return_path, "数据库迁移尚未完成，暂时不能记录正式签证递交。", "error")
+        if form_text_value(self.form, "action") == "link-recorded-visa-grant":
+            if not can_workflow_module_save(self.user, "Visa"):
+                return self.deny_module_access("visa")
+            from visa_cycle_assignment import link_recorded_visa_grant
+
+            try:
+                with db.transaction() as connection:
+                    link_recorded_visa_grant(
+                        connection, student_id, int(case_id),
+                        form_text_value(self.form, "application_cycle_id"),
+                        actor=self.user, timestamp=now_iso(),
+                    )
+            except ValueError as exc:
+                return self.flash_redirect(return_path, str(exc), "error")
+            return self.flash_redirect(return_path, "已补关联签证所属申请周期。")
         if case["lodgement_recorded_at"]:
             form = getattr(self, "form", {}) or {}
             if form_text_value(form, "action") == "correct-lodgement-date":
@@ -68431,6 +68452,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             projection = self._visa_display_projection(case)
             acknowledge_date = projection["acknowledge_letter_date"] or projection["processing"]["fields"]["acknowledge_sent_on"]["value"] or ""
         if case["lodgement_recorded_at"]:
+            cycle_link = ""
+            needs_cycle_review = (
+                "application_cycle_id" in case.keys() and case["application_cycle_id"] is None
+                and is_student_visa_case(dict(case))
+                and self.student_visa_result_display(case).lower() == "granted"
+            )
+            if needs_cycle_review:
+                cycle_link = '<p role="status">已下签，待核对签证所属的申请周期。</p>'
+            if needs_cycle_review and can_workflow_module_save(self.user, "Visa"):
+                cycle_field = self.visa_case_cycle_field(student_id, explicit=True)
+                if cycle_field:
+                    cycle_link += f"""
+                    <form class="visa-lodgement-form" method="post" action="/students/{quote(str(student_id))}/visa-cases/{int(case['id'])}/lodgement-submit">
+                      <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                      <input type="hidden" name="action" value="link-recorded-visa-grant">
+                      {cycle_field}
+                      <button type="submit">补关联申请周期</button>
+                    </form>"""
             correction = ""
             if dates_available:
                 suggested_date = acknowledge_date or case["actual_lodgement_date"] or ""
@@ -68452,6 +68491,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 <div class="visa-management-field-card"><dt>记录时间</dt><dd>{esc(display_datetime(case['lodgement_recorded_at']))}</dd></div>
               </dl>
               {correction}
+              {cycle_link}
             </section>"""
         return f"""
         <section class="panel visa-lodgement-panel" id="visa-lodgement-submission">
@@ -83390,6 +83430,35 @@ def start_optional_startup_task(service, task_name, task):
     ).start()
 
 
+APPLICATION_STATUS_RECONCILIATION_SECONDS = 15 * 60
+
+
+def start_application_status_reconciliation():
+    from visa_cycle_assignment import reconcile_recorded_visa_grants
+
+    stop = threading.Event()
+
+    def reconcile():
+        with db.transaction() as connection:
+            return reconcile_recorded_visa_grants(
+                connection, timestamp=datetime.now().astimezone().isoformat(timespec="seconds")
+            )
+
+    tick = optional_business_task(reconcile, lambda: APP_WRITE_GATE)
+
+    def worker():
+        while not stop.wait(APPLICATION_STATUS_RECONCILIATION_SECONDS):
+            try:
+                linked = tick()
+                if linked:
+                    append_service_log("admin", "application_status_reconciled", linked=linked)
+            except Exception as exc:
+                append_service_log("admin", "application_status_reconciliation_error", repr(exc))
+
+    threading.Thread(target=worker, name="application-status-reconciliation", daemon=True).start()
+    return stop
+
+
 def run_server(
     host,
     port,
@@ -83454,7 +83523,10 @@ def run_server(
         if service == "parent":
             print("Parent Form Portal should remain on 127.0.0.1:8781 for Cloudflare.")
         print("Default login: admin / ChangeMe!2026")
+        reconciliation_stop = None
         try:
+            if service == "admin" and managed is not None and APP_WRITE_GATE is not None:
+                reconciliation_stop = start_application_status_reconciliation()
             if not SAFE_PRODUCTION_ACTIVE and not STAGING and service == "parent":
                 start_optional_startup_task(service, "reminder", run_reminder_engine)
             if not SAFE_PRODUCTION_ACTIVE and not STAGING and service == "admin":
@@ -83466,6 +83538,8 @@ def run_server(
             append_service_log(service, "unexpected_exit", repr(exc), pid=os.getpid())
             raise
         finally:
+            if reconciliation_stop is not None:
+                reconciliation_stop.set()
             server.server_close()
             append_service_log(service, "server_closed", pid=os.getpid())
     finally:

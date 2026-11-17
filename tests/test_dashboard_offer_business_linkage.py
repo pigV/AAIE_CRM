@@ -1,6 +1,7 @@
 import unittest
 
 from offer_acceptance import (
+    apply_offer_classification,
     ensure_canonical_offer_event,
     set_accepted_offer,
     withdraw_accepted_offer,
@@ -31,9 +32,12 @@ class DashboardOfferBusinessLinkageTests(OfferAcceptanceFixture):
             INSERT INTO users VALUES(9);
             INSERT INTO students VALUES('S001');
             CREATE TABLE application_cycles(
-              id INTEGER PRIMARY KEY,cycle_uid TEXT,student_id TEXT,status TEXT
+              id INTEGER PRIMARY KEY,cycle_uid TEXT,student_id TEXT,status TEXT,
+              parent_form_token TEXT,source_student_case_id INTEGER,cycle_type TEXT DEFAULT 'initial',
+              sequence_no INTEGER DEFAULT 1,outcome TEXT,opened_at TEXT,closed_at TEXT
             );
-            INSERT INTO application_cycles VALUES(1,'cycle-business-link','S001','active');
+            INSERT INTO application_cycles(id,cycle_uid,student_id,status,opened_at)
+                VALUES(1,'cycle-business-link','S001','active','2026-08-10');
             CREATE TABLE public_application_groups(
               id INTEGER PRIMARY KEY,application_cycle_id INTEGER,student_id TEXT,
               city_id INTEGER,status TEXT,submitted_at TEXT,
@@ -108,6 +112,25 @@ class DashboardOfferBusinessLinkageTests(OfferAcceptanceFixture):
         ).fetchone()
         self.assertEqual((101, "public", NOW), tuple(event))
         self.assertEqual((canonical_offer_id, "active"), tuple(acceptance))
+
+    def test_offer_saved_without_active_cycle_stays_available_for_review(self):
+        self.connection.execute("UPDATE offers SET application_cycle_id=NULL WHERE id=101")
+        self.connection.execute("UPDATE application_cycles SET status='closed' WHERE id=1")
+        result = apply_offer_classification(self.connection, 101, "Melbourne Public School")
+        self.assertEqual("resolved", result.status)
+        self.assertIsNone(self.connection.execute(
+            "SELECT application_cycle_id FROM offers WHERE id=101"
+        ).fetchone()[0])
+        self.assertEqual(0, self.connection.execute(
+            "SELECT count(*) FROM offer_received_events"
+        ).fetchone()[0])
+        self.connection.execute("UPDATE application_cycles SET status='active' WHERE id=1")
+        apply_offer_classification(self.connection, 101, "Melbourne Public School")
+        apply_offer_classification(self.connection, 101, "Melbourne Public School")
+        events = self.connection.execute(
+            "SELECT application_cycle_id,legacy_offer_id FROM offer_received_events"
+        ).fetchall()
+        self.assertEqual([(1, 101)], [tuple(event) for event in events])
 
     def test_change_and_withdraw_keep_canonical_history(self):
         ensure_canonical_offer_event(self.connection, 101, self.actor)

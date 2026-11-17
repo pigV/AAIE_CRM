@@ -120,6 +120,10 @@ def _write_current(
         ),
     )
     _project_case(conn, case_id, effective_result, occurred_at)
+    if effective_result == "Granted" and not conflict:
+        from visa_cycle_assignment import reconcile_recorded_visa_grants
+
+        reconcile_recorded_visa_grants(conn, timestamp=occurred_at, case_id=case_id)
 
 
 def _result(conn, case_id, created):
