@@ -29564,7 +29564,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     raise ValueError("请先选择学校付款主体。")
                 self._begin_school_commission_write(connection,pilot,"invoicing")
                 if payer_mail or mail_settings(connection, pilot.entity_id).get("routing") == "payer":
-                    raise ValueError("请在已确认学校佣金合同页核对收票邮箱。")
+                    raise ValueError(f"请在「{CONFIRMED_TITLE}」页核对收票邮箱。")
                 if mail_release:
                     release_stage = self.form.get("mail_stage")
                     recipient = str(self.form.get("recipient") or "").strip()

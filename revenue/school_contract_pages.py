@@ -22,7 +22,7 @@ from ui import ASSET_VERSION
 
 CONFIRMED_ROOT = "/revenue/contracts"
 UPLOAD_ROOT = CONFIRMED_ROOT + "/upload-school"
-CONFIRMED_TITLE = "已确认学校佣金"
+CONFIRMED_TITLE = "学校佣金合同与申领"
 UPLOAD_TITLE = "新增／上传学校合同"
 TARGET_FIELDS = {"school": "school_id", "provider": "higher_education_provider_id",
                  "authority": "education_authority"}
@@ -368,7 +368,7 @@ def render_confirmed_contracts(schools, target=None, *, mail_form="", authority_
     if target[0] == "authority":
         content += f'<p><a href="{UPLOAD_ROOT}?education_authority={quote(target[1], safe="")}">上传续约合同</a></p>'
     body = f'<section class="revenue-panel">{content}{authority_finance}{mail_form}</section>'
-    return _page(title, body, back_href=CONFIRMED_ROOT, back_label="返回已确认学校佣金")
+    return _page(title, body, back_href=CONFIRMED_ROOT, back_label=f"返回{CONFIRMED_TITLE}")
 
 
 def render_contract_upload(schools, providers, csrf, token, *, authorities=(), renewal=False, pending=()):
