@@ -191,6 +191,7 @@ def render_enrolment_workbench(
     feedback_kind: str = "success",
     transfer_contract_id: int | None = None,
     embedded: bool = False,
+    local_admission: bool = False,
 ) -> str:
     student_id = context.student_id
     options = _school_options(school_choices)
@@ -201,16 +202,24 @@ def render_enrolment_workbench(
             f'value="{int(transfer_contract_id)}">'
             if transfer_contract_id is not None else ""
         )
-        current_submit_label = "确认当前学校"
-        current_form = f'''<section class="panel"><h2>确认当前学校</h2>
+        current_submit_label = "确认入学" if local_admission else "确认当前学校"
+        admission_confirmation = (
+            '<input type="hidden" name="local_admission" value="yes">'
+            '<label><input type="checkbox" name="school_confirmed" value="yes" required>'
+            '已核实为本地生，并收到学校明确的入学确认</label>'
+            if local_admission else ""
+        )
+        reason_label = "学校确认依据" if local_admission else "确认原因"
+        date_required = " required" if local_admission else ""
+        current_form = f'''<section class="panel"><h2>{_e(current_submit_label)}</h2>
           <form method="post" action="/students/{_e(student_id)}/school-enrolments/current" class="stack-form">
-            <input type="hidden" name="csrf" value="{_e(csrf)}">{transfer_continuation}
+            <input type="hidden" name="csrf" value="{_e(csrf)}">{transfer_continuation}{admission_confirmation}
             <label>学校目录<select name="school_id">{options}</select></label>
             <label>其他学校名称（目录留空时填写）<input name="school_name_snapshot"></label>
             <label>课程<input name="course_name_snapshot"></label>
             <label>年级<input name="year_level_snapshot"></label>
-            <label>开始日期<input type="date" name="start_date"></label>
-            <label>确认原因<textarea name="reason" required></textarea></label>
+            <label>开始日期<input type="date" name="start_date"{date_required}></label>
+            <label>{_e(reason_label)}<textarea name="reason" required></textarea></label>
             <button class="primary">{_e(current_submit_label)}</button>
           </form></section>'''
     upcoming_form = ""

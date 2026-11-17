@@ -103,3 +103,88 @@ def confirm_school_coe(conn, student_id, acceptance_id, coe_id, actor_id, stamp)
             confirmed_by=excluded.confirmed_by, confirmed_at=excluded.confirmed_at
         WHERE evidence_snapshot<>excluded.evidence_snapshot
     """, (acceptance_id, coe_id, evidence_snapshot(row), actor_id, stamp))
+
+
+def historical_school_coe_rows(conn, student_id, *, today=None):
+    """Find expired offers with signed evidence and a matching CoE uploaded in time."""
+    from dashboard_business_time import business_date_iso
+
+    today = today or datetime.now(ZoneInfo("Australia/Melbourne")).date()
+    cursor = conn.execute("""
+        SELECT cycle.id AS application_cycle_id, receipt.id AS offer_event_id,
+               receipt.school_name_snapshot, school.state, school.sector_key,
+               offer.offer_date, offer.offer_expiry_date,
+               signed.id AS signed_document_id, signed.uploaded_at AS signed_uploaded_at,
+               coe.id AS coe_id, coe.coe_provider, coe.school_name, coe.coe_course,
+               coe.coe_start_date, coe.coe_end_date, coe.file_path,
+               document.id AS document_id, document.uploaded_at AS coe_uploaded_at
+          FROM application_cycles cycle
+          JOIN offer_received_events receipt ON receipt.application_cycle_id=cycle.id
+               AND receipt.student_id=cycle.student_id
+          JOIN offers offer ON offer.id=receipt.legacy_offer_id
+               AND offer.application_cycle_id=cycle.id AND offer.student_id=cycle.student_id
+          JOIN schools school ON school.id=receipt.school_id AND school.id=offer.school_id
+          JOIN coe_oshc coe ON coe.application_cycle_id=cycle.id AND coe.student_id=cycle.student_id
+          JOIN student_documents signed ON signed.id=(
+               SELECT max(d.id) FROM student_documents d
+                WHERE d.student_id=cycle.student_id AND d.file_path=offer.signed_offer_file_path
+                  AND d.document_type='SignedOffer' AND d.is_active=1
+                  AND d.document_status='active' AND d.voided_at IS NULL
+          )
+          JOIN student_documents document ON document.id=(
+               SELECT max(d.id) FROM student_documents d
+                WHERE d.student_id=cycle.student_id AND d.file_path=coe.file_path
+                  AND d.document_type IN ('COE','COE_CAAW') AND d.is_active=1
+                  AND d.document_status='active' AND d.voided_at IS NULL
+          )
+         WHERE cycle.student_id=? AND cycle.status='active' AND cycle.cycle_type='initial'
+           AND cycle.education_stream='school_education'
+           AND lower(offer.offer_status) IN ('signed','signed_received')
+           AND upper(coe.document_kind) IN ('COE','COE_CAAW')
+           AND lower(coalesce((SELECT state FROM offer_received_event_state_events
+                WHERE offer_received_event_id=receipt.id ORDER BY occurred_at DESC,id DESC LIMIT 1
+                ),'active'))='active'
+           AND NOT EXISTS (SELECT 1 FROM cycle_final_acceptances WHERE application_cycle_id=cycle.id)
+           AND NOT EXISTS (SELECT 1 FROM student_offer_acceptances
+                            WHERE student_id=cycle.student_id AND offer_id<>offer.id)
+    """, (student_id,))
+    keys = [column[0] for column in cursor.description]
+    candidates = []
+    for values in cursor:
+        row = dict(zip(keys, values))
+        issued = business_date_iso(row["offer_date"])
+        expiry = business_date_iso(row["offer_expiry_date"])
+        signed = business_date_iso(row["signed_uploaded_at"])
+        coe_uploaded = business_date_iso(row["coe_uploaded_at"])
+        if (all((issued, expiry, signed, coe_uploaded))
+                and issued <= signed <= coe_uploaded <= expiry < today.isoformat()
+                and not eligibility_reason(row, today)):
+            candidates.append(row)
+    return candidates
+
+
+def confirm_historical_school_coe(conn, student_id, offer_event_id, coe_id, actor, stamp):
+    """Record staff confirmation of existing evidence within the caller's transaction."""
+    from workflow_offer_events import select_final_acceptance
+
+    matches = [row for row in historical_school_coe_rows(conn, student_id)
+               if row["offer_event_id"] == offer_event_id and row["coe_id"] == coe_id]
+    if len(matches) != 1:
+        raise ValueError("找不到相符且在 Offer 有效期内上传的已签 Offer 和主课 CoE。")
+    row = matches[0]
+    acceptance = select_final_acceptance(
+        conn, row["application_cycle_id"], offer_event_id, selected_at=stamp,
+        actor_user_id=actor["id"], actor_name=actor["username"],
+    )
+    confirm_school_coe(conn, student_id, acceptance.id, coe_id, actor["id"], stamp)
+    conn.execute("""
+        INSERT INTO audit_logs(user_id,username,action_type,module_name,module_key,
+                               record_id,student_id,new_value,status,created_at)
+        VALUES (?,?,'historical_final_school_coe_confirmed','coe_oshc','coe_oshc',?,?,?,'success',?)
+    """, (actor["id"], actor["username"], coe_id, student_id, json.dumps({
+        "application_cycle_id": row["application_cycle_id"], "acceptance_id": acceptance.id,
+        "offer_event_id": offer_event_id, "signed_document_id": row["signed_document_id"],
+        "signed_uploaded_at": row["signed_uploaded_at"], "coe_document_id": row["document_id"],
+        "coe_uploaded_at": row["coe_uploaded_at"],
+    }), stamp))
+    return acceptance.id

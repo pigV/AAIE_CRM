@@ -1426,23 +1426,9 @@ def render_revenue_case_workbench(
                 ("付款凭证", evidence),
                 ("收据", receipt),
             ]))
-        receipts = []
-        for item in data.get("receipt_records") or []:
-            view = (
-                f'<a href="{escape(str(item["view_url"]), quote=True)}">查看收据</a>'
-                if item.get("view_url") else "—"
-            )
-            receipts.append(definition_list([
-                ("收据编号", render_value(item.get("receipt_number"))),
-                ("金额", _currency_money(str(item.get("currency_code") or "AUD"), int(item.get("amount_cents") or 0))),
-                ("签发时间", render_value(item.get("issued_at_display"))),
-                ("文件", view),
-            ]))
         return (
             '<div class="revenue-history-group"><h3>收款记录</h3>'
             + ("".join(payment_cards) or '<p class="revenue-empty">暂无收款记录</p>')
-            + '</div><div class="revenue-history-group"><h3>收据</h3>'
-            + ("".join(receipts) or '<p class="revenue-empty">暂无收据</p>')
             + '</div>'
         )
 
@@ -1513,7 +1499,7 @@ def render_revenue_case_workbench(
     sections = []
     for section in data.get("sections") or []:
         key = str(section["key"])
-        if key == "documents_evidence":
+        if key in {"documents_evidence", "timeline_audit"}:
             continue
         if key == "student_application":
             content = student_application_content()
@@ -1527,30 +1513,6 @@ def render_revenue_case_workbench(
         else:
             content = safe_generic_content(section)
         sections.append(case_section(key, str(section["title"]), content))
-    technical_cards_parts = []
-    for group_name, records in (data.get("technical_information") or {}).items():
-        if not records:
-            continue
-        normalized_records = records if isinstance(records, list) else [records]
-        for record in normalized_records:
-            if not isinstance(record, dict):
-                continue
-            technical_cards_parts.append(
-                '<section class="revenue-technical-record"><h3>'
-                + escape(str(group_name).replace("_", " ").title())
-                + "</h3><dl class=\"revenue-case-record\">"
-                + "".join(
-                    f'<div><dt>{escape(str(key).replace("_", " "))}</dt><dd>{render_value(value)}</dd></div>'
-                    for key, value in record.items()
-                )
-                + "</dl></section>"
-            )
-    technical_cards = "".join(technical_cards_parts)
-    technical_details = (
-        '<details class="revenue-technical-details"><summary>技术信息 / 审计信息</summary>'
-        f'<div class="revenue-technical-grid">{technical_cards}</div></details>'
-        if technical_cards else ""
-    )
     actions = ""
     other_operations = ""
     if not mobile:
@@ -1614,7 +1576,6 @@ def render_revenue_case_workbench(
       {actions}
       <div class="revenue-case-sections">{''.join(sections)}</div>
       {other_operations}
-      {technical_details}
     </main>"""
 
 

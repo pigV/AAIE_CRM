@@ -8,6 +8,7 @@ import unittest
 from revenue.read_models import RevenueReadModels
 from revenue.views import (
     load_revenue_dashboard,
+    render_revenue_case_workbench,
     render_revenue_initialization_page,
     render_revenue_workspace,
     render_revenue_workspace_page,
@@ -19,6 +20,32 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RevenueViewTests(RevenueDatabaseFixture, unittest.TestCase):
+    def test_case_workbench_shows_receipts_only_in_payment_history(self):
+        data = {
+            "schema_version": "revenue.v1",
+            "title": "收费与佣金档案",
+            "sections": [
+                {"key": "invoice_payment_receipt", "title": "收款、收据与历史发票", "rows": []},
+                {"key": "timeline_audit", "title": "时间线与审计", "rows": [{"event_type": "case_opened"}]},
+            ],
+            "payment_history": [
+                {"evidence_view_url": "/evidence", "receipt_view_url": "/receipt", "receipt_number": "R-123"},
+                {},
+            ],
+            "receipt_records": [{"view_url": "/receipt", "receipt_number": "R-123"}],
+            "technical_information": {"case": {"uid": "internal-case-123"}},
+        }
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = render_revenue_case_workbench(data, mobile=mobile)
+                self.assertNotIn("<h3>收据</h3>", page)
+                self.assertNotIn("时间线与审计", page)
+                self.assertNotIn("技术信息 / 审计信息", page)
+                self.assertNotIn("internal-case-123", page)
+                self.assertIn('href="/evidence">查看付款凭证</a>', page)
+                self.assertIn('href="/receipt">R-123</a>', page)
+                self.assertIn("待生成", page)
+
     def test_empty_dashboard_is_integer_only_and_api_ready(self):
         with self.connect() as connection:
             data = load_revenue_dashboard(connection)

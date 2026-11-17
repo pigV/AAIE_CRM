@@ -110,6 +110,26 @@ class StudentProfileHigherEducationNullCompatibilityTests(unittest.TestCase):
             "StudentProfileNullCompatibilityTest",
         )
 
+    def test_visa_only_selection_survives_a_profile_write_from_an_older_form(self):
+        student = self.insert_student()
+        self.assertEqual("school", app_module.student_form_values(student)["application_service"])
+
+        data = app_module.normalize_form(self.student_data())
+        self.update(student, {**data, "application_service": "visa_only"})
+        self.update(student, data)
+
+        refreshed = self.database.one("SELECT * FROM students WHERE student_id=?", (student["student_id"],))
+        values = app_module.student_form_values(refreshed)
+        html = app_module.student_edit_form("/students/K12-NULL/edit", "csrf", values)
+        self.assertIn('<option value="visa_only" selected>仅办签证</option>', html)
+        history = self.database.all(
+            "SELECT new_value FROM student_change_logs WHERE student_id=? AND field_name='application_service'",
+            (student["student_id"],),
+        )
+        self.assertEqual(["仅办签证"], [row["new_value"] for row in history])
+        self.assertEqual("签证 · 审理中", app_module.visa_only_progress_label({"status": "Lodged"}, "Pending"))
+        self.assertEqual("签证 · 已下签", app_module.visa_only_progress_label({"status": "Lodged"}, "Granted"))
+
     def test_k12_null_course_type_renders_edit_profile(self):
         student = self.insert_student()
 

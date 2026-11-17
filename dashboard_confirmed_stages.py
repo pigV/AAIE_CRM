@@ -225,11 +225,12 @@ def load_dashboard_stages(connection, cycle_ids):
         contracts.setdefault(row["application_cycle_id"], _contract_status(row))
 
     school_responses = {}
-    for cycle_id, status, source, application_id, school_id in connection.execute(f"""
+    school_response_names = {}
+    for cycle_id, status, source, application_id, school_id, school_name in connection.execute(f"""
         WITH requested_cycles AS (
             SELECT id, student_id FROM application_cycles WHERE id IN ({marks})
         )
-        SELECT grp.application_cycle_id, preference.application_status, 'public', grp.id, preference.school_id
+        SELECT grp.application_cycle_id, preference.application_status, 'public', grp.id, preference.school_id, preference.school_name_snapshot
           FROM public_application_groups grp
           JOIN requested_cycles cycle ON cycle.id=grp.application_cycle_id
                AND cycle.student_id=grp.student_id
@@ -238,18 +239,21 @@ def load_dashboard_stages(connection, cycle_ids):
            AND trim(coalesce(grp.submitted_at,''))<>''
            AND preference.application_status<>'planned'
         UNION ALL
-        SELECT application.application_cycle_id, application.status, 'private', application.id, NULL
+        SELECT application.application_cycle_id, application.status, 'private', application.id, NULL, application.school_name_snapshot
           FROM private_school_applications application
           JOIN requested_cycles cycle ON cycle.id=application.application_cycle_id
                AND cycle.student_id=application.student_id
          WHERE trim(coalesce(application.submitted_at,''))<>''
         UNION ALL
-        SELECT application_cycle_id, lower(status), 'higher', id, NULL
+        SELECT application_cycle_id, lower(status), 'higher', id, NULL, NULL
           FROM higher_education_applications
          WHERE application_cycle_id IN (SELECT id FROM requested_cycles) AND is_current=1
            AND trim(coalesce(submitted_at,''))<>''
     """, cycle_ids):
-        school_responses.setdefault(cycle_id, set()).add((status, (source, application_id, school_id)))
+        application = (source, application_id, school_id)
+        school_responses.setdefault(cycle_id, set()).add((status, application))
+        if school_name:
+            school_response_names[application] = school_name
 
     preparing_cases = set()
     for table in ("public_application_groups", "private_school_applications", "higher_education_applications"):
@@ -272,7 +276,7 @@ def load_dashboard_stages(connection, cycle_ids):
 
     offers = {}
     for row in _rows(connection, f"""
-        SELECT event.id,event.application_cycle_id,legacy.offer_expiry_date,
+        SELECT event.id,event.application_cycle_id,legacy.offer_expiry_date,event.school_name_snapshot,
                event.school_id,event.public_application_group_id,event.private_application_id,
                higher.application_id AS higher_application_id,
                (lower(coalesce((SELECT change.state FROM offer_received_event_state_events change
@@ -449,6 +453,16 @@ def load_dashboard_stages(connection, cycle_ids):
             outstanding=outstanding, coe=confirmed_coe,
             visa=visas.get(cycle_id), offer_hold=offer_hold,
         )
+        if resolved and resolved[0] == "07_school_response" and expired_offers:
+            expired_names = sorted({offer["school_name_snapshot"] for offer in expired_offers
+                                    if offer["school_name_snapshot"]})
+            waiting_names = sorted({school_response_names[application]
+                                    for status, application in school_responses.get(cycle_id, ())
+                                    if status in WAITING_SCHOOL_RESPONSE and application not in answered
+                                    and application in school_response_names})
+            expired_detail = f"{'、'.join(expired_names)} Offer 已过期".strip()
+            waiting_detail = f"等待 {'、'.join(waiting_names)} 回复" if waiting_names else "等待其他学校回复"
+            resolved = (resolved[0], f"{expired_detail} · {waiting_detail}")
         if (responses or expired_offers) and not waiting_for_school and not valid_offer and not accepted and not (
             offer_hold or visas.get(cycle_id) in {"lodged", "granted", "refused", "withdrawn"}
         ):

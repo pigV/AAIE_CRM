@@ -23,7 +23,7 @@ class NoBusinessDatabase:
     def one(self, sql, params=()):
         if "user_module_permissions" in sql:
             return {"can_edit": 0, "can_view": 1}
-        if "StudentInfo" in sql:
+        if "StudentInfo" in sql or "final_school_optional_steps" in sql or "name='visa_result_status_current'" in sql:
             return None
         raise AssertionError("Unexpected query: " + sql)
 
@@ -120,12 +120,14 @@ def fixture_user(role="Admin", editable=True):
                 module_permissions_json=json.dumps(["students", "applications", "payments", "visa"]))
 
 
-def build_fixture_page(role="Admin", editable=True, cycle_type="transfer", fail_lifecycle=False):
+def build_fixture_page(role="Admin", editable=True, cycle_type="transfer", fail_lifecycle=False, *, consultant_id=2, withdrawal_projection=None, active_cycles=(), cycle_projection=None, visa_only=False):
     """Execute the real GET renderer without SQLite, NAS, or Production rows."""
     student = dict(student_id="1001", passport_first_name="隔离", passport_last_name="学生",
                    form_data_json=json.dumps({"passport_first_name": "隔离", "passport_last_name": "学生"}),
                    created_date="2026-10-07", current_stage="等待建立合同", current_status="等待建立合同",
-                   nas_status="ready")
+                   nas_status="ready", consultant_id=consultant_id)
+    if visa_only:
+        student["form_data_json"] = json.dumps({"application_service": "visa_only"})
     current = SimpleNamespace(lifecycle_type=cycle_type, cycle_id=7, cycle_sequence=2,
                               workflow_stage="等待建立合同", case_id=70, opened_at="2026-10-07",
                               href=None, cycle_status="active", case_status="active", target_context=None,
@@ -143,13 +145,19 @@ def build_fixture_page(role="Admin", editable=True, cycle_type="transfer", fail_
     handler.client_address = ("127.0.0.1", 1)
     handler.require = lambda permission: app.allowed(handler.user, permission)
     handler.student_detail_row = lambda student_id: student
+    if visa_only:
+        handler.student_latest_visa_case = lambda student_id: {"status": "Lodged", "result_status": "Pending"}
+        handler.user["permissions_json"] = json.dumps(["students.view","students.edit","contracts.manage"])
+        handler.user["module_permissions_json"] = json.dumps(["students","applications","visa","payments","student_contracts"])
     handler.message = lambda: ("", "success")
     captured = {}
     handler.send_html = lambda html, **kwargs: captured.update(html=html)
     replacements = {
         "db": _fixture_db,
         "nas": SimpleNamespace(status=lambda: {"ready": True, "mode": "test"}),
-        "load_student_workflow_projection_map": lambda *a, **k: {},
+        "load_student_workflow_projection_map": lambda *a, **k: {
+            "1001": cycle_projection if k.get("cycle_id") is not None else withdrawal_projection,
+        },
         "load_student_lifecycle_view": lambda *a, **k: view,
         "load_lifecycle_workflow_modules": lambda *a, **k: fixture_modules(),
         "student_detail_workflow_file_module_statuses": lambda *a: fixture_modules(),
@@ -170,6 +178,8 @@ def build_fixture_page(role="Admin", editable=True, cycle_type="transfer", fail_
     with ExitStack() as stack:
         for name, replacement in replacements.items():
             stack.enter_context(patch.object(app, name, replacement))
+        if active_cycles:
+            stack.enter_context(patch.object(_fixture_db, "all", return_value=active_cycles))
         if fail_lifecycle:
             stack.enter_context(patch.object(app, "load_student_lifecycle_view", side_effect=ValueError("fixture")))
         stack.enter_context(patch("visa_document_lifecycle.student_projection", return_value=None))
@@ -180,6 +190,73 @@ def build_fixture_page(role="Admin", editable=True, cycle_type="transfer", fail_
 
 
 class StudentDetailInternalOutputTests(unittest.TestCase):
+    def test_withdrawal_entry_for_managers_and_responsible_consultants(self):
+        projection = SimpleNamespace(cycle_id=7, cycle_type="initial", state="active", stage_key="07_school_response", diagnostic="Pennant Hills High School Offer 已过期 · 等待 Killarney Heights High School 回复")
+        for role, owner, expected in (
+            ("Admin", 2, True),
+            ("Manager", 2, True),
+            ("Manager + Student Cases", 2, True),
+            ("Consultant", 1, True),
+            ("Consultant", 2, False),
+            ("Consultant + Student Cases", 2, False),
+        ):
+            with self.subTest(role=role, owner=owner):
+                html = build_fixture_page(role, consultant_id=owner, withdrawal_projection=projection)
+                self.assertEqual(expected, '/students/1001/applications/7/withdraw' in html)
+                self.assertIn(projection.diagnostic, html)
+
+    def test_pending_transfer_contract_does_not_hide_the_existing_cycle_withdrawal(self):
+        pending = SimpleNamespace(state="contract_pending", cycle_id=None, cycle_type="transfer", stage_key="transfer_contract_pending", stage_label="等待转学合同签署", transfer_precreation=False)
+        active = SimpleNamespace(state="active", cycle_id=7, cycle_type="initial")
+        html = build_fixture_page(
+            withdrawal_projection=pending, active_cycles=({"id": 7},), cycle_projection=active,
+        )
+        self.assertIn('/students/1001/applications/7/withdraw', html)
+        ambiguous = build_fixture_page(
+            withdrawal_projection=pending, active_cycles=({"id": 7}, {"id": 8}), cycle_projection=active,
+        )
+        self.assertNotIn("终止本轮申请", ambiguous)
+
+    def test_withdrawal_form_allows_the_delegated_manager(self):
+        handler = object.__new__(app.CRMHandler)
+        handler.user = fixture_user("Manager + Student Cases")
+        handler.csrf = "fixture-csrf"
+        handler.require = lambda permission: app.allowed(handler.user, permission)
+        handler.error_page = lambda message, status: (int(status), message)
+        handler.send_html = lambda html: (200, html)
+        student = {"student_id": "1001", "consultant_id": 2,
+                   "passport_first_name": "Test", "passport_last_name": "Student"}
+        cycle = {"cycle_type": "initial", "status": "active", "source_student_case_id": None}
+        projection = SimpleNamespace(cycle_id=7, stage_label="等待家长签署")
+        def query(sql, params):
+            if "user_module_permissions" in sql:
+                return {"can_edit": 0}
+            return student if "FROM students" in sql else cycle
+
+        fake_db = SimpleNamespace(one=query,
+                                  connect=lambda: None, _release_connection=lambda conn: None)
+        with patch.object(app, "db", fake_db), patch.object(app, "is_workflow_v2_active", return_value=True), \
+                patch.object(app, "load_student_workflow_projection_map", return_value={"1001": projection}), \
+                patch.object(app.nas, "status", return_value={"ready": True, "mode": "test"}), \
+                patch.object(app, "page", side_effect=lambda title, body, *args: body):
+            status, html = handler.student_application_withdraw("GET", "1001", 7)
+            self.assertEqual(200, status)
+            self.assertIn('name="reason"', html)
+            handler.user = fixture_user("Consultant")
+            status, _ = handler.student_application_withdraw("POST", "1001", 7)
+            self.assertEqual(403, status)
+
+    def test_visa_only_detail_shows_visa_progress_and_keeps_contract_access(self):
+        html = build_fixture_page(visa_only=True)
+        self.assertIn("签证 · 审理中", html)
+        self.assertIn('data-tab="visa"', html)
+        self.assertIn('data-tab="contracts"', html)
+        self.assertIn('/visa-cases/create-500', html)
+        for key in ("school_plans", "offer", "payments", "coe", "homestay"):
+            self.assertNotIn(f'data-tab="{key}"', html)
+        self.assertNotIn("制作学校方案", html)
+        self.assertNotIn("等待建立合同", html)
+
     def test_existing_detail_styles_do_not_depend_on_removed_panel(self):
         css = (Path(__file__).resolve().parents[1] / "assets/ui-premium-v2.css").read_text()
         self.assertNotIn(":has(.student-summary-card):has(.workflow-panel):has(.tabs[data-tabs])", css)
