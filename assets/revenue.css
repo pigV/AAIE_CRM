@@ -1432,3 +1432,64 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
 @media (max-width: 640px) {
   .invoice-account-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+.school-claim-school {
+  align-items: center;
+  background: var(--invoice-school);
+  border: 1px solid #ccdef8;
+  border-radius: 9px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  padding: 14px 18px;
+}
+.school-claim-school details { position: relative; }
+.school-claim-school summary { cursor: pointer; font-weight: 700; padding: 3px 0; }
+.school-claim-school ul {
+  background: #fff;
+  border: 1px solid var(--invoice-border);
+  border-radius: 8px;
+  left: 0;
+  list-style: none;
+  margin: 4px 0 0;
+  max-height: 240px;
+  min-width: 100%;
+  overflow: auto;
+  padding: 6px;
+  position: absolute;
+  z-index: 3;
+}
+.school-claim-school li a { display: block; padding: 7px; white-space: nowrap; }
+.school-claim-workspace :is(h2,h3) { font-size: 1.1rem; margin: 0 0 10px; }
+.school-claim-table .invoice-composer-heading h2 { margin: 0; }
+.school-claim-legend { display: flex; flex-wrap: wrap; gap: 6px; }
+.school-claim-workspace .revenue-student-status { display: inline-block; padding: 4px 8px; border-radius: 5px; font-size: .82rem; white-space: nowrap; }
+.school-claim-workspace .revenue-student-status--eligible { color: #126256; background: #def3ed; }
+.school-claim-workspace .revenue-student-status--blocked { color: #83521a; background: #fff1da; }
+.school-claim-workspace .revenue-student-status--claimed { color: #553393; background: #eee6ff; }
+.school-claim-workspace :is(.revenue-student-status--historical,.revenue-student-status--review) { color: #4b607e; background: #eef2f7; }
+.school-claim-table table { border-collapse: collapse; min-width: 850px; width: 100%; }
+.school-claim-table :is(th,td) { border-bottom: 1px solid var(--invoice-border); padding: 10px 8px; text-align: left; vertical-align: top; }
+.school-claim-table th { background: #eff3f9; color: var(--invoice-muted); font-size: .84rem; }
+.school-claim-table td small, .school-claim-proofs small { color: var(--invoice-muted); display: block; margin-top: 3px; }
+.school-claim-table .school-claim-reason { color: #83521a; max-width: 220px; }
+.school-claim-table .school-claim-money { text-align: right; white-space: nowrap; }
+.school-claim-history { display: grid; gap: 14px; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.school-claim-proofs ul { list-style: none; margin: 0; padding: 0; }
+.school-claim-proofs li { border-top: 1px solid var(--invoice-border); display: grid; gap: 10px; grid-template-columns: minmax(120px,1fr) 4fr; padding: 12px 0; }
+.school-claim-proofs li div { display: flex; flex-wrap: wrap; gap: 8px; }
+.school-claim-proofs li a { background: var(--invoice-school); border-radius: 6px; overflow-wrap: anywhere; padding: 6px 10px; }
+.school-claim-totals { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 0; font-variant-numeric: tabular-nums; }
+.school-claim-totals dt { color: var(--invoice-muted); font-size: .84rem; }
+.school-claim-totals dd { margin: 0; font-weight: 650; }
+.school-claim-totals [data-school-claim-total="gross_cents"] { color: var(--invoice-blue); font-size: 1.3rem; }
+.school-claim-workspace form:has([name="reviewed"]:not(:checked)) button.primary { opacity: .65; }
+@media (max-width: 650px) {
+  .school-claim-history, .school-claim-proofs li { grid-template-columns: minmax(0,1fr); }
+}
+@media (max-width: 900px) {
+  .school-claim-table table { min-width: 620px; }
+  .school-claim-table :is(th,td) { padding-inline: 5px; font-size: .8rem; }
+}

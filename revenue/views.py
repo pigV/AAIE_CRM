@@ -958,7 +958,8 @@ def render_revenue_workspace_page(
 
 
 def _school_student_status(state):
-    labels = {"historical": "历史入学", "current": "当前入学", "eligible": "可申领", "claimed": "已申领"}
+    labels = {"historical": "历史入学", "current": "当前入学", "eligible": "可申领",
+              "claimed": "已申领", "blocked": "待补资料", "review": "凭证待核对"}
     return f'<span class="revenue-student-status revenue-student-status--{state}">{labels[state]}</span>'
 
 
@@ -983,134 +984,157 @@ def _render_school_student_history(student_history, claim_history):
         f'<li>{student_link(row)} · {escape(row["claim_number"])} · {escape(row["claim_date"])}'
         f' · {claim_statuses.get(row["status"], "待核对")}</li>' for row in claim_history
     )
-    return f"""<section><h3>其他关联学生与历史入学</h3>
+    return f"""<div class="school-claim-history"><section class="invoice-composer-card"><h3>其他关联学生与历史入学</h3>
       {f"<ul>{related_rows}</ul>" if related_rows else "<p>暂无其他关联学生。</p>"}</section>
-      <section><h3>申领记录</h3>
-      {f"<ul>{claim_rows}</ul>" if claim_rows else "<p>暂无申领记录。</p>"}</section>"""
+      <section class="invoice-composer-card"><h3>申领记录</h3>
+      {f"<ul>{claim_rows}</ul>" if claim_rows else "<p>暂无申领记录。</p>"}</section></div>"""
 
 
 def render_school_claim_candidates(schools, school_id, rows, csrf, *, selection=None, confirmed=False,
                                    can_generate=False, simulation=True, finance_entity_id=None,
                                    student_history=(), claim_history=()):
+    from ui import ASSET_VERSION
+
     route = "/revenue/school-commission-candidates"
-    mode_label = "隔离测试 · 管理员" if simulation else "Toorak 试点 · 管理员"
+    mode_label = "隔离测试 · 管理员" if simulation else "学校佣金 · 管理员"
+    title = "复核所选学生" if selection and not confirmed else "学校佣金申领清单"
+    school = escape(schools[school_id]) if school_id else "请选择学校"
     school_links = "".join(
-        f'<a class="revenue-tab{" is-active" if key == school_id else ""}" '
-        f'href="{route}?school_id={key}"{" aria-current=page" if key == school_id else ""}>{escape(name)}</a>'
+        f'<li><a href="{route}?school_id={key}"{" aria-current=page" if key == school_id else ""}>{escape(name)}</a></li>'
         for key, name in schools.items()
     )
+    school_display = (f'<strong>{school}</strong>' if selection or not schools else
+                      f'<details><summary>{school}</summary><ul>{school_links}</ul></details>')
+    contract_href = "/revenue/contracts" + (f"?school_id={int(school_id)}" if school_id else "")
+    finance_link = (
+        f'<a href="/revenue/commission-invoice-templates?entity_id={int(finance_entity_id)}#invoice-finance-profile">'
+        '发票财务资料</a>' if finance_entity_id else ""
+    )
+    school_actions = (
+        f'<span>已选 {len(selection["rows"])} 项</span>' if selection else
+        f'<a href="{contract_href}#school-commission-contracts">学校合同与规则</a>{finance_link}'
+    )
     table_rows = []
+    evidence_rows = []
+    has_eligible = False
     for row in selection["rows"] if selection else rows:
         forecast = row["forecast"]
         uid = escape(row["component_uid"], quote=True)
         student = escape(row["student_name"])
         reason = " ".join(row["reasons"])
+        amounts = row.get("invoice_amounts", forecast)
         if selection:
             pick = "已选"
+            status = "清单已确认" if confirmed else _school_student_status("review")
+            links = "".join(
+                f'<a href="/revenue/documents/{quote(doc["document_uid"], safe="")}/view" target="_blank" rel="noopener">'
+                f'{escape(doc["label"])}<small>{escape(doc["filename"] or "查看凭证")}</small></a>'
+                for doc in row["evidence"]
+            )
+            evidence_rows.append(f'<li><strong>{student}</strong><div>{links or "本规则无需额外凭证。"}</div></li>')
         elif reason:
             pick = f'<input type="checkbox" disabled aria-label="{student}暂不能申领">'
+            state = "claimed" if row.get("already_claimed") else "blocked"
+            status = f'{_school_student_status(state)}<small class="school-claim-reason">{escape(reason)}</small>'
         else:
-            pick = f'<input type="checkbox" name="components" value="{uid}" aria-label="勾选{student}">'
-        if reason:
-            tags = _school_student_status("current")
-            if row.get("already_claimed"):
-                tags += " " + _school_student_status("claimed")
-            status = f'{tags} <span>{escape(reason)}</span>'
-        else:
-            status = _school_student_status("eligible") + " · 资料齐全，待管理员确认"
-        if selection:
-            status = "清单已确认" if confirmed else "待确认"
-            if row["evidence"]:
-                status += "<ul>" + "".join(
-                    f'<li>{escape(doc["label"])} · '
-                    f'<a href="/revenue/documents/{quote(doc["document_uid"], safe="")}/view" target="_blank" rel="noopener">'
-                    f'{escape(doc["filename"] or "查看凭证")}</a></li>' for doc in row["evidence"]
-                ) + "</ul>"
+            has_eligible = True
+            pick = (f'<input type="checkbox" name="components" value="{uid}" aria-label="勾选{student}"'
+                    f' data-claim-net="{int(amounts["net_cents"])}" data-claim-gst="{int(amounts["gst_cents"])}"'
+                    f' data-claim-gross="{int(amounts["gross_cents"])}">')
+            status = _school_student_status("eligible")
         if forecast:
             day = escape(forecast["commencement"]["actual_commencement_date"])
             visa = escape(forecast["visa"].get("subclass") or "—")
             tuition = _aud_money(forecast["tuition"]["tuition_cents"])
             rule = f'V{int(forecast["rule"]["version_no"])} · {forecast["tier"]["rate_basis_points"] / 100:g}%'
-            amounts = row.get("invoice_amounts", forecast)
             net, gst, gross = (_aud_money(amounts[key]) for key in ("net_cents", "gst_cents", "gross_cents"))
         else:
             day = visa = tuition = rule = net = gst = gross = "—"
         table_rows.append(
             f'<tr><td>{pick}</td><td><a href="{escape(row["href"], quote=True)}">{student}</a>'
-            f'<br><small>{escape(row["student_id"])} · {uid}</small></td>'
-            f'<td>{day}</td><td>{visa}</td><td>{tuition}</td><td>{rule}</td><td>{net}</td><td>{gst}</td>'
-            f'<td><strong>{gross}</strong></td><td>{status}</td></tr>'
+            f'<small>{escape(row["student_id"])}</small></td><td>{status}</td>'
+            f'<td>{day}<small>签证 {visa}</small></td><td>{tuition}</td><td>{rule}</td>'
+            f'<td class="school-claim-money">{net}</td><td class="school-claim-money">{gst}</td>'
+            f'<td class="school-claim-money"><strong>{gross}</strong></td></tr>'
         )
-    content = "<p>请选择学校，查看可申领及待补资料的学生。</p>"
-    if school_id:
-        school = escape(schools[school_id])
-        table = f"""<div class="revenue-table-scroll"><table>
-          <thead><tr><th scope="col">选择</th><th scope="col">学生／入学项目</th><th scope="col">实际开学日</th>
-          <th scope="col">签证</th><th scope="col">首年学费</th><th scope="col">合同与比例</th>
-          <th scope="col">佣金</th><th scope="col">GST</th><th scope="col">合计</th><th scope="col">申领状态</th></tr></thead>
-          <tbody>{"".join(table_rows)}</tbody></table></div>"""
-        security = f'<input type="hidden" name="csrf" value="{escape(csrf, quote=True)}">'
-        school_field = f'<input type="hidden" name="school_id" value="{school_id}">'
-        if selection:
-            summary = (f'<p>已选 {len(selection["rows"])} 项 · 佣金 {_aud_money(selection["net_cents"])}'
-                       f' · GST {_aud_money(selection["gst_cents"])} · 合计 <strong>{_aud_money(selection["gross_cents"])}</strong></p>')
-            back = f'<p><a href="{route}?school_id={school_id}">返回学校清单</a></p>'
-            if confirmed:
-                content = f'<h2>清单已确认 · {school}</h2>{summary}{table}{back}'
-            else:
-                selected = "".join(
-                    f'<input type="hidden" name="components" value="{escape(uid, quote=True)}">'
-                    f'<input type="hidden" name="revision_{escape(uid, quote=True)}" value="{revision}">'
-                    for uid, revision in selection["row_digests"].items()
-                )
-                confirm_label = "确认并生成发票草稿" if can_generate else "确认清单"
-                gst_controls = gst_hook = gst_script = ""
-                if "gst_mode" in selection:
-                    from revenue.money import INVOICE_GST_OPTIONS
 
-                    mode = selection["gst_mode"]
-                    options = "".join(
-                        f'<label><input type="radio" name="gst_mode" value="{value}"'
-                        f'{" checked" if value == mode else ""}> {label}</label>'
-                        for value, label in INVOICE_GST_OPTIONS
-                    )
-                    gst_hook = " data-commission-gst-review"
-                    gst_controls = f"""<fieldset><legend>本张发票的 GST</legend>{options}</fieldset>
-                      <button type="submit" formaction="{route}/review" formnovalidate data-gst-recalculate>更新金额</button>"""
-                    gst_script = '<script src="/assets/commission-gst-review.js" defer></script>'
-                content = f"""<h2>复核所选学生 · {school}</h2>{summary}{table}
-                  <form method="post" action="{route}/confirm" class="revenue-action-form"{gst_hook}>
-                    {security}{school_field}{selected}{gst_controls}
-                    <input type="hidden" name="preview_digest" value="{selection["digest"]}">
-                    <label><input type="checkbox" name="reviewed" value="1" required>
-                      已核对所选学生的申领凭证及合同要求的招募条件</label>
-                    <button class="primary" type="submit">{confirm_label}</button>
-                  </form>{gst_script}{back}"""
-        elif table_rows:
-            button = '<button class="primary" type="submit">复核所选学生</button>' if any(not row["reasons"] for row in rows) else ""
-            content = f"""<h2>{school} · 申领学生</h2>
-              <form method="post" action="{route}/review">
-                {security}{school_field}{table}{button}
-              </form>"""
+    legend = " ".join(_school_student_status(state) for state in ("eligible", "blocked", "claimed", "historical"))
+    table_title = "核对学生与佣金" if selection else "申领学生"
+    empty = "该校暂无已确认入学的学生。" if school_id else "请选择学校，查看可申领及待补资料的学生。"
+    table_body = "".join(table_rows) or f'<tr><td colspan="9">{empty}</td></tr>'
+    table = f"""<section class="invoice-composer-card school-claim-table">
+      <div class="invoice-composer-heading"><h2>{table_title}</h2>{f'<div class="school-claim-legend">{legend}</div>' if not selection else ""}</div>
+      <div class="revenue-table-scroll"><table><thead><tr>
+        <th scope="col">选择</th><th scope="col">学生／入学项目</th><th scope="col">申领状态</th>
+        <th scope="col">实际开学日／签证</th><th scope="col">首年学费</th><th scope="col">合同与比例</th>
+        <th scope="col" class="school-claim-money">佣金</th><th scope="col" class="school-claim-money">GST</th>
+        <th scope="col" class="school-claim-money">含税合计</th>
+      </tr></thead><tbody>{table_body}</tbody></table></div>
+    </section>"""
+    security = (f'<input type="hidden" name="csrf" value="{escape(csrf, quote=True)}">'
+                f'<input type="hidden" name="school_id" value="{school_id or ""}">')
+    totals = selection or {"net_cents": 0, "gst_cents": 0, "gross_cents": 0}
+    count = len(selection["rows"]) if selection else 0
+    totals_markup = "".join(
+        f'<div><dt>{label}</dt><dd data-school-claim-total="{key}">{_aud_money(totals[key]).replace("AUD $", "A$")}</dd></div>'
+        for key, label in (("net_cents", "佣金小计"), ("gst_cents", "GST"), ("gross_cents", "含税合计"))
+    )
+    summary = (f'<dl class="school-claim-totals" aria-live="polite"><div><dt>已选项目</dt>'
+               f'<dd data-school-claim-count>{count} 项</dd></div>{totals_markup}</dl>')
+    back = f'<a href="{route}?school_id={school_id}">返回学校清单</a>'
+    if selection:
+        proofs = f'<section class="invoice-composer-card school-claim-proofs"><h2>逐项核对申领凭证</h2><ul>{"".join(evidence_rows)}</ul></section>'
+        if confirmed:
+            content = f'{table}{proofs}<div class="invoice-composer-actions">{summary}{back}</div>'
         else:
-            content = f'<h2>{school} · 申领学生</h2><p>该校暂无已确认入学的学生。</p>'
-    if school_id and not selection:
-        legend = " ".join(_school_student_status(state) for state in ("historical", "current", "eligible", "claimed"))
-        content = f'<p class="revenue-student-status-key" aria-label="学生状态图例">{legend}</p>' + content
-        content += _render_school_student_history(student_history, claim_history)
-    contract_href = "/revenue/contracts"
-    if school_id:
-        contract_href += f"?school_id={int(school_id)}"
-    contract_link = f'<p><a href="{contract_href}#school-commission-contracts">学校合同与规则</a></p>'
-    finance_link = (f'<p><a href="/revenue/commission-invoice-templates?entity_id={int(finance_entity_id)}#invoice-finance-profile">'
-                    '发票财务资料</a></p>' if finance_entity_id else "")
-    return f"""<link rel="stylesheet" href="/assets/revenue.css">
-      <main class="revenue-workspace">
-        <header class="revenue-dashboard-heading"><div>
-          <span class="revenue-eyebrow">{mode_label}</span><h1>学校佣金申领清单</h1>
+            selected = "".join(
+                f'<input type="hidden" name="components" value="{escape(uid, quote=True)}">'
+                f'<input type="hidden" name="revision_{escape(uid, quote=True)}" value="{escape(revision, quote=True)}">'
+                for uid, revision in selection["row_digests"].items()
+            )
+            confirm_label = "确认并生成发票草稿" if can_generate else "确认清单"
+            gst_controls = gst_hook = gst_script = ""
+            if "gst_mode" in selection:
+                from revenue.money import INVOICE_GST_OPTIONS
+
+                options = "".join(
+                    f'<label><input type="radio" name="gst_mode" value="{value}"'
+                    f'{" checked" if value == selection["gst_mode"] else ""}> {label}</label>'
+                    for value, label in INVOICE_GST_OPTIONS
+                )
+                gst_hook = ' data-commission-gst-review'
+                gst_controls = f"""<section class="invoice-composer-card">
+                  <fieldset><legend>本张发票的 GST</legend>{options}</fieldset>
+                  <button type="submit" formaction="{route}/review" formnovalidate data-gst-recalculate>更新金额</button>
+                </section>"""
+                gst_script = f'<script src="/assets/commission-gst-review.js?v={ASSET_VERSION}" defer></script>'
+            content = f"""{table}{proofs}
+              <form method="post" action="{route}/confirm"{gst_hook}>
+                {security}{selected}{gst_controls}
+                <input type="hidden" name="preview_digest" value="{escape(selection["digest"], quote=True)}">
+                <section class="invoice-composer-card">
+                  <h2>确认申领</h2><label><input type="checkbox" name="reviewed" value="1" required>
+                    已核对所选学生的申领凭证及合同要求的招募条件</label>
+                </section>
+                <div class="invoice-composer-actions">{summary}<div class="invoice-composer-buttons">
+                  {back}<button class="primary" type="submit">{confirm_label}</button></div></div>
+              </form>{gst_script}"""
+    else:
+        button = f'<button class="primary" type="submit"{" disabled" if not has_eligible else ""}>复核所选学生</button>'
+        history = _render_school_student_history(student_history, claim_history) if school_id else ""
+        content = f"""<form method="post" action="{route}/review" data-school-claim-picker>
+          {security}{table}{history}
+          <div class="invoice-composer-actions">{summary}{button}</div>
+        </form>"""
+    return f"""<link rel="stylesheet" href="/assets/revenue.css?v={ASSET_VERSION}">
+      <main class="invoice-composer invoice-layout-v4 school-claim-workspace">
+        <header class="invoice-composer-title"><div>
+          <p>收入与佣金 / {mode_label}</p><h1>{title}</h1>
         </div><a href="/revenue">返回收入与佣金</a></header>
-        <nav class="revenue-tabs" aria-label="选择学校">{school_links}</nav>
-        <section class="revenue-panel">{contract_link}{finance_link}{content}</section>
+        <section class="school-claim-school"><div><span class="invoice-field-label">当前学校</span>{school_display}</div>
+          <div class="invoice-composer-buttons">{school_actions}</div></section>
+        {content}
+        <script src="/assets/school-claim-workspace.js?v={ASSET_VERSION}" defer></script>
       </main>"""
 
 
