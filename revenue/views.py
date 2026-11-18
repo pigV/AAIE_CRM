@@ -1051,25 +1051,29 @@ def render_school_claim_candidates(schools, school_id, rows, csrf, *, selection=
         else:
             day = visa = tuition = rule = net = gst = gross = "—"
         table_rows.append(
-            f'<tr><td>{pick}</td><td><a href="{escape(row["href"], quote=True)}">{student}</a>'
-            f'<small>{escape(row["student_id"])}</small></td><td>{status}</td>'
-            f'<td>{day}<small>签证 {visa}</small></td><td>{tuition}</td><td>{rule}</td>'
-            f'<td class="school-claim-money">{net}</td><td class="school-claim-money">{gst}</td>'
-            f'<td class="school-claim-money"><strong>{gross}</strong></td></tr>'
+            f'<tr role="row" class="school-claim-student"><td role="cell" class="school-claim-select">{pick}</td>'
+            f'<td role="cell" class="school-claim-name"><a href="{escape(row["href"], quote=True)}">{student}</a>'
+            f'<small>{escape(row["student_id"])}</small></td><td role="cell" class="school-claim-status">{status}</td>'
+            f'<td role="cell" class="school-claim-start"><span class="school-claim-card-label">实际开学日／签证</span>{day}<small>签证 {visa}</small></td>'
+            f'<td role="cell" class="school-claim-tuition"><span class="school-claim-card-label">首年学费</span>{tuition}</td>'
+            f'<td role="cell" class="school-claim-rule"><span class="school-claim-card-label">合同与比例</span>{rule}</td>'
+            f'<td role="cell" class="school-claim-money school-claim-net"><span class="school-claim-card-label">佣金</span>{net}</td>'
+            f'<td role="cell" class="school-claim-money school-claim-gst"><span class="school-claim-card-label">GST</span>{gst}</td>'
+            f'<td role="cell" class="school-claim-money school-claim-gross"><span class="school-claim-card-label">含税合计</span><strong>{gross}</strong></td></tr>'
         )
 
     legend = " ".join(_school_student_status(state) for state in ("eligible", "blocked", "claimed", "historical"))
     table_title = "核对学生与佣金" if selection else "申领学生"
     empty = "该校暂无已确认入学的学生。" if school_id else "请选择学校，查看可申领及待补资料的学生。"
-    table_body = "".join(table_rows) or f'<tr><td colspan="9">{empty}</td></tr>'
+    table_body = "".join(table_rows) or f'<tr role="row"><td role="cell" colspan="9">{empty}</td></tr>'
     table = f"""<section class="invoice-composer-card school-claim-table">
       <div class="invoice-composer-heading"><h2>{table_title}</h2>{f'<div class="school-claim-legend">{legend}</div>' if not selection else ""}</div>
-      <div class="revenue-table-scroll"><table><thead><tr>
-        <th scope="col">选择</th><th scope="col">学生／入学项目</th><th scope="col">申领状态</th>
-        <th scope="col">实际开学日／签证</th><th scope="col">首年学费</th><th scope="col">合同与比例</th>
-        <th scope="col" class="school-claim-money">佣金</th><th scope="col" class="school-claim-money">GST</th>
-        <th scope="col" class="school-claim-money">含税合计</th>
-      </tr></thead><tbody>{table_body}</tbody></table></div>
+      <div class="revenue-table-scroll"><table role="table"><thead role="rowgroup"><tr role="row">
+        <th role="columnheader" scope="col">选择</th><th role="columnheader" scope="col">学生／入学项目</th><th role="columnheader" scope="col">申领状态</th>
+        <th role="columnheader" scope="col">实际开学日／签证</th><th role="columnheader" scope="col">首年学费</th><th role="columnheader" scope="col">合同与比例</th>
+        <th role="columnheader" scope="col" class="school-claim-money">佣金</th><th role="columnheader" scope="col" class="school-claim-money">GST</th>
+        <th role="columnheader" scope="col" class="school-claim-money">含税合计</th>
+      </tr></thead><tbody role="rowgroup">{table_body}</tbody></table></div>
     </section>"""
     security = (f'<input type="hidden" name="csrf" value="{escape(csrf, quote=True)}">'
                 f'<input type="hidden" name="school_id" value="{school_id or ""}">')

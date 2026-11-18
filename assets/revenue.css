@@ -1489,7 +1489,60 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
 @media (max-width: 650px) {
   .school-claim-history, .school-claim-proofs li { grid-template-columns: minmax(0,1fr); }
 }
-@media (max-width: 900px) {
-  .school-claim-table table { min-width: 620px; }
-  .school-claim-table :is(th,td) { padding-inline: 5px; font-size: .8rem; }
+.school-claim-table { container-type: inline-size; }
+.school-claim-card-label { display: none; }
+
+@container (width < 850px) {
+  .school-claim-table table,
+  .school-claim-table tbody { display: block; min-width: 0; }
+  .school-claim-table thead {
+    clip-path: inset(50%);
+    height: 1px;
+    overflow: hidden;
+    position: absolute;
+    white-space: nowrap;
+    width: 1px;
+  }
+  .school-claim-table .school-claim-student {
+    background: #fff;
+    border: 1px solid var(--invoice-border);
+    border-radius: 8px;
+    display: grid;
+    gap: 10px 8px;
+    grid-template-columns: auto repeat(6, minmax(0, 1fr));
+    margin-top: 10px;
+    padding: 12px;
+  }
+  .school-claim-table .school-claim-student td {
+    border: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    padding: 0;
+  }
+  .school-claim-select { grid-area: 1 / 1 / 2 / 2; }
+  .school-claim-name { grid-area: 1 / 2 / 2 / 5; }
+  .school-claim-status { grid-area: 1 / 5 / 2 / 8; }
+  .school-claim-start { grid-area: 2 / 2 / 3 / 4; }
+  .school-claim-tuition { grid-area: 2 / 4 / 3 / 6; }
+  .school-claim-rule { grid-area: 2 / 6 / 3 / 8; }
+  .school-claim-net { grid-area: 3 / 2 / 4 / 4; }
+  .school-claim-gst { grid-area: 3 / 4 / 4 / 6; }
+  .school-claim-gross { grid-area: 3 / 6 / 4 / 8; }
+  .school-claim-card-label {
+    color: var(--invoice-muted);
+    display: block;
+    font-size: .78rem;
+    margin-bottom: 3px;
+  }
+  .school-claim-table .school-claim-student .school-claim-money {
+    background: #f4f7fb;
+    border-radius: 6px;
+    padding: 6px 8px;
+    text-align: left;
+    white-space: normal;
+  }
+  .school-claim-table .school-claim-student .school-claim-gross {
+    background: #eaf3ff;
+    color: #204e89;
+  }
 }
