@@ -114,30 +114,66 @@ def _payment_terms_field(payment_terms):
 
 
 def render_school_invoice_account(school_id, name, billing, csrf, token, *, authority=""):
-    def field(key, label, value, required=False):
-        return (f'<label>{label}<input name="{key}" value="{escape(value or "", quote=True)}"'
-                + (' required' if required else '') + '></label>')
+    required_mark = '<span class="invoice-account-required" aria-hidden="true"> *</span>'
+    title = "编辑开票资料" if billing.get("revision") else "补齐开票资料"
 
-    fields = (
-        field("billing_name", "发票抬头", billing.get("name") or name, True)
-        + f'<label>账单地址<textarea name="billing_address" rows="2" required>{escape(billing.get("address") or "")}</textarea></label>'
-        + field("billing_phone", "联系电话", billing.get("phone"))
-        + field("recipient", "学校收票邮箱", billing.get("recipient"), True)
-        + field("cc", "抄送", billing.get("cc"))
-        + field("bcc", "密送", billing.get("bcc"))
-    )
-    return f"""{STYLESHEET}<section class="invoice-composer">
-      <header class="invoice-composer-title"><h1>补齐开票资料</h1></header>
-      <form class="invoice-composer-card" method="post" action="{URL}/account">
-        <h2>{escape(name)}</h2>
-        {_authority_label(authority)}
-        {_hidden_security(csrf,token,"school-invoice-account")}{_hidden("school_id",school_id)}
-        {_hidden("billing_revision",billing.get("revision",""))}
-        {_hidden("settings_revision",billing.get("settings_revision",""))}
-        {fields}
-        <label><input type="checkbox" name="verified" value="1" {"checked" if billing.get("verified") else ""}>已核对学校财务邮箱</label>
-        <label><input type="checkbox" name="enabled" value="1" {"checked" if billing.get("enabled") else ""}>允许从 CRM 发送发票</label>
-        <div class="invoice-composer-actions"><a href="{URL}">返回学校选择</a><button class="primary">保存并继续</button></div>
+    def field(key, label, value, *, required=False, inputmode="text"):
+        mark = required_mark if required else ""
+        return (f'<label>{label}{mark}<input name="{key}" inputmode="{inputmode}"'
+                f' value="{escape(value or "", quote=True)}"{" required" if required else ""}></label>')
+
+    def setting(key, label, inactive, active):
+        checked = " checked" if billing.get(key) else ""
+        return f"""<label class="invoice-account-setting">
+          <input type="checkbox" name="{key}" value="1"{checked}>
+          <span>{label}</span>
+          <span class="invoice-account-state invoice-account-state-off" aria-hidden="true">{inactive}</span>
+          <span class="invoice-account-state invoice-account-state-on" aria-hidden="true">{active}</span>
+        </label>"""
+
+    saved_copies = sum(bool(billing.get(key)) for key in ("cc", "bcc"))
+    copies_caption = f"已保存 {saved_copies} 项" if saved_copies else "选填"
+    return f"""{STYLESHEET}<section class="invoice-composer invoice-layout-v4 invoice-account">
+      <header class="invoice-composer-title">
+        <div><p>收入与佣金 / 学校佣金开票</p><h1>{title}</h1></div>
+      </header>
+      <form method="post" action="{URL}/account">
+        {_hidden_security(csrf, token, "school-invoice-account")}{_hidden("school_id", school_id)}
+        {_hidden("billing_revision", billing.get("revision", ""))}
+        {_hidden("settings_revision", billing.get("settings_revision", ""))}
+        <div class="invoice-account-school">
+          <div><span class="invoice-field-label">学校</span><strong>{escape(name)}</strong></div>
+          {_authority_label(authority)}
+        </div>
+        <div class="invoice-account-grid">
+          <section class="invoice-composer-card invoice-account-panel invoice-account-billing">
+            <h2>发票抬头与地址</h2>
+            <div class="invoice-account-fields">
+              {field("billing_name", "发票抬头", billing.get("name") or name, required=True)}
+              <label>账单地址{required_mark}<textarea name="billing_address" rows="3" required>{escape(billing.get("address") or "")}</textarea></label>
+              {field("billing_phone", "联系电话（选填）", billing.get("phone"), inputmode="tel")}
+            </div>
+          </section>
+          <section class="invoice-composer-card invoice-account-panel invoice-account-delivery">
+            <h2>收票与发送设置</h2>
+            <div class="invoice-account-fields">
+              {field("recipient", "收票邮箱", billing.get("recipient"), required=True, inputmode="email")}
+              <details class="invoice-account-copies">
+                <summary><span>抄送 / 密送</span><small>{copies_caption}</small></summary>
+                <div>{field("cc", "抄送", billing.get("cc"), inputmode="email")}
+                     {field("bcc", "密送", billing.get("bcc"), inputmode="email")}</div>
+              </details>
+              <div class="invoice-account-settings">
+                {setting("verified", "已核对学校财务邮箱", "邮箱待核对", "邮箱已核对")}
+                {setting("enabled", "允许从 CRM 发送发票", "发送未启用", "发送已启用")}
+              </div>
+            </div>
+          </section>
+        </div>
+        <div class="invoice-composer-actions">
+          <a href="{URL}">‹ 返回学校选择</a>
+          <button type="submit" class="primary">保存并继续开票</button>
+        </div>
       </form></section>"""
 
 
