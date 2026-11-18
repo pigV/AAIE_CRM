@@ -162,6 +162,11 @@ class RevenueMasterAgentTests(RevenueDatabaseFixture, unittest.TestCase):
                 1, "Admin", "payment",
             )
             self.assertEqual(88_000, payment["allocated_cents"])
+            self.assertEqual(
+                {"label": "已到账", "received_cents": 88000, "outstanding_cents": 0},
+                RevenueReadModels(connection).dashboard()["recent_cases"][0]["school_commission"],
+            )
+
             self.assertEqual(1, connection.execute(
                 "SELECT COUNT(*) FROM revenue_payment_allocations WHERE statement_item_uid=?",
                 (item["uid"],),

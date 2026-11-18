@@ -88,6 +88,62 @@ class VisaResultStatusTests(unittest.TestCase):
             ),
         )
 
+    def add_cycle_linkage_fixture(self):
+        self.conn.executescript("""
+            ALTER TABLE visa_cases ADD COLUMN student_id TEXT;
+            ALTER TABLE visa_cases ADD COLUMN application_cycle_id INTEGER;
+            ALTER TABLE visa_cases ADD COLUMN lodgement_recorded_at TEXT;
+            ALTER TABLE visa_cases ADD COLUMN actual_lodgement_date TEXT;
+            ALTER TABLE visa_cases ADD COLUMN visa_type TEXT;
+            ALTER TABLE visa_case_documents ADD COLUMN file_path TEXT;
+            CREATE TABLE students(student_id, deleted_at);
+            CREATE TABLE application_cycles(id, student_id, status, opened_at, sequence_no,
+                                            cycle_type, education_stream);
+            CREATE TABLE student_documents(id, student_id, document_type, document_status,
+                                           is_active, voided_at, file_path);
+            CREATE TABLE audit_logs(user_id, username, action_type, module_name, module_key,
+                                    record_id, student_id, old_value, new_value, status, created_at);
+            UPDATE visa_cases SET student_id='S1',lodgement_recorded_at='2026-09-14',
+                actual_lodgement_date='2026-09-12',visa_type='500 Student Visa' WHERE id=1;
+            INSERT INTO students VALUES('S1',NULL);
+            INSERT INTO application_cycles
+                VALUES(99,'S1','active','2026-08-01',1,'initial','school_education');
+            INSERT INTO student_documents
+                VALUES(3,'S1','VisaGrantLetter','active',1,NULL,'/staging/grant.pdf');
+            UPDATE visa_case_documents SET student_document_id=3,file_path='/staging/grant.pdf'
+                WHERE id=10;
+        """)
+
+    def test_new_grant_links_during_result_save_and_rolls_back_with_it(self):
+        self.add_cycle_linkage_fixture()
+        self.conn.execute("BEGIN")
+        self.auto(10, "Granted")
+        self.assertEqual(99, self.conn.execute(
+            "SELECT application_cycle_id FROM visa_cases WHERE id=1"
+        ).fetchone()[0])
+        self.assertEqual(1, self.conn.execute("SELECT count(*) FROM audit_logs").fetchone()[0])
+        self.conn.rollback()
+        self.assertIsNone(self.conn.execute(
+            "SELECT application_cycle_id FROM visa_cases WHERE id=1"
+        ).fetchone()[0])
+        self.assertEqual(0, self.conn.execute("SELECT count(*) FROM audit_logs").fetchone()[0])
+
+    def test_reconciliation_waits_for_unambiguous_active_evidence_and_retries_once(self):
+        from visa_cycle_assignment import reconcile_recorded_visa_grants
+
+        self.add_cycle_linkage_fixture()
+        self.conn.execute("INSERT INTO application_cycles VALUES"
+                          "(100,'S1','closed','2026-08-03',2,'initial','school_education')")
+        self.auto(10, "Granted")
+        self.assertEqual(0, reconcile_recorded_visa_grants(self.conn, timestamp=STAMP))
+        self.conn.execute("DELETE FROM application_cycles WHERE id=100")
+        self.conn.execute("UPDATE student_documents SET voided_at=?", (STAMP,))
+        self.assertEqual(0, reconcile_recorded_visa_grants(self.conn, timestamp=STAMP))
+        self.conn.execute("UPDATE student_documents SET voided_at=NULL")
+        self.assertEqual(1, reconcile_recorded_visa_grants(self.conn, timestamp=STAMP))
+        self.assertEqual(0, reconcile_recorded_visa_grants(self.conn, timestamp=STAMP))
+        self.assertEqual(1, self.conn.execute("SELECT count(*) FROM audit_logs").fetchone()[0])
+
     def test_matching_evidence_is_idempotent(self):
         first = self.auto(10, "Granted")
         second = self.auto(10, "Granted")

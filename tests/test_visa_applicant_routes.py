@@ -5,6 +5,7 @@ from visa_workspace_candidate import VisaWorkspaceCandidateMixin
 
 class Base:
     def send_html(self,content,*args,**kwargs):return content
+    def redirect(self,location,*args,**kwargs):return location
 
 class Harness(VisaWorkspaceCandidateMixin,Base):
     def _visa_allowed(self):return True
@@ -23,6 +24,17 @@ class ApplicantRouteTests(unittest.TestCase):
         self.assertIn("href='/visa-management/cases/9/workspace?visa_tab=info_collection#x'",result)
         self.assertIn('/students//visa-cases/90/evidence',result)
         self.assertIn('literal /students//visa-cases/9/evidence',result)
+    def test_independent_redirects_keep_active_tab_feedback_and_anchor(self):
+        h=Harness();h._visa_independent_case_id=9
+        self.assertEqual(
+            h.redirect('/students//visa-cases/9?visa_tab=material_checklist&message=ok#material-checklist'),
+            '/visa-management/cases/9/workspace?visa_tab=material_checklist&message=ok#material-checklist',
+        )
+        self.assertEqual(
+            h.redirect('/students//visa-cases/9/evidence-ai-review?message=ok#evidence-information'),
+            '/visa-management/cases/9/workspace?visa_tab=evidence_ai_review&message=ok#evidence-information',
+        )
+
     def test_student_html_is_unchanged(self):
         h=Harness();source='<a href="/students/123/visa-cases/9">Student</a>'
         self.assertEqual(h.send_html(source),source)

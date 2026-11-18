@@ -5432,7 +5432,7 @@
 
 .ui-premium-v2 .main:has(.student-summary-card):has(.tabs[data-tabs]) .tab-panel[data-panel="offer"] .offer-card-fields {
   align-items: end;
-  grid-template-columns: minmax(180px, 1.35fr) repeat(2, minmax(132px, .85fr)) minmax(188px, 1fr) minmax(150px, .8fr) minmax(112px, auto);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
 }
 
 .ui-premium-v2 .main:has(.student-summary-card):has(.tabs[data-tabs]) .tab-panel[data-panel="offer"] .offer-inline-form label {
@@ -5525,12 +5525,6 @@
 .ui-premium-v2 .main:has(.student-summary-card):has(.tabs[data-tabs]) .tab-panel[data-panel="offer"] #offer-dialog .dialog-grid input,
 .ui-premium-v2 .main:has(.student-summary-card):has(.tabs[data-tabs]) .tab-panel[data-panel="offer"] #offer-dialog .dialog-grid select {
   min-width: 0;
-}
-
-@media (max-width: 1280px) {
-  .ui-premium-v2 .main:has(.student-summary-card):has(.tabs[data-tabs]) .tab-panel[data-panel="offer"] .offer-card-fields {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 760px) {
@@ -26700,6 +26694,17 @@
   justify-content: flex-end;
   min-height: 38px;
   margin-top: 11px;
+}
+
+.ui-premium-v2 [data-panel='offer'] .offer-panel [data-offer-withdraw-acceptance-form] {
+  display: grid;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.ui-premium-v2 [data-panel='offer'] .offer-panel [data-offer-withdraw-acceptance-form] button {
+  justify-self: end;
+  white-space: normal;
 }
 
 .ui-premium-v2 [data-panel='offer'] .offer-panel .offer-accept-disabled,

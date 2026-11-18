@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Iterable
 
 from dashboard_confirmed_stages import (
-    PROFILE_ONLY_STAGES, STAGE_DETAILS, held_case_cycles, load_confirmed_cycle_stages,
+    PROFILE_ONLY_STAGES, STAGE_DETAILS, VISA_GRANTED, held_case_cycles, load_confirmed_cycle_stages,
     verified_transfer_contract_for_intake_cycle,
 )
 from workflow_projection import load_current_workflow_projection
@@ -86,7 +86,10 @@ def load_student_workflow_projection_map(
         "SELECT 1 FROM sqlite_master WHERE type='view' AND name='final_school_optional_steps'"
     ).fetchone()
     if confirmed_schema:
-        confirmed = load_confirmed_cycle_stages(connection, tuple(projected.values()))
+        confirmed = load_confirmed_cycle_stages(
+            connection, tuple(projected.values()),
+            additional_cycle_ids=(int(row[0]) for row in active.values()),
+        )
         overrides = {}
     else:
         confirmed = {}
@@ -96,6 +99,14 @@ def load_student_workflow_projection_map(
     for student_id in existing:
         projection = projected.get(student_id)
         active_row = active.get(student_id)
+        active_cycle_id = int(active_row[0]) if active_row is not None else None
+        confirmed_stage = confirmed.get(active_cycle_id)
+        if confirmed_stage and confirmed_stage[0] == VISA_GRANTED:
+            results[student_id] = StudentWorkflowProjection(
+                student_id, "active", VISA_GRANTED, confirmed_stage[1], 0,
+                cycle_id=active_cycle_id, cycle_type=str(active_row[2]),
+            )
+            continue
         if projection is not None:
             override = overrides.get(projection.cycle_id)
             stage_order = projection.stage_number
@@ -178,6 +189,8 @@ def load_student_workflow_projection_map(
         if transfer.state == "ordinary" or (cycle_id is not None and transfer.cycle_id != cycle_id):
             continue
         current = results[student_id]
+        if current.stage_key == VISA_GRANTED and transfer.cycle_id in {None, current.cycle_id}:
+            continue
         if (
             transfer.cycle_id is None and transfer.contract_id is not None
             and current.cycle_id in confirmed and current.cycle_type == "initial"

@@ -12351,13 +12351,18 @@ class CoreTests(unittest.TestCase):
                 self.assertIn("Victor Cases", list_html)
                 self.assertIn("/students/260902/visa-cases/new", list_html)
 
+                create_capture = {}
+                handler.send_html = lambda html, *args, **kwargs: create_capture.setdefault("html", html)
+                handler.student_visa_case_create("GET", "260902")
+                self.assertRegex(create_capture["html"], r'<option value="No"[^>]*>No / 不需要监护</option>')
+
                 redirects = []
                 handler.flash_redirect = lambda url, message, kind="ok": redirects.append((url, message, kind))
                 handler.form = {
                     "visa_type": "500 Student Visa",
                     "application_type": "New Application",
                     "main_applicant": "Victor Cases",
-                    "guardian_applicant": "",
+                    "guardian_applicant": "No",
                     "applicant_count": "1",
                     "status": "Information Collection",
                     "case_owner": "Ted Chen",
@@ -12371,6 +12376,7 @@ class CoreTests(unittest.TestCase):
                 self.assertTrue(redirects)
                 case = db.one("SELECT * FROM visa_cases WHERE student_id=?", ("260902",))
                 self.assertIsNotNone(case)
+                self.assertEqual(case["guardian_applicant"], "No")
                 self.assertEqual(case["visa_type"], "500 Student Visa")
                 self.assertEqual(case["status"], "Information Collection")
                 self.assertEqual(case["target_lodgement_date"], "2026-10-01")
@@ -12379,6 +12385,7 @@ class CoreTests(unittest.TestCase):
                 handler.send_html = lambda html, *args, **kwargs: detail_capture.setdefault("html", html)
                 handler.student_visa_case_detail("GET", "260902", str(case["id"]))
                 detail_html = detail_capture["html"]
+                self.assertIn('<option value="No" selected>No / 不需要监护</option>', detail_html)
                 self.assertIn("Visa Case 基础信息", detail_html)
                 self.assertIn("500 Student Visa", detail_html)
                 self.assertIn("Information Collection", detail_html)
@@ -12563,6 +12570,14 @@ class CoreTests(unittest.TestCase):
                 handler.student_visa_case_detail("GET", "260982", str(case_id))
                 saved_overview = saved_capture["html"].split("Case Overview / 案件概览", 1)[1].split("Info Collection", 1)[0]
                 self.assertIn('<option value="Relative + 590" selected>Relative + 590</option>', saved_overview)
+
+                handler.form = {"guardian_applicant": "No"}
+                handler.student_visa_case_guardian_applicant_save("POST", "260982", str(case_id))
+                self.assertEqual(db.one("SELECT guardian_applicant FROM visa_cases WHERE id=?", (case_id,))["guardian_applicant"], "No")
+                saved_capture.clear()
+                handler.student_visa_case_detail("GET", "260982", str(case_id))
+                self.assertIn('<option value="No" selected>No / 不需要监护</option>', saved_capture["html"])
+
 
                 material_capture = {}
                 handler.query = {"visa_tab": ["material_checklist"]}
@@ -15449,6 +15464,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(handler._visa_batch_suggestion({}, {"original_name": "Test-IELTS.pdf"}, [])["item_id"], "")
         handler._visa_read_text = lambda *_: "Visa Grant Notification\nDate of grant: 01 Jan 2026"
         self.assertEqual(handler._visa_batch_suggestion({}, {"original_name": "Unknown.pdf"}, items)["item_title"], titles[-1])
+
+    def test_visa_batch_recognizes_home_affairs_grant_without_notification_heading(self):
+        handler = object.__new__(app_module.CRMHandler)
+        title = "IMMI Grant Letter / IMMI Refusal Letter"
+        items = [{"id": 1, "title": title}]
+        filename = {"original_name": "Applicant_IMMI Grant Notification.pdf"}
+        official_text = (
+            "We have granted you a Student (subclass 500) visa on 1 January 2026.\n"
+            "Application status\nStudent (subclass 500): Granted\n"
+            "Visa summary\nDate of grant 1 January 2026\nVisa grant number 1234567890123"
+        )
+        handler._visa_read_text = lambda *_: official_text
+        suggestion = handler._visa_batch_suggestion({}, filename, items)
+        self.assertEqual((suggestion["confidence"], suggestion["item_id"]), ("High", 1))
+        self.assertEqual(handler._visa_batch_letter_kind(official_text), "grant")
+
+        for text in ("Previous visa grant date: 01 Jan 2020", official_text.splitlines()[0]):
+            with self.subTest(text=text):
+                handler._visa_read_text = lambda *_: text
+                self.assertEqual(handler._visa_batch_suggestion({}, filename, items)["item_id"], "")
 
     def test_visa_smart_batch_upload_review_confirm_and_security_boundaries(self):
         old_db = app_module.db
@@ -40283,6 +40318,40 @@ c.save()
                 with mock.patch.object(app_module, "maybe_run_auto_backup", return_value=None):
                     handler.dispatch("POST")
                 self.assertEqual(handler.response_status, 403)
+
+    def test_application_and_payment_review_can_render_without_extraction(self):
+        from reportlab.pdfgen.canvas import Canvas
+
+        pdf = io.BytesIO()
+        canvas = Canvas(pdf)
+        canvas.drawString(30, 60, "Synthetic upload review document")
+        canvas.save()
+        content = pdf.getvalue()
+        with isolated_upload_review_regression_environment("no-extraction") as env:
+            for module, upload_route, file_count in (
+                ("Applications", "application_upload", 13),
+                ("Payments", "payment_create", 1),
+            ):
+                with self.subTest(module=module):
+                    handler = self._upload_review_handler(env["admin"])
+                    handler.files = [
+                        Upload("files", f"sample-{index}.pdf", "application/pdf", content)
+                        for index in range(file_count)
+                    ]
+                    handler.redirect = lambda url: setattr(handler, "redirect_location", url)
+                    getattr(handler, upload_route)("POST", env["student_id"])
+                    token = handler.redirect_location.rsplit("/", 1)[1]
+                    handler.upload_review("GET", env["student_id"], token)
+                    self.assertEqual(handler.response_status, 200)
+                    self.assertEqual(handler.response_html.count("data-upload-review-workbench"), file_count)
+                    document_type = "StudentPassport" if module == "Applications" else "ServiceFeeReceipt"
+                    self._confirm_isolated_review(env, token, module, [document_type] * file_count)
+                    documents = env["db"].all(
+                        "SELECT file_path FROM student_documents WHERE student_id=? AND folder_category=?",
+                        (env["student_id"], module),
+                    )
+                    self.assertEqual(len(documents), file_count)
+                    self.assertTrue(all(Path(row["file_path"]).read_bytes() == content for row in documents))
 
     def test_generic_upload_review_behavior_group_2_get_preview_download_and_stubs(self):
         with isolated_upload_review_regression_environment("group-2") as env:

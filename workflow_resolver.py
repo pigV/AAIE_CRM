@@ -234,7 +234,9 @@ def resolve_workflow_stage(facts: WorkflowFacts) -> WorkflowStageResult:
     if facts.plan_sent:
         return _active_result(facts, 5, "等待家长最终确认学校方案", issues)
     if facts.plan_exists:
-        return _active_result(facts, 4, "已有方案，待重新发送", issues)
+        return _active_result(
+            facts, 4, "已有方案，待重新发送", issues, title="等待发送学校方案"
+        )
     if facts.contract_execution_pending:
         return _active_result(
             facts, 3, "家长已签署，等待 AAIE 完成签章及完整合同归档", issues,

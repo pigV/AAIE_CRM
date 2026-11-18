@@ -29,7 +29,10 @@ STAGES = (
 
 
 SCHOOL_APPLICATION_CLOSED = "school_application_closed"
-PROFILE_ONLY_STAGES = {SCHOOL_APPLICATION_CLOSED, "contract_link_inactive", "waiting_school_plan"}
+VISA_GRANTED = "visa_granted"
+OFFER_EXPIRED = "offer_expired"
+WAITING_SCHOOL_RESPONSE = {"submitted", "interview", "test", "waiting_list", "additional_documents"}
+PROFILE_ONLY_STAGES = {SCHOOL_APPLICATION_CLOSED, "contract_link_inactive", "waiting_school_plan", OFFER_EXPIRED, VISA_GRANTED}
 
 
 # The intake stage precedes the Transfer V2 cycle that will consume the contract.
@@ -71,7 +74,7 @@ def held_case_cycles(connection, cycle_ids):
     ))
 
 
-def load_confirmed_cycle_stages(connection, projection):
+def load_confirmed_cycle_stages(connection, projection, *, additional_cycle_ids=()):
     """Select exact-cycle stages shared by the dashboard and student profile."""
     transfer_columns = {row[1] for row in connection.execute("PRAGMA table_info(transfer_cases)")}
     transfer_v2_ids = {
@@ -81,7 +84,7 @@ def load_confirmed_cycle_stages(connection, projection):
             WHERE cycle.cycle_type='transfer' AND transfer.v2_version=2
         """)
     } if "v2_version" in transfer_columns else set()
-    cycle_ids = tuple(row.cycle_id for row in projection)
+    cycle_ids = tuple(dict.fromkeys([row.cycle_id for row in projection] + list(additional_cycle_ids)))
     held = held_case_cycles(connection, cycle_ids)
     visible = load_dashboard_stages(
         connection, tuple(cycle for cycle in cycle_ids if cycle not in transfer_v2_ids and cycle not in held)
@@ -222,11 +225,12 @@ def load_dashboard_stages(connection, cycle_ids):
         contracts.setdefault(row["application_cycle_id"], _contract_status(row))
 
     school_responses = {}
-    for cycle_id, status in connection.execute(f"""
+    school_response_names = {}
+    for cycle_id, status, source, application_id, school_id, school_name in connection.execute(f"""
         WITH requested_cycles AS (
             SELECT id, student_id FROM application_cycles WHERE id IN ({marks})
         )
-        SELECT grp.application_cycle_id, preference.application_status
+        SELECT grp.application_cycle_id, preference.application_status, 'public', grp.id, preference.school_id, preference.school_name_snapshot
           FROM public_application_groups grp
           JOIN requested_cycles cycle ON cycle.id=grp.application_cycle_id
                AND cycle.student_id=grp.student_id
@@ -235,18 +239,21 @@ def load_dashboard_stages(connection, cycle_ids):
            AND trim(coalesce(grp.submitted_at,''))<>''
            AND preference.application_status<>'planned'
         UNION ALL
-        SELECT application.application_cycle_id, application.status
+        SELECT application.application_cycle_id, application.status, 'private', application.id, NULL, application.school_name_snapshot
           FROM private_school_applications application
           JOIN requested_cycles cycle ON cycle.id=application.application_cycle_id
                AND cycle.student_id=application.student_id
          WHERE trim(coalesce(application.submitted_at,''))<>''
         UNION ALL
-        SELECT application_cycle_id, lower(status)
+        SELECT application_cycle_id, lower(status), 'higher', id, NULL, NULL
           FROM higher_education_applications
          WHERE application_cycle_id IN (SELECT id FROM requested_cycles) AND is_current=1
            AND trim(coalesce(submitted_at,''))<>''
     """, cycle_ids):
-        school_responses.setdefault(cycle_id, set()).add(status)
+        application = (source, application_id, school_id)
+        school_responses.setdefault(cycle_id, set()).add((status, application))
+        if school_name:
+            school_response_names[application] = school_name
 
     preparing_cases = set()
     for table in ("public_application_groups", "private_school_applications", "higher_education_applications"):
@@ -265,11 +272,13 @@ def load_dashboard_stages(connection, cycle_ids):
         if status not in {"withdrawn", "not_proceeding"}:
             progression_targets.setdefault(cycle_id, set()).add(status)
         if status in {"submitted", "offer_received", "offer_accepted", "rejected", "withdrawn", "not_proceeding"}:
-            school_responses.setdefault(cycle_id, set()).add(status)
+            school_responses.setdefault(cycle_id, set()).add((status, None))
 
     offers = {}
     for row in _rows(connection, f"""
-        SELECT event.id,event.application_cycle_id,legacy.offer_expiry_date,
+        SELECT event.id,event.application_cycle_id,legacy.offer_expiry_date,event.school_name_snapshot,
+               event.school_id,event.public_application_group_id,event.private_application_id,
+               higher.application_id AS higher_application_id,
                (lower(coalesce((SELECT change.state FROM offer_received_event_state_events change
                       WHERE change.offer_received_event_id=event.id
                       ORDER BY change.occurred_at DESC,change.id DESC LIMIT 1),'active')) IN {invalid}
@@ -366,9 +375,18 @@ def load_dashboard_stages(connection, cycle_ids):
             (choice["acceptance_status"] == "withdrawn" and not choice["selection_resumed"]) or
             (choice["active"] and (not chosen_offer or chosen_offer["invalid"]))
         ))
-        valid_offer = any(not offer["invalid"] and (
-            not offer["offer_expiry_date"] or (business_date_iso(offer["offer_expiry_date"]) or "") >= today
-        ) for offer in cycle_offers.values())
+        current_offers = [offer for offer in cycle_offers.values() if not offer["invalid"]]
+        expiry_dates = {
+            offer["id"]: business_date_iso(offer["offer_expiry_date"]) for offer in current_offers
+        }
+        expired_offers = [
+            offer for offer in current_offers
+            if expiry_dates[offer["id"]] and expiry_dates[offer["id"]] < today
+        ]
+        valid_offer = any(
+            not offer["offer_expiry_date"] or (expiry_dates[offer["id"]] or "") >= today
+            for offer in current_offers
+        )
         accepted = bool(choice and choice["active"])
         pathway = pathway_components.get(cycle_id, ())
         confirmed_coe = bool(fact.final_school_coe_confirmed)
@@ -414,10 +432,19 @@ def load_dashboard_stages(connection, cycle_ids):
             required = False
             if contract is None:
                 contract = "not_required"
-        responses = school_responses.get(cycle_id, set())
-        waiting_for_school = bool(responses & {
-            "submitted", "interview", "test", "waiting_list", "additional_documents",
-        })
+        answered = set()
+        for offer in expired_offers:
+            if offer["public_application_group_id"] and offer["school_id"]:
+                answered.add(("public", offer["public_application_group_id"], offer["school_id"]))
+            if offer["private_application_id"]:
+                answered.add(("private", offer["private_application_id"], None))
+            if offer["higher_application_id"]:
+                answered.add(("higher", offer["higher_application_id"], None))
+        responses = {
+            status for status, application in school_responses.get(cycle_id, ())
+            if application not in answered or status not in WAITING_SCHOOL_RESPONSE
+        }
+        waiting_for_school = bool(responses & WAITING_SCHOOL_RESPONSE)
         resolved = resolve_dashboard_stage(
             form_live=form_live, form_submitted=form_submitted or gate == "waiting_contract_creation",
             contract=contract, contract_required=required,
@@ -426,12 +453,24 @@ def load_dashboard_stages(connection, cycle_ids):
             outstanding=outstanding, coe=confirmed_coe,
             visa=visas.get(cycle_id), offer_hold=offer_hold,
         )
-        if responses and not waiting_for_school and not valid_offer and not accepted and not (
+        if resolved and resolved[0] == "07_school_response" and expired_offers:
+            expired_names = sorted({offer["school_name_snapshot"] for offer in expired_offers
+                                    if offer["school_name_snapshot"]})
+            waiting_names = sorted({school_response_names[application]
+                                    for status, application in school_responses.get(cycle_id, ())
+                                    if status in WAITING_SCHOOL_RESPONSE and application not in answered
+                                    and application in school_response_names})
+            expired_detail = f"{'、'.join(expired_names)} Offer 已过期".strip()
+            waiting_detail = f"等待 {'、'.join(waiting_names)} 回复" if waiting_names else "等待其他学校回复"
+            resolved = (resolved[0], f"{expired_detail} · {waiting_detail}")
+        if (responses or expired_offers) and not waiting_for_school and not valid_offer and not accepted and not (
             offer_hold or visas.get(cycle_id) in {"lodged", "granted", "refused", "withdrawn"}
         ):
-            if responses <= {"rejected", "withdrawn", "closed", "not_proceeding"}:
+            if responses and responses <= {"rejected", "withdrawn", "closed", "not_proceeding"}:
                 label = "学校申请已全部拒录" if responses == {"rejected"} else "学校申请已结束"
                 resolved = (SCHOOL_APPLICATION_CLOSED, label)
+            elif expired_offers:
+                resolved = (OFFER_EXPIRED, "Offer 已过期，待跟进")
             else:
                 resolved = None
         if accepted and resolved and resolved[0] in {
@@ -440,5 +479,5 @@ def load_dashboard_stages(connection, cycle_ids):
             key, pending = resolved
             school = "、".join(dict.fromkeys(name for name in school_names if name))
             resolved = (key, " · ".join(filter(None, (school, pending))))
-        stages[cycle_id] = resolved
+        stages[cycle_id] = (VISA_GRANTED, "已下签") if visas.get(cycle_id) == "granted" else resolved
     return stages

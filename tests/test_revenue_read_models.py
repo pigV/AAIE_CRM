@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 import unittest
 
 from revenue.client_fee_rules import FeeRuleAuthorityService
 from revenue.client_payments import ClientPaymentService
 from revenue.operational_orchestrator import RevenueOperationalOrchestrator
 from revenue.read_models import RevenueReadModels
-from revenue.repository import RevenueRepository
+from revenue.repository import RevenueRepository, canonical_json
 from revenue.services import RevenueService
 from tests.revenue_test_support import RevenueDatabaseFixture
 
@@ -105,6 +106,207 @@ class RevenueReadModelTests(RevenueDatabaseFixture, unittest.TestCase):
         by_category = {item["category"]: item for item in dashboard["pending_items"]}
         self.assertEqual(1, by_category["open_exceptions"]["count"])
         self.assertEqual("/revenue/reconciliation?filter=open-exceptions", by_category["open_exceptions"]["href"])
+
+    def test_home_uses_separate_recorded_fees_and_accepted_school_snapshot(self):
+        with self.connect() as connection:
+            case_uid, fee = self._seed_authoritative_fee(connection, "home-fees")
+            self.seed_component_authorities(connection)
+            connection.executescript("""
+                ALTER TABLE cycle_final_acceptances ADD student_id TEXT;
+                ALTER TABLE cycle_final_acceptances ADD acceptance_status TEXT;
+                ALTER TABLE cycle_final_acceptances ADD school_id INTEGER;
+                ALTER TABLE cycle_final_acceptances ADD school_name_snapshot TEXT;
+                UPDATE cycle_final_acceptances SET student_id='S-REVENUE',
+                    acceptance_status='active', school_name_snapshot='Accepted School';
+            """)
+            RevenueService(RevenueRepository(connection)).link_enrolment_component(
+                case_uid, "school", "final_acceptance", 201, 1, "home-acceptance",
+                final_acceptance_id=201,
+            )
+            connection.execute("""
+                INSERT INTO revenue_fee_items(uid,commercial_case_id,billing_account_id,student_id,
+                    rule_snapshot_id,milestone_code,description,net_cents,gst_cents,gross_cents,created_at)
+                SELECT 'home-visa',commercial_case_id,billing_account_id,student_id,rule_snapshot_id,
+                    'guardian-590','Controlled onboarding client service fee',90000,0,90000,created_at
+                FROM revenue_fee_items WHERE uid=?
+            """, (fee["uid"],))
+            ClientPaymentService(RevenueRepository(connection)).record_client_payment(
+                fee_item_uid=fee["uid"], payment_method_code="au_personal_account",
+                actual_currency_code="AUD", actual_amount_cents=100_000, allocated_base_cents=100_000,
+                received_date="2026-08-30", external_reference="HOME-100",
+                evidence_document_uid=None, actor_user_id=1, actor_role="Admin",
+                actor_has_revenue_access=True, idempotency_key="home-payment",
+            )
+
+            recent = RevenueReadModels(connection).dashboard()["recent_cases"][0]
+            self.assertEqual("Accepted School", recent["institution"])
+            self.assertEqual({"received_cents": 100000, "outstanding_cents": 140000},
+                             recent["client_service_fee"])
+            self.assertEqual({"received_cents": 0, "outstanding_cents": 90000},
+                             recent["visa_service_fee"])
+            self.assertEqual("尚未建立学校佣金", recent["school_commission"]["label"])
+            connection.execute("UPDATE revenue_payments SET status='reversed'")
+            recent = RevenueReadModels(connection).dashboard()["recent_cases"][0]
+            self.assertEqual({"received_cents": 0, "outstanding_cents": 240000},
+                             recent["client_service_fee"])
+
+    def test_home_flags_two_active_fees_from_the_same_visa_case(self):
+        with self.connect() as connection:
+            case_uid, fee = self._seed_authoritative_fee(connection, "home-duplicate-visa")
+            service = RevenueService(RevenueRepository(connection))
+            original = {"milestone_code": "guardian-590", "visa_case_id": 900}
+            first = service._rule_snapshot("fee", "historical-visa", {"items": [original]}, 1)
+            second = service._rule_snapshot("fee", "operational-visa", {"items": [original]}, 1)
+            connection.executemany("""
+                INSERT INTO revenue_fee_items(uid,commercial_case_id,billing_account_id,student_id,
+                    rule_snapshot_id,milestone_code,description,net_cents,gst_cents,gross_cents,created_at)
+                SELECT ?,commercial_case_id,billing_account_id,student_id,?,'guardian-590',
+                    'Visa service fee',90000,0,90000,created_at FROM revenue_fee_items WHERE uid=?
+            """, [(name, snapshot["id"], fee["uid"])
+                  for name, snapshot in (("historical-visa", first), ("operational-visa", second))])
+            model = RevenueReadModels(connection)
+            recent = model.dashboard()["recent_cases"][0]
+            self.assertEqual(case_uid, recent["uid"])
+            self.assertEqual({"received_cents": 0, "outstanding_cents": 180000,
+                              "possible_duplicate": True}, recent["visa_service_fee"])
+
+    def test_home_reads_legacy_client_invoice_payments(self):
+        with self.connect() as connection:
+            case_uid, fee = self._seed_authoritative_fee(connection, "home-legacy-fee")
+            service = RevenueService(RevenueRepository(connection))
+            invoice = service.issue_invoice(
+                [fee["uid"]], 1, "home-legacy-invoice", "2026-08-29", "2026-09-05",
+                planned_payment_allocations=[{"method_code": "au_personal_account"}],
+            )
+            account = connection.execute(
+                "SELECT uid FROM revenue_billing_accounts WHERE id=?", (fee["billing_account_id"],)
+            ).fetchone()[0]
+            service.record_payment(
+                10_000, "received", "client", 1, "home-legacy-payment", "2026-08-30",
+                billing_account_uid=account,
+                allocations=[{"invoice_line_uid": invoice["lines"][0]["uid"], "allocated_cents": 10000}],
+            )
+            recent = RevenueReadModels(connection).dashboard()["recent_cases"][0]
+            self.assertEqual(case_uid, recent["uid"])
+            self.assertEqual({"received_cents": 10000, "outstanding_cents": 230000},
+                             recent["client_service_fee"])
+
+    def test_home_uses_school_invoice_student_line_instead_of_invoice_total(self):
+        with self.connect() as connection:
+            self.seed_component_authorities(connection)
+            repository = RevenueRepository(connection)
+            service = RevenueService(repository)
+            case = service.open_case(100, 1, "home-draft-case")
+            component = service.link_enrolment_component(
+                case["uid"], "school", "final_acceptance", 201, 1, "home-draft-component",
+                final_acceptance_id=201,
+            )
+            repository.command(
+                idempotency_key="home-draft", command_type="institution_commission_invoice_draft_created",
+                aggregate_type="institution_commission_invoice_draft", payload={}, actor_user_id=1,
+                operation=lambda: {"uid": "home-draft", "simulation": False,
+                                   "lines": [{"uid": "draft-line", "component_uid": component["uid"]}]},
+            )
+
+            def issue():
+                invoice_id = connection.execute("""
+                    INSERT INTO revenue_invoices(uid,document_kind,invoice_number,issue_date,
+                        net_cents,gst_cents,gross_cents,status,issued_at,created_at)
+                    VALUES('school-invoice','direct_commission_invoice','COM-HOME','2026-08-30',
+                        180000,0,180000,'issued','2026-08-30T00:00:00Z','2026-08-30T00:00:00Z')
+                    RETURNING id
+                """).fetchone()[0]
+                connection.execute("""
+                    INSERT INTO revenue_invoice_lines(uid,invoice_id,source_kind,source_uid,student_id,
+                        description,net_cents,gst_cents,gross_cents)
+                    VALUES('school-invoice-line',?,'institution_draft_line','draft-line','S-REVENUE',
+                        'Student commission',120000,0,120000)
+                """, (invoice_id,))
+                return {"uid": "school-invoice", "draft_uid": "home-draft", "simulation": False}
+
+            repository.command(
+                idempotency_key="home-draft-issue", command_type="institution_commission_invoice_issued",
+                aggregate_type="invoice", payload={}, actor_user_id=1, operation=issue,
+            )
+            model = RevenueReadModels(connection)
+            self.assertEqual({"label": "已开票，等确认发给学校", "received_cents": 0,
+                              "outstanding_cents": 120000},
+                             model.dashboard()["recent_cases"][0]["school_commission"])
+            service.record_payment(
+                80_000, "received", "institution", 1, "home-school-invoice-payment", "2026-08-31",
+                allocations=[{"invoice_line_uid": "school-invoice-line", "allocated_cents": 80000}],
+            )
+            self.assertEqual({"label": "已开票，等学校付款", "received_cents": 80000,
+                              "outstanding_cents": 40000},
+                             model.dashboard()["recent_cases"][0]["school_commission"])
+
+    def test_home_shows_unique_current_offer_school_without_guessing(self):
+        with self.connect() as connection:
+            case = RevenueService(RevenueRepository(connection)).open_case(100, 1, "home-offers")
+            self.seed_dashboard_invoice(connection, case["id"])
+            connection.executescript("""
+                CREATE TABLE offers(id INTEGER PRIMARY KEY, application_cycle_id INTEGER,
+                    student_id TEXT, school_name TEXT, offer_status TEXT);
+                INSERT INTO offers VALUES
+                    (1,100,'S-REVENUE','Example & College','received'),
+                    (2,100,'S-REVENUE','Withdrawn School','withdrawn'),
+                    (3,99,'S-REVENUE','Another Cycle','received'),
+                    (4,100,'S-OTHER','Another Student','received');
+            """)
+            model = RevenueReadModels(connection)
+            recent = model.dashboard()["recent_cases"][0]
+            self.assertEqual(("Example & College", "Offer 院校"),
+                             (recent["institution"], recent["institution_source"]))
+
+            connection.execute("UPDATE offers SET offer_status='received' WHERE id=2")
+            recent = model.dashboard()["recent_cases"][0]
+            self.assertEqual("待确认", recent["institution"])
+            self.assertEqual("等确认最终院校", recent["school_commission"]["label"])
+
+    def test_home_rcti_keeps_shared_partial_payment_unallocated(self):
+        with self.connect() as connection:
+            self.seed_component_authorities(connection)
+            service = RevenueService(RevenueRepository(connection))
+            case = service.open_case(100, 1, "rcti-home-case")
+            component = service.link_enrolment_component(
+                case["uid"], "school", "final_acceptance", 201, 1,
+                "rcti-home-component", final_acceptance_id=201,
+            )
+            migration = Path(__file__).resolve().parents[1] / "migrations/20261110_045_vic_rcti.sql"
+            connection.executescript(migration.read_text(encoding="utf-8"))
+            doc = service.register_document(
+                "vic_rcti_original", "/isolated/home-rcti.pdf", "2"*64,
+                "application/pdf", 100, "upload", 1, "rcti-home-doc",
+            )
+            snapshot = service._rule_snapshot("commission", "rcti-contract", {}, 1)
+            confirmed = {"confirmed_at": "2026-08-31T00:00:00Z", "gross_cents": 120_000,
+                         "comparison": {"lines": [{
+                             "actual": {"gross_cents": 80_000, "period": "2026"},
+                             "expected": {"component_uid": component["uid"]},
+                         }]}}
+            connection.execute("""
+                INSERT INTO revenue_vic_rcti(uid,contract_uid,simulation,pdf_id,pdf_sha,
+                    review_json,confirmed_json,details_confirmed,created_at)
+                VALUES('home-rcti',?,0,?,?,'{}',?,1,'2026-08-31T00:00:00Z')
+            """, (snapshot["uid"], doc["id"], "2"*64, canonical_json(confirmed)))
+            connection.execute("INSERT INTO revenue_vic_rcti_student VALUES('home-rcti',0,?,'2026')",
+                               (component["uid"],))
+            model = RevenueReadModels(connection)
+
+            def school_commission():
+                return model.dashboard()["recent_cases"][0]["school_commission"]
+
+            self.assertEqual({"label": "学校已出结算单，等付款", "received_cents": 0,
+                              "outstanding_cents": 80000}, school_commission())
+            connection.execute("""
+                INSERT INTO revenue_vic_rcti_bank VALUES
+                    ('bank','home-rcti',0,'school','reference','2026-09-01',80000,1,'2026-09-01T00:00:00Z')
+            """)
+            self.assertEqual({"label": "学校已付部分款，等核对学生分账", "received_cents": 0,
+                              "outstanding_cents": 0}, school_commission())
+            connection.execute("UPDATE revenue_vic_rcti_bank SET cents=120000")
+            self.assertEqual({"label": "已到账", "received_cents": 80000,
+                              "outstanding_cents": 0}, school_commission())
 
     def test_dashboard_only_exposes_mutation_shortcuts_when_service_prerequisites_exist(self):
         with self.connect() as connection:

@@ -16,6 +16,10 @@ from revenue.operational_facts import RevenueOperationalFacts
 from revenue.repository import RevenueRepository, new_uid
 from revenue.services import RevenueService
 
+from revenue.visa_fee_policy import (
+    SignedVisaPackageRequired, fully_executed_contracts, resolve_visa_fee, visa_fee_facts,
+)
+
 
 class RevenueOperationalOrchestrator:
     def __init__(
@@ -55,19 +59,7 @@ class RevenueOperationalOrchestrator:
             "SELECT * FROM contracts WHERE application_cycle_id=? ORDER BY id",
             (cycle_id,),
         ).fetchall()
-        result = []
-        for row in rows:
-            normalized = str(row["contract_status"] or "").replace("_", "").replace(" ", "").lower()
-            if normalized != "fullyexecuted":
-                continue
-            if "deleted_at" in row.keys() and row["deleted_at"]:
-                continue
-            if "voided_at" in row.keys() and row["voided_at"]:
-                continue
-            if "superseded_by_contract_id" in row.keys() and row["superseded_by_contract_id"]:
-                continue
-            result.append(row)
-        return result
+        return fully_executed_contracts(rows)
 
     def _record(self, event_name: str, authoritative_id: int, fact, cycle_id=None):
         self._require_admin()
@@ -273,14 +265,20 @@ class RevenueOperationalOrchestrator:
     def visa_case_changed(self, visa_case_id: int):
         self._require_admin()
         fact = self.facts.visa_case(visa_case_id)
-        event = self._record("visa", fact.id, fact, fact.application_cycle_id)
+        visa = self.connection.execute("SELECT * FROM visa_cases WHERE id=?", (visa_case_id,)).fetchone()
+        if "archived_at" in visa.keys() and visa["archived_at"]:
+            return {"fee_status": "ARCHIVED", "visa_fee_cents": None, "fee_items": []}
         if fact.application_cycle_id is None:
+            event = self._record("visa", fact.id, fact)
             return {**event, "visa_fee_cents": None, "fee_items": []}
         cycle = self.facts.cycle(fact.application_cycle_id)
+        if fact.student_id != cycle.student_id:
+            raise ValueError("签证案件和申请轮次的学生不一致。")
+        event = self._record("visa", fact.id, fact, fact.application_cycle_id)
         case = self.repository.require_by_uid(
             "revenue_commercial_cases", event["commercial_case_uid"]
         )
-        fee_facts = self._client_fee_facts_for_visa(cycle, case, fact)
+        fee_facts = self._client_fee_facts_for_visa(cycle, case, visa)
         authoritative_contracts = self._active_fully_executed_contracts(
             fact.application_cycle_id
         )
@@ -309,34 +307,22 @@ class RevenueOperationalOrchestrator:
         else:
             source_engagement_date = str(fact.version or cycle.version)[:10]
         try:
-            resolved = self.client_fee_rules.resolve(fee_facts, source_engagement_date)
-        except MissingFeeRule as exc:
-            exception = self.open_exception(
-                "missing_fee_rule",
-                "commercial_case",
-                case["uid"],
-                str(exc),
+            resolved = resolve_visa_fee(
+                self.client_fee_rules, fee_facts, visa, authoritative_contracts,
+                cycle.student_id, source_engagement_date,
             )
+        except MissingFeeRule as exc:
+            reason = "signed_visa_package_required" if isinstance(exc, SignedVisaPackageRequired) else "missing_fee_rule"
+            exception = self.open_exception(reason, "commercial_case", case["uid"], str(exc))
             return {
-                **event,
-                "fee_status": "NEEDS_ATTENTION",
-                "reason": "missing_fee_rule",
-                "exception": exception,
-                "visa_fee_cents": None,
-                "fee_items": [],
+                **event, "fee_status": "NEEDS_ATTENTION", "reason": reason,
+                "exception": exception, "visa_fee_cents": None, "fee_items": [],
             }
         decision = resolved.snapshot()
-        if resolved.net_cents is None:
-            return {
-                **event,
-                "fee_status": "INCLUDED",
-                "visa_fee_policy": decision,
-                "visa_fee_cents": None, "fee_items": [],
-            }
         account = self.service.ensure_student_billing_account(
             cycle.student_id, self.actor_user_id,
             f"revenue-billing-account:{cycle.student_id}", cycle.version[:10],
-        )
+        ) if resolved.net_cents is not None else None
         item = {
             "milestone_code": resolved.milestone_code,
             "description": "Visa service fee",
@@ -346,14 +332,20 @@ class RevenueOperationalOrchestrator:
             "visa_case_id": fact.id,
             "application_cycle_id": cycle.id,
         }
-        fees = self.service.create_fee_items(
-            case["uid"], account["uid"], [item], self.actor_user_id,
-            f"revenue-fee:visa:{fact.id}:{resolved.rule_uid}",
-            resolved.rule_uid,
+        fee_status, fees = self.service.ensure_visa_fee(
+            case["uid"], account["uid"] if account else None, item, self.actor_user_id,
+            f"revenue-fee:visa:{fact.id}:{resolved.rule_uid}", resolved.rule_uid,
         )
+        if fee_status == "NEEDS_ATTENTION":
+            exception = self.open_exception(
+                "visa_fee_conflict", "commercial_case", case["uid"],
+                f"签证案件 #{fact.id} 的收费有重复或金额不同，请核对现有收费。",
+            )
+            return {**event, "fee_status": fee_status, "reason": "visa_fee_conflict",
+                    "exception": exception, "visa_fee_cents": None, "fee_items": []}
         return {
             **event,
-            "fee_status": "CREATED",
+            "fee_status": fee_status,
             "visa_fee_policy": decision,
             "visa_fee_cents": resolved.net_cents,
             "fee_items": fees,
@@ -400,21 +392,10 @@ class RevenueOperationalOrchestrator:
         )
 
     @staticmethod
-    def _client_fee_facts_for_visa(cycle, case, fact) -> ClientFeeRuleFacts:
-        normalized = " ".join(
-            str(value or "").strip().lower()
-            for value in (fact.case_type, fact.visa_subclass, fact.application_type)
-        )
-        is_590 = "590" in normalized
-        renewal = any(token in normalized for token in ("renewal", "renew", "extension"))
-        independent = renewal or "standalone" in normalized or "independent" in normalized
-        return ClientFeeRuleFacts(
-            service_kind="guardian_590" if is_590 else "student_visa",
-            education_stream=cycle.education_stream,
-            cycle_type=cycle.cycle_type,
-            existing_aaie_k12=bool(case["existing_aaie_k12"]),
-            application_type="renewal" if renewal else "new",
-            independent_service=independent,
+    def _client_fee_facts_for_visa(cycle, case, visa) -> ClientFeeRuleFacts:
+        return visa_fee_facts(
+            visa, education_stream=cycle.education_stream, cycle_type=cycle.cycle_type,
+            existing_aaie=bool(case["existing_aaie_k12"]),
         )
 
     def offer_received(self, offer_event_id: int):

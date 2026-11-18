@@ -549,7 +549,7 @@ class SchoolPlanDetailViewTests(unittest.TestCase):
 
             html = captured["html"]
             self.assertIn("学校方案报告详情", html)
-            self.assertIn("Exact Student · v3", html)
+            self.assertIn('href="/students/DETAIL001">Exact Student</a> · v3', html)
             self.assertIn("<span>学校数量</span><strong>2</strong>", html)
             self.assertIn("<span>创建人</span><strong>Test Consultant</strong>", html)
             self.assertIn('href="/school-plan-reports">返回列表</a>', html)

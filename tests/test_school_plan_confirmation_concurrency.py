@@ -1,5 +1,6 @@
 """Exercise two HTTP confirmations that both pass the initial duplicate check."""
 import base64
+import io
 import sqlite3
 import tempfile
 import threading
@@ -24,6 +25,8 @@ class SchoolPlanConfirmationConcurrencyTests(unittest.TestCase):
             with sqlite3.connect(database.path) as target:
                 fixture.connection.backup(target)
                 target.execute("CREATE TABLE archived_documents(confirmation_id INTEGER, kind TEXT)")
+            with sqlite3.connect(database.path) as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
             link = {
                 **fixture.context, "id": 5, "plan_sector": "public",
                 "bound_wechat_openid": "openid", "bound_wechat_unionid": "unionid",
@@ -31,6 +34,7 @@ class SchoolPlanConfirmationConcurrencyTests(unittest.TestCase):
             }
             ready = threading.Barrier(2)
             saved_signatures = []
+            responses = {}
             save_signature = app.CRMHandler.school_plan_save_signature_image
 
             def save_original_signature(handler, report_id, signature_data):
@@ -53,6 +57,7 @@ class SchoolPlanConfirmationConcurrencyTests(unittest.TestCase):
                 return target
 
             def archive_locked(handler, confirmation_id, user=None):
+                self.assertEqual(responses.get(threading.get_ident()), "success")
                 # Rendering/storage boundary; the production file lock stays real.
                 with database.transaction() as connection:
                     for kind in ("FinalConfirmedSchoolPlan", "ParentSignaturePage"):
@@ -62,8 +67,13 @@ class SchoolPlanConfirmationConcurrencyTests(unittest.TestCase):
             def submit():
                 handler = object.__new__(app.CRMHandler)
                 handler.client_address = ("127.0.0.1", 0)
+                handler.wfile = io.BytesIO()
                 handler.headers = {"User-Agent": "concurrent-test"}
                 return handler.school_plan_share_confirm("POST", "test-token")
+
+            def success_page(handler, *args):
+                responses[threading.get_ident()] = "success"
+                return "success"
 
             patches = {
                 "school_plan_share_row_by_token": lambda self, token: link,
@@ -76,7 +86,7 @@ class SchoolPlanConfirmationConcurrencyTests(unittest.TestCase):
                 "school_plan_save_signature_image": save_original_signature,
                 "school_plan_archive_confirmation_documents_locked": archive_locked,
                 "school_plan_share_record_log": lambda *args, **kwargs: None,
-                "school_plan_share_public_page": lambda self, *args: "success",
+                "school_plan_share_public_page": success_page,
                 "redirect": lambda self, url: "redirect",
             }
             with patch.object(app, "db", database), patch.object(
@@ -85,7 +95,7 @@ class SchoolPlanConfirmationConcurrencyTests(unittest.TestCase):
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     results = list(pool.map(lambda _: submit(), range(2)))
 
-            self.assertCountEqual(results, ["success", "redirect"])
+            self.assertCountEqual(results, ["success", "success"])
             self.assertEqual(database.one("SELECT COUNT(*) n FROM school_plan_report_confirmations")["n"], 1)
             self.assertEqual(database.one("SELECT COUNT(*) n FROM school_plan_confirmed_schools")["n"], 2)
             self.assertEqual([row["kind"] for row in database.all(

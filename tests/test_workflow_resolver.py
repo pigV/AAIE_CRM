@@ -64,6 +64,9 @@ def stage_facts(stage: int, **overrides) -> WorkflowFacts:
 
 
 class WorkflowResolverTests(unittest.TestCase):
+    def test_created_plan_waits_to_be_sent(self):
+        stage = resolve_workflow_stage(stage_facts(4, plan_exists=True))
+        self.assertEqual(stage.title, "等待发送学校方案")
     def test_unclassified_progression_fails_closed_with_explicit_status(self):
         result = resolve_workflow_stage(
             stage_facts(

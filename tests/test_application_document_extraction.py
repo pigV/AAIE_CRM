@@ -51,6 +51,39 @@ class ApplicationExtractionTests(unittest.TestCase):
                 language + '\nSchool:\nEast Doncaster Secondary College\nAddress:\n'
                 '20 George Street\nYear Level:\n10\nAccommodation and Welfare Option\n')
 
+    def test_nsw_offer_uses_language_program_and_its_start_date(self):
+        text = (
+            "COURSE DETAILS\n"
+            "Program name and location High School Preparation Delivered through the High School Curriculum at Central Sydney Intensive\n"
+            "English High School\n57-77 Mitchell Road\n"
+            "Start date 21-Jul-2026 Finish date 17-Dec-2026 Term(s) 2\n"
+            "Program name and location Mosman High School - Year 9 to 10\n"
+            "Start date 03-Feb-2027 Finish date 18-Dec-2028 Term(s) 8\n"
+        )
+        details = self.ns["infer_nsw_public_offer_details"](upload(text), text, text.splitlines())
+        self.assertEqual(details.get("language_school_name"), "Central Sydney Intensive English High School")
+        self.assertEqual(details.get("course_start_date"), "2026-07-21")
+
+    def test_victorian_offer_reads_course_dates_range(self):
+        text = self.offer("Not applicable").replace(
+            "School Name and Year Level", "School Name and Year Level Course Course Dates"
+        ).replace("Year Level:\n10\n", "Year Level:\n10\n019048F Secondary\n"
+                  "27 January 2027\nto\n21 December 2029\n124 weeks\n")
+        details = self.ns["infer_offer_details"](upload(text))
+        self.assertEqual(details["course_start_date"], "2027-01-27")
+        self.assertEqual(details["language_school_name"], "")
+
+    def test_nsw_cover_letter_distinguishes_provider_code_from_name(self):
+        text = ("Confirmation of Enrolment Cover Letter\n"
+                "NSW Department of Education | CRICOS Provider Code: 00588M\n"
+                "COURSE DETAILS\nProgram name and location Example High School\n"
+                "Start date 03-Feb-2027 Finish date 18-Dec-2028\n")
+        details = self.ns["infer_coe_oshc_details"](
+            upload(text, "CoE Cover Letter.pdf"), "LetterOfConfirmation"
+        )
+        self.assertEqual(details["coe_provider"], "NSW Department of Education")
+        self.assertEqual(details["letter_main_course_name"], "Example High School")
+
     def test_offer_prefers_course_details_after_page_two(self):
         details = self.ns['infer_offer_details'](upload(self.offer()))
         self.assertEqual(details['school_name'], 'East Doncaster Secondary College')

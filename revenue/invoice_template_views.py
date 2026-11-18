@@ -4,6 +4,7 @@ from html import escape
 from urllib.parse import urlencode
 
 from revenue.invoice_templates import FIELD_LABELS, HEADINGS, ISSUER_FONT_BOUNDS, LABELS, VERSION_NAME_LIMIT
+from ui import ASSET_VERSION
 
 
 URL = "/revenue/commission-invoice-templates"
@@ -134,14 +135,14 @@ def render_commission_invoice_templates(data,csrf,token, *, entity_id=None, open
         actions=f'<form method="post" action="{URL}/publish{suffix}">{_security(csrf,token,"publish")}{state}<button class="primary" type="submit">确认发布此版本</button></form>'
         if preview_uid in data["published"]:
             actions+=f'<form method="post" action="{URL}/rollback{suffix}">{_security(csrf,token,"rollback")}{state}<button type="submit">回退到所选版本</button></form>'
-    return f"""<link rel="stylesheet" href="/assets/commission-invoice-template.css">
+    return f"""<link rel="stylesheet" href="/assets/commission-invoice-template.css?v={ASSET_VERSION}">
     <section class="cit-workspace">
       <header class="cit-title">
         <nav class="cit-navigation" aria-label="佣金发票模板导航">
           <a class="secondary button-link" href="{back_href}" data-template-back>返回上一页</a>
           <a class="secondary button-link" href="/revenue">返回收入与佣金</a>
         </nav>
-        <p class="cit-kicker">REVENUE · COMMISSION INVOICES</p><h1>佣金发票模板</h1>{authority_heading}
+        <h1>佣金发票模板</h1>{authority_heading}
         <p>{notice}拖动区块或用上下键按钮调整。保存草稿后可预览版式。</p></header>
       <div class="cit-columns">
         <form method="post" action="{URL}/save{suffix}" enctype="multipart/form-data" data-invoice-template class="cit-editor">
@@ -157,15 +158,15 @@ def render_commission_invoice_templates(data,csrf,token, *, entity_id=None, open
             <label><input type="checkbox" name="remove_logo" value="1">移除 Logo</label><small>{logo_notice}</small>
           </section>
           <section class="cit-panel"><h2>发票区块</h2><div data-block-list>{''.join(cards)}</div></section>
-          <label>新草稿版本名称（可选）<input name="version_name" maxlength="{VERSION_NAME_LIMIT}"></label>
-          <button class="primary" type="submit">保存草稿</button>
+          <div class="cit-panel cit-save"><label>新草稿版本名称（可选）<input name="version_name" maxlength="{VERSION_NAME_LIMIT}"></label>
+          <button class="primary" type="submit">保存草稿</button></div>
         </form>
         <aside class="cit-sidebar">
           <section id="invoice-template-preview" class="cit-panel"><h2>模板预览</h2>
             <p>正在预览 {escape(names.get(preview_uid, "默认模板"))}</p>
             <p>当前已发布 {escape(names.get(active, "未发布"))}</p>
-            <ul>{''.join(preview)}</ul>{actions}</section>
-          <section class="cit-panel"><h2>模板版本</h2><ul>{''.join(versions)}</ul></section>
+            <ul class="cit-preview-links">{''.join(preview)}</ul><div class="cit-preview-actions">{actions}</div></section>
+          <section class="cit-panel"><h2>模板版本</h2><ul class="cit-versions">{''.join(versions)}</ul></section>
           <details id="invoice-finance-profile" class="cit-panel"{" open" if open_finance else ""}><summary>{profile_label}</summary>
             <p>{profile_note}</p>
             <form method="post" action="{URL}/profile{suffix}">{_security(csrf,token,"profile")}

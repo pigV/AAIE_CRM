@@ -30,6 +30,7 @@ class StateSchoolCommissionTests(RevenueDatabaseFixture, unittest.TestCase):
 
         from revenue.institution_commission_draft import InstitutionCommissionDraft, _digest, extract_draft_terms
         from revenue.repository import RevenueRepository
+        from revenue.school_commission_overview import SchoolCommissionOverview
         from revenue.school_contracts import SchoolCommissionContracts
         from revenue.services import RevenueService
 
@@ -80,11 +81,16 @@ class StateSchoolCommissionTests(RevenueDatabaseFixture, unittest.TestCase):
                     )
             self.assertEqual(set(expected), set(eligible))
             rows = [row for row in workflow.candidates(terms) if row.get("uid")]
+            overview = SchoolCommissionOverview(db, pilot, 1, can_view_claims=True)
+            register_entry = {"confirmed": [("fixture-document", [], workflow.uid)]}
+            self.assertEqual(len(expected), overview.read(workflow.target, register_entry)["claimable"])
             revision = _digest(sorted(row["revision"] for row in rows))
             if reject:
                 with self.assertRaisesRegex(ValueError, "所选记录"):
                     workflow.create_invoice_draft([rows[0]["uid"], reject], revision, terms, key + ":invalid")
-            return workflow.create_invoice_draft([row["uid"] for row in rows], revision, terms, key)
+            draft = workflow.create_invoice_draft([row["uid"] for row in rows], revision, terms, key)
+            self.assertEqual(0, overview.read(workflow.target, register_entry)["claimable"])
+            return draft
 
         with self.assertRaises(PermissionError):
             open_contract("QLD", 8, "2025-01-01")
@@ -133,6 +139,7 @@ def seed_state_commission_students(db, service):
     for table, columns in {
         "schools": ("school_name", "deleted_at", "state", "sector_key", "school_type"),
         "cycle_final_acceptances": ("school_id", "acceptance_status", "student_id"),
+        "student_school_enrolments": ("student_id", "enrolment_role", "status", "start_date"),
     }.items():
         present = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
         for column in columns:

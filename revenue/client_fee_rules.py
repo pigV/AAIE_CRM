@@ -40,7 +40,7 @@ class ClientFeeRuleFacts:
 
 @dataclass(frozen=True)
 class ResolvedClientFeeRule:
-    rule_uid: str
+    rule_uid: str | None
     policy_code: str
     net_cents: int | None
     milestone_code: str

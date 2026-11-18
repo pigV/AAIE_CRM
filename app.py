@@ -4823,6 +4823,17 @@ def can_edit_student_profile(user):
     return can_access_module(user, "students") and (can_module_action(user, "students", "edit") or allowed(user, "students.edit"))
 
 
+def can_manage_application_withdrawal(user, student):
+    return (
+        allowed(user, "students.edit")
+        and can_edit_student_profile(user)
+        and (
+            user["role_name"] in {"Admin", "Manager", "Manager + Student Cases"}
+            or student["consultant_id"] == user["id"]
+        )
+    )
+
+
 def can_delete_student_record(user):
     return bool(user and user.get("role_name") in {"Admin", "Manager"} and can_access_module(user, "students"))
 
@@ -5057,6 +5068,35 @@ def role_module_presets_json():
     return json.dumps(ROLE_MODULE_PRESETS, ensure_ascii=False)
 
 
+STUDENT_APPLICATION_SERVICES = {"school": "申请学校", "visa_only": "仅办签证"}
+VISA_ONLY_HIDDEN_STUDENT_TABS = {"school_plans", "offer", "payments", "coe", "homestay"}
+
+
+def student_application_service(profile):
+    return "visa_only" if profile.get("application_service") == "visa_only" else "school"
+
+
+def visa_only_progress_label(case, result):
+    if case is None:
+        return "签证 · 尚未建立案件"
+    labels = {
+        "draft": "草稿",
+        "information collection": "收集资料",
+        "documents preparing": "准备材料",
+        "ready to lodge": "等待递交",
+        "lodged": "审理中",
+        "s56 requested": "等待补件",
+        "granted": "已下签",
+        "refused": "已拒签",
+        "withdrawn": "已撤回",
+        "closed": "已结案",
+    }
+    status = str(case["status"] or "").strip().lower()
+    decision = str(result or "").strip().lower()
+    display_status = labels.get(decision) or labels.get(status, "办理中")
+    return f"签证 · {display_status}"
+
+
 def student_form_values(student, *, include_account_password=True):
     try:
         data = json.loads(student["form_data_json"] or "{}")
@@ -5064,6 +5104,7 @@ def student_form_values(student, *, include_account_password=True):
         data = {}
     values = {name: ([] if meta["type"] == "checkbox" else "") for name, meta in FIELD_MAP.items()}
     values.update({key: value for key, value in data.items() if key in FIELD_MAP})
+    values["application_service"] = student_application_service(data)
     if include_account_password:
         values["account_password"] = student_account_password(student["student_id"])
     return values
@@ -5080,12 +5121,19 @@ def student_edit_form(action, csrf, values, errors=None, error_names=None):
         sections.append(
             f'<section class="form-section"><div class="section-number">{index:02}</div><div class="section-content"><h2>{esc(title)}</h2><div class="form-grid">{"".join(controls)}</div></div></section>'
         )
+    service_options = "".join(
+        f'<option value="{value}"{" selected" if value == student_application_service(values) else ""}>{label}</option>'
+        for value, label in STUDENT_APPLICATION_SERVICES.items()
+    )
     error_box = notice("error", "请检查必填项目：" + "、".join(errors)) if errors else ""
     return f"""
     <form class="parent-form internal-form student-edit-page" method="post" action="{esc(action)}">
       <input type="hidden" name="csrf" value="{esc(csrf)}">
       {error_box}
       <div class="intro-band internal-band"><h1>编辑学生资料</h1><p>学生编号、学生文件夹路径、创建日期不会被修改。</p></div>
+      <section class="form-section"><div class="section-content"><label>办理类型
+        <select name="application_service">{service_options}</select>
+      </label></div></section>
       {"".join(sections)}
       <section class="form-section"><div class="section-number">文件</div><div class="section-content"><h2>StudentInfo.docx</h2>
         <div class="choices">
@@ -5201,7 +5249,26 @@ def write_student_profile(conn, student, data, user, changed_at):
         data_for_storage.get("higher_education_course_type"),
         data_for_storage.get("higher_education_package_combination"),
     ) if data_for_storage.get("application_stream") == "higher_education" else ""
+    saved_profile = conn.execute(
+        "SELECT form_data_json FROM students WHERE student_id=?", (student["student_id"],)
+    ).fetchone()
+    try:
+        previous_service = student_application_service(json.loads(saved_profile[0] or "{}"))
+    except (ValueError, AttributeError):
+        previous_service = "school"
+    service = data_for_storage.get("application_service", previous_service)
+    if service not in STUDENT_APPLICATION_SERVICES:
+        raise ValueError("请选择有效的办理类型。")
+    data_for_storage["application_service"] = service
     changes = student_profile_changes(old_data, data_for_storage)
+    if service != previous_service:
+        changes.append({
+            "section": "办理类型",
+            "field_name": "application_service",
+            "field_label": "办理类型",
+            "old_value": STUDENT_APPLICATION_SERVICES[previous_service],
+            "new_value": STUDENT_APPLICATION_SERVICES[service],
+        })
     actor_id = user["id"] if user else None
     actor_name = user["username"] if user else "parent"
     conn.execute(
@@ -10732,6 +10799,9 @@ def student_detail_business_operations_html(
         if lifecycle_view.current_school is None:
             operations.append(
                 f'<a class="secondary button-link" href="/students/{student_id}/school-enrolments/current">确认当前学校</a>'
+            )
+            operations.append(
+                f'<a class="secondary button-link" href="/students/{student_id}/school-enrolments/current?local_admission=yes">确认入学（本地生）</a>'
             )
         operations.append(
             f'<a class="secondary button-link" href="/students/{student_id}/school-enrolments">管理入读学校</a>'
@@ -24158,9 +24228,7 @@ def nsw_offer_school_match(candidate):
     return "", round(best_score, 3), "Needs Review"
 
 
-def nsw_offer_school_name(text):
-    section = nsw_coe_cover_letter_course_section(text)
-    blocks = split_nsw_coe_cover_letter_program_blocks(section)
+def nsw_offer_school_name(blocks):
     main_schools = []
     for block in blocks:
         if block.get("type") == "language":
@@ -24268,7 +24336,13 @@ def nsw_offer_deposit_from_schedule(pages):
 
 def infer_nsw_public_offer_details(upload, text, lines):
     pages = nsw_offer_page_texts(upload, text)
-    school_name, school_score, school_status = nsw_offer_school_name(text)
+    section = nsw_coe_cover_letter_course_section(text)
+    blocks = split_nsw_coe_cover_letter_program_blocks(section)
+    school_name, school_score, school_status = nsw_offer_school_name(blocks)
+    language_blocks = [block for block in blocks if block["type"] == "language"]
+    first_program = (language_blocks or blocks or [{}])[0]
+    language_school_name = first_program.get("school", "") if language_blocks else ""
+    course_start_date = first_program.get("startDateIso", "")
     offer_date = nsw_offer_letter_date(pages)
     offer_expiry_date = nsw_offer_expiry_date(lines)
     deposit_amount, deposit_currency = nsw_offer_deposit_from_schedule(pages)
@@ -24283,7 +24357,23 @@ def infer_nsw_public_offer_details(upload, text, lines):
         field_confidence["deposit_amount"] = "explicit"
     if deposit_currency:
         field_confidence["deposit_currency"] = "explicit"
+    if language_school_name:
+        field_confidence["language_school_name"] = "explicit"
+    if course_start_date:
+        field_confidence["course_start_date"] = "explicit"
     return {
+        "language_school_name": language_school_name,
+        "course_start_date": course_start_date,
+        "program_segments": [
+            {
+                "program_type": "语言课程" if block["type"] == "language" else "正文课程",
+                "school": block["school"],
+                "start_date": display_date_value(block["startDateIso"]),
+                "end_date": display_date_value(block["endDateIso"]),
+                "is_language_course": block["type"] == "language",
+            }
+            for block in blocks
+        ],
         "school_name": school_name,
         "offer_date": offer_date,
         "offer_expiry_date": offer_expiry_date,
@@ -24322,6 +24412,17 @@ def offer_course_details_schools(text):
                 value = phrases[0]
                 break
         result[field] = value
+    if result.get("school_name") and re.search(r"\bCourse[ \t]+Dates\b", section, re.I):
+        start_dates = set()
+        for match in re.finditer(
+            r"(?im)^[ \t]*(\d{1,2} [A-Za-z]+ \d{4})\s+to\s+(\d{1,2} [A-Za-z]+ \d{4})\b",
+            section,
+        ):
+            start, end = map(normalize_offer_date, match.groups())
+            if start and end and start < end:
+                start_dates.add(start)
+        if len(start_dates) == 1:
+            result["course_start_date"] = start_dates.pop()
     return result
 
 
@@ -24341,8 +24442,8 @@ def infer_offer_details(upload):
     )
     if is_nsw_public_offer(text, upload.filename):
         details = infer_nsw_public_offer_details(upload, text, lines)
-        details["course_start_date"] = course_start_date
-        if course_start_date:
+        if course_start_date and not details["course_start_date"]:
+            details["course_start_date"] = course_start_date
             details.setdefault("_field_confidence", {})["course_start_date"] = "explicit"
         details["extracted_text_found"] = bool(text.strip())
         return details
@@ -24372,7 +24473,7 @@ def infer_offer_details(upload):
         "school_name": course_schools.get("school_name", infer_school_name(lines, upload.filename)),
         "language_school_name": course_schools.get("language_school_name", ""),
         "offer_date": offer_date,
-        "course_start_date": course_start_date,
+        "course_start_date": course_schools.get("course_start_date") or course_start_date,
         "offer_expiry_date": offer_expiry_date,
         "deposit_amount": deposit_amount,
         "deposit_currency": deposit_currency or "AUD",
@@ -24667,6 +24768,15 @@ def infer_coe_oshc_details(upload, forced_kind=None):
         caaw_end = fallback_caaw_welfare_end_date(caaw_start, coe_end, all_dates)
     company = infer_oshc_provider(lines, upload.filename)
     provider = sa_caaw.get("provider") or labeled_value(lines, ("provider / school", "provider name", "education provider", "registered provider", "provider"), 160) or infer_school_name(lines, upload.filename)
+    if nsw_letter:
+        # The footer identifies the provider. The generic "Provider" label also
+        # matches "Provider Code", which is not a provider name.
+        provider_name = re.search(
+            r"(?im)^\s*(NSW[ \t]+Department[ \t]+of[ \t]+Education)"
+            r"(?=[ \t]*(?:\|[ \t]*CRICOS[ \t]+Provider[ \t]+Code\b|$))",
+            text,
+        )
+        provider = compact_document_text(provider_name.group(1)) if provider_name else ""
     caaw_start = sa_caaw.get("caaw_welfare_start_date") or caaw_start
     caaw_end = sa_caaw.get("caaw_welfare_end_date") or caaw_end
     field_confidence = {}
@@ -28724,7 +28834,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             data["workspace_links"] = [*data["workspace_links"], {
                 "label": "学校佣金申领清单", "href": "/revenue/school-commission-candidates",
             }]
-        body = render_revenue_workspace(data, csrf=self.csrf, mobile=False)
+        body = render_revenue_workspace(
+            data, csrf=self.csrf, recent_sort=(self.query.get("sort") or [""])[0],
+        )
         return self.send_html(
             page("收入与佣金", body, self.user, self.csrf,
                  REVENUE_MODULE_KEY, nas.status())
@@ -28841,8 +28953,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("州／领地教育局合同入口尚未开放。", HTTPStatus.FORBIDDEN)
         return self._revenue_school_contract_page(intake, upload=True)
 
+    def _school_commission_formal_overview(self, connection, school_id):
+        from revenue.school_claim_candidates import SchoolClaimCandidates
+
+        if not can_perform_revenue_action(self.user, "school-claim-candidates"):
+            return None
+        scope = school_commission_authority(self.user, "contracts", school_id=school_id)
+        if not scope or not (scope.simulation or scope.toorak_claim_drafts):
+            return None
+        actions = RevenueUIActions(
+            connection, None, int(self.user["id"]), self.user["role_name"],
+            legacy_document_root=Path(db.path).parent / "revenue_documents", school_pilot=scope,
+        )
+        return SchoolClaimCandidates(actions._toorak_claims(), toorak_draft_release=scope.toorak_claim_drafts).list()
+
     def _revenue_school_contract_page(self, intake, *, upload, method="GET"):
         from html import escape
+        from revenue.school_commission_overview import SchoolCommissionOverview
+        from revenue.school_contract_pages import render_school_commission_students
         from revenue.views import render_contract_analysis
 
         pilot = school_commission_authority(self.user, "contracts")
@@ -28922,6 +29050,46 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 if billing_step and method == "POST" and any(key in self.form for key in TARGET_FIELDS.values()):
                     return self.error_page("请选择已确认的学校或教育局。", HTTPStatus.BAD_REQUEST)
                 title = CONFIRMED_TITLE
+                student_view = (self.query.get("students") or [""])[0]
+                expand = (self.query.get("expand_authority") or [""])[0]
+                include_empty = self.query.get("include_empty") == ["1"]
+                expanded_target = ("authority", expand) if expand else None
+                if expanded_target and (target is not None or expanded_target not in schools):
+                    return self.error_page("找不到已确认的教育局合同。", HTTPStatus.NOT_FOUND)
+                school_drilldown = "authority_school_id" in self.query
+                authority_school_id = self._school_commission_scope_id("authority_school_id") if school_drilldown else None
+                if school_drilldown and (
+                    authority_school_id is None or target is None or target[0] != "authority" or not student_view
+                    or sum(key in self.query for key in TARGET_FIELDS.values()) != 1
+                ):
+                    return self.error_page("请选择教育局下的学校和学生明细类型。", HTTPStatus.BAD_REQUEST)
+                overview = None
+                if student_view or target is None:
+                    overview = SchoolCommissionOverview(
+                        connection, intake, int(self.user["id"]),
+                        can_view_claims=can_perform_revenue_action(self.user, "contracts/school/register"),
+                        formal_candidates=lambda school_id: self._school_commission_formal_overview(connection, school_id),
+                    )
+                if student_view:
+                    if method != "GET" or billing_step or target is None or student_view not in {"all", "claimable"}:
+                        return self.error_page("请选择学校和学生明细类型。", HTTPStatus.BAD_REQUEST)
+                    try:
+                        summary = overview.read(target, schools[target], view=student_view,
+                                                authority_school_id=authority_school_id)
+                    except LookupError:
+                        return self.error_page("该学校不在此教育局的公校范围内。", HTTPStatus.NOT_FOUND)
+                    body = render_school_commission_students(
+                        target, schools[target]["name"], summary, student_view,
+                        authority_school_id=authority_school_id, include_empty=include_empty,
+                    )
+                    return self.send_html(
+                        page(title, body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                        headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop",
+                    )
+                summaries = {key: overview.read(key, school) for key, school in schools.items()} if overview else None
+                expanded_schools = overview.authority_schools(
+                    expanded_target, schools[expanded_target], include_empty=include_empty,
+                ) if expanded_target else ()
                 authority_finance = ""
                 if target and target[0] == "authority":
                     from revenue.authority_formal import authority_payer, authority_schema_ready
@@ -28962,7 +29130,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 body = render_confirmed_contracts(schools, target, authority_finance=authority_finance,
                                                   claim_href=claim_href, reviewed_nsw=reviewed_nsw,
                                                   can_edit=can_edit, billing_href=billing_url(target) if target and can_edit else "",
-                                                  billing_settings=billing_settings)
+                                                  billing_settings=billing_settings, summaries=summaries,
+                                                  expanded_authority=expand, expanded_schools=expanded_schools,
+                                                  include_empty=include_empty)
         finally:
             db._release_connection(connection)
         message, message_kind = self.message()
@@ -31205,6 +31375,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             self._revenue_dashboard_data(case_surface="mobile"),
             csrf=self.csrf,
             mobile=True,
+            recent_sort=(self.query.get("sort") or [""])[0],
         )
         return self.send_html(self.mobile_shell("收入与佣金", body, ""))
 
@@ -54803,7 +54974,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         if student is None or not can_edit_student_profile(self.user):
             return self.error_page("无法操作此学生的申请。", HTTPStatus.FORBIDDEN)
-        if self.user["role_name"] not in {"Admin", "Manager"} and student["consultant_id"] != self.user["id"]:
+        if not can_manage_application_withdrawal(self.user, student):
             return self.error_page("只有负责顾问、经理或管理员可以终止申请。", HTTPStatus.FORBIDDEN)
         if not is_workflow_v2_active(db):
             return self.error_page("申请周期功能尚未启用。", HTTPStatus.CONFLICT)
@@ -55562,6 +55733,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if method != "POST":
             return self.error_page("方法不允许", 405)
         data = normalize_form(self.form)
+        if "application_service" in self.form:
+            service = self.form["application_service"]
+            if not isinstance(service, str) or service not in STUDENT_APPLICATION_SERVICES:
+                return self.error_page("请选择有效的办理类型。", 422)
+            data["application_service"] = service
         missing_names = missing_student_fields(data)
         missing = missing_student_labels(missing_names)
         if missing:
@@ -59656,6 +59832,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 feedback=message,
                 feedback_kind=kind,
                 transfer_contract_id=transfer_contract_id,
+                local_admission=(
+                    transfer_contract_id is None
+                    and (self.query.get("local_admission") or [""])[0] == "yes"
+                ),
             )
         except (ValueError, sqlite3.Error):
             return self.error_page("学校关系暂不可用。", HTTPStatus.BAD_REQUEST)
@@ -59675,7 +59855,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         allowed = {
             "csrf", "school_id", "school_name_snapshot",
             "course_name_snapshot", "year_level_snapshot", "start_date",
-            "reason", "transfer_contract_id",
+            "reason", "transfer_contract_id", "local_admission", "school_confirmed",
         }
         if (
             not self.require("students.view")
@@ -59697,20 +59877,34 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     get_permissions(self.user), self.transfer_case_flags()
                 ):
                     raise ValueError("transfer contract is unavailable")
+            start_date = form_text_value(self.form, "start_date").strip()
+            reason = form_text_value(self.form, "reason").strip()
+            if form_text_value(self.form, "local_admission") == "yes":
+                if transfer_contract_id is not None or form_text_value(self.form, "school_confirmed") != "yes":
+                    raise ValueError("缺少本地生入学确认。")
+                admission_date = date.fromisoformat(start_date)
+                if admission_date > datetime.now(ZoneInfo("Australia/Melbourne")).date():
+                    return self.flash_redirect(
+                        f"/students/{quote(str(student_id))}/school-enrolments/current?local_admission=yes",
+                        "入学日期尚未到，不能登记为当前在读。", "error",
+                    )
+                if not reason:
+                    raise ValueError("请填写学校确认依据。")
+                reason = f"本地生入学确认：{reason}"
             school_id, school_name = self._student_enrolment_school()
             SchoolEnrolmentService(db.path).confirm_current(
                 student_id=str(student_id),
                 school_id=school_id,
                 school_name_snapshot=school_name,
                 actor_user_id=int(self.user["id"]),
-                reason=form_text_value(self.form, "reason"),
+                reason=reason,
                 course_name_snapshot=(
                     form_text_value(self.form, "course_name_snapshot") or None
                 ),
                 year_level_snapshot=(
                     form_text_value(self.form, "year_level_snapshot") or None
                 ),
-                start_date=form_text_value(self.form, "start_date") or None,
+                start_date=start_date or None,
             )
         except (
             SchoolEnrolmentConflictError,
@@ -60151,6 +60345,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 append_service_log("admin", "student_info_filename_sync_failed", repr(exc), student_id=student_id)
 
         data = json.loads(student["form_data_json"])
+        visa_only = requested_cycle is None and student_application_service(data) == "visa_only"
         alerts = []
         if data.get("has_medical_or_psychological_history") == "有":
             alerts.append("健康状况提醒")
@@ -60164,7 +60359,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
         step_start = time.perf_counter()
         visible_account_password = student_account_password(student_id)
-        section_html = []
+        service_label = STUDENT_APPLICATION_SERVICES[student_application_service(data)]
+        section_html = [
+            '<section class="detail-section"><div class="detail-grid">'
+            f'<div class="detail-item"><span>办理类型</span><strong>{esc(service_label)}</strong></div>'
+            '</div></section>'
+        ]
         for section_id, title, fields in profile_sections():
             items = []
             for name, label, *_ in fields:
@@ -60247,6 +60447,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             ("reminders", "留言与提醒", can_reminder_action(self.user, "view")),
             ("revenue", "收入与佣金", can_access_revenue(self.user)),
         ]
+        if visa_only:
+            tabs = [(key, label, visible) for key, label, visible in tabs
+                    if key not in VISA_ONLY_HIDDEN_STUDENT_TABS]
         tab_buttons = '<button class="active" data-tab="profile">学生资料</button>' + "".join(
             (
                 f'<button class="he-contract-disabled" type="button" disabled aria-disabled="true" title="高等教育升学无需合同">{esc(label)}（无需合同）</button>'
@@ -60317,14 +60520,30 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         current_status_text = student_stage_display_label(card_summary.stage_label)
         withdrawal_button = ""
         withdrawal_projection = (workflow_projection_map or {}).get(str(student_id))
-        can_manage_withdrawal = (
-            allowed(self.user, "students.edit")
-            and can_edit_student_profile(self.user)
-            and (
-                self.user["role_name"] in {"Admin", "Manager"}
-                or student["consultant_id"] == self.user["id"]
+        if (withdrawal_projection and withdrawal_projection.stage_key == "07_school_response"
+                and withdrawal_projection.diagnostic):
+            current_status_text = withdrawal_projection.diagnostic
+        can_manage_withdrawal = can_manage_application_withdrawal(self.user, student)
+        if (
+            can_manage_withdrawal and requested_cycle is None
+            and withdrawal_projection is not None
+            and withdrawal_projection.state == "contract_pending"
+            and withdrawal_projection.cycle_id is None
+        ):
+            # A pending transfer contract can mask an existing application on the overview.
+            eligible_cycles = db.all(
+                """SELECT id FROM application_cycles WHERE student_id=? AND status='active'
+                   AND cycle_type IN ('initial','progression','transfer') ORDER BY id LIMIT 2""",
+                (student_id,),
             )
-        )
+            if len(eligible_cycles) == 1:
+                connection = db.connect()
+                try:
+                    withdrawal_projection = load_student_workflow_projection_map(
+                        connection, (str(student_id),), cycle_id=eligible_cycles[0]["id"]
+                    ).get(str(student_id))
+                finally:
+                    db._release_connection(connection)
         if (
             can_manage_withdrawal and withdrawal_projection is not None
             and withdrawal_projection.cycle_id is not None
@@ -60439,20 +60658,39 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if can_view_reminders
             else ""
         )
+        stage_evidence = ""
+        if visa_only:
+            school_plan_button = withdrawal_button = ""
+            transfer_summary_fact_html = progression_summary_fact_html = ""
+            primary_action_grid = (
+                '<div class="student-primary-action-grid">'
+                f'{create_500_visa_button}{create_590_visa_button}</div>'
+            )
+            current_status_text = "仅办签证"
+            if can_access_module(self.user, "visa"):
+                latest_case = self.student_latest_visa_case(student_id)
+                current_status_text = visa_only_progress_label(
+                    latest_case, self.student_visa_result_display(latest_case)
+                )
+        else:
+            stage_evidence = self.student_cycle_stage_evidence_html(
+                student_id, (workflow_projection_map or {}).get(str(student_id))
+            )
+        status_card_stage = current_status_text if visa_only else student_stage_display_label(card_summary.stage_label)
         status_card_html = f'''<div data-student-summary-fact data-student-detail-status-card>
               <span>当前状态</span>
-              <strong class="student-detail-stage">{esc(student_stage_display_label(card_summary.stage_label))}</strong>
-              {self.student_cycle_stage_evidence_html(student_id, (workflow_projection_map or {}).get(str(student_id)))}
+              <strong class="student-detail-stage">{esc(status_card_stage)}</strong>
+              {stage_evidence}
               <p class="student-detail-created-date">建档时间：{esc(card_summary.created_date or "未记录")}</p>
             </div>'''
-        school_card_html = f'''<div data-student-summary-fact data-student-detail-school-card>
+        school_card_html = "" if visa_only else f'''<div data-student-summary-fact data-student-detail-school-card>
               <span>学校方案</span>{school_final_html}{school_names_html}{school_more_html}{school_plan_link_html}
             </div>'''
         followup_card_html = f'''<div data-student-summary-fact data-student-detail-followup-card id="student-summary-reminders">
               <span>留言和提醒</span>{followup_summary_html}{quick_add_html}{followup_tab_link_html}
             </div>'''
         preview_dialog = preview_dialog_html()
-        business_operations = student_detail_business_operations_html(
+        business_operations = "" if visa_only else student_detail_business_operations_html(
             lifecycle_view, workflow_module_statuses_override,
             management=workflow_module_management,
             can_edit_profile=can_edit_student_profile(self.user),
@@ -61289,7 +61527,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return "".join(panels)
 
     def final_school_coe_panel_rows(self, student_id):
-        from final_school_coe import school_coe_rows
+        from final_school_coe import historical_school_coe_rows, school_coe_rows
 
         with db.read_snapshot() as conn:
             if not is_workflow_v2_active(conn) or not conn.execute(
@@ -61299,13 +61537,34 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             ids = tuple(row[0] for row in conn.execute(
                 "SELECT id FROM application_cycles WHERE student_id=? AND status='active'", (student_id,)
             ))
-            return {row["coe_id"]: row for row in school_coe_rows(conn, ids)}
+            rows = {row["coe_id"]: row for row in school_coe_rows(conn, ids)}
+            if can_workflow_module_save(self.user, "COE + OSHC") and allowed(self.user, "offers.manage"):
+                for row in historical_school_coe_rows(conn, student_id):
+                    entry = rows.setdefault(row["coe_id"], {"coe_id": row["coe_id"], "historical_offers": []})
+                    if "historical_offers" in entry:
+                        entry["historical_offers"].append(row)
+            return rows
 
     def final_school_coe_panel(self, student_id, row):
         from final_school_coe import eligibility_reason, evidence_snapshot
 
         if row is None:
             return ""
+        if "historical_offers" in row:
+            options = "".join(
+                f'<option value="{item["offer_event_id"]}">{esc(item["school_name_snapshot"])}</option>'
+                for item in row["historical_offers"]
+            )
+            return f"""
+              <form method="post" action="/students/{student_id}/coe/{row['coe_id']}/confirm-final-school">
+                <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                <label>已签历史 Offer<select name="historical_offer_event_id" required>
+                  <option value="">请选择</option>{options}</select></label>
+                <label><input type="checkbox" name="reviewed" value="yes" required>
+                  已核对已签 Offer 和主课 CoE 原件，确认属于同一学校及申请
+                </label>
+                <button class="secondary">补记最终学校并确认 CoE</button>
+              </form>"""
         school = esc(row["school_name_snapshot"])
         reason = eligibility_reason(row)
         if reason:
@@ -61440,6 +61699,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 if classification_resolved
                 else '<span class="offer-classification-badge is-unresolved">待完善学校资料</span>'
             )
+            if (
+                classification_resolved and "application_cycle_id" in offer.keys()
+                and offer["application_cycle_id"] is None and transfer_binding is None
+                and offer_record_value(offer, "document_type") in {"Offer", "SignedOffer"}
+            ):
+                classification_badge += '<span class="offer-classification-badge is-unresolved">待核对学校申请周期</span>'
             accepted_badge = (
                 '<span class="offer-accepted-badge">Transfer 当前已接受</span>'
                 if transfer_is_accepted else
@@ -61489,7 +61754,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
             elif is_current_accepted:
                 accept_action = f"""
-                  <form method="post" action="/students/{student_id}/offer/{offer['id']}/withdraw-acceptance" data-offer-withdraw-acceptance-form>
+                  <form method="post" action="/students/{student_id}/offer/{offer['id']}/withdraw-acceptance" data-offer-withdraw-acceptance-form data-ajax-student-tab-form>
                     <input type="hidden" name="csrf" value="{esc(self.csrf)}">
                     <label>撤回原因<input name="reason" required placeholder="说明撤回 Acceptance 的原因"></label>
                     <button class="danger compact" type="submit">Withdraw Acceptance</button>
@@ -62558,12 +62823,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return None
         return case
 
-    def visa_material_initialize_checklist(self, case):
+    def visa_material_initialize_checklist(self, case, *, connection=None):
+        if connection is None:
+            with db.transaction() as connection:
+                return self.visa_material_initialize_checklist(case, connection=connection)
         stamp = now_iso()
-        columns = {row["name"] for row in db.all("PRAGMA table_info(visa_checklist_items)")}
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(visa_checklist_items)")}
         existing_keys = {
             row["item_key"]
-            for row in db.all("SELECT item_key FROM visa_checklist_items WHERE visa_case_id=? AND item_key IS NOT NULL", (case["id"],))
+            for row in connection.execute("SELECT item_key FROM visa_checklist_items WHERE visa_case_id=? AND item_key IS NOT NULL", (case["id"],))
             if str(row["item_key"] or "").strip()
         }
         ordered_columns = (
@@ -62608,14 +62876,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             }
             insert_columns = [column for column in ordered_columns if column in columns]
             placeholders = ",".join("?" for _ in insert_columns)
-            db.execute(
+            connection.execute(
                 f"""INSERT OR IGNORE INTO visa_checklist_items
                    ({",".join(insert_columns)})
                    VALUES({placeholders})""",
                 [data[column] for column in insert_columns],
             )
             existing_keys.add(item["item_key"])
-        count_row = db.one("SELECT COUNT(*) total FROM visa_checklist_items WHERE visa_case_id=?", (case["id"],))
+        count_row = connection.execute("SELECT COUNT(*) total FROM visa_checklist_items WHERE visa_case_id=?", (case["id"],)).fetchone()
         return count_row["total"] if count_row else 0
 
     def visa_material_checklist_rows(self, case):
@@ -64965,7 +65233,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if guardian_applicant and guardian_applicant not in self.visa_case_guardian_applicant_options():
             return self.flash_redirect(
                 self.visa_case_return_path(student_id, case_id, self.visa_case_active_tab(), "case-overview"),
-                "Guardian Applicant 只能选择 School、Relative + 590 或 Parents' Nomination。",
+                "请选择有效的 Guardian Applicant 选项。",
                 "error",
             )
         db.execute(
@@ -67745,9 +68013,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 rows = [row for row in rows if visible_in_material_tab(row)]
             initialized_rows = [row for row in rows if row["is_initialized"]]
         initialized = bool(initialized_rows)
-        summary = self.visa_material_summary_counts(initialized_rows)
+        independent = not student_id
+        summary = self.visa_material_summary_counts(rows if independent and not initialized else initialized_rows)
         total = summary["total"]
-        description = description or f"申请类型：{self.visa_material_profile_label(case)}。VISA 显示系统已有文件引用，也支持补充上传。"
+        description = description or (
+            f"申请类型：{self.visa_material_profile_label(case)}。"
+            + ("在本案件上传和归类材料。" if independent else "VISA 显示系统已有文件引用，也支持补充上传。")
+        )
         summary_cards = "".join(
             f'<div class="visa-material-summary-card"><span>{esc(label)}</span><strong>{esc(value)}</strong></div>'
             for label, value in (
@@ -67759,18 +68031,25 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 ("完成度", f"{summary['completion']}%"),
             )
         )
+        smart_batch_link = (
+            f'<a class="secondary button-link" href="/students/{quote(student_id)}/visa-cases/{case["id"]}/material-batch-upload?visa_tab={quote(tab_key)}">Smart Batch Upload / 智能批量上传</a>'
+            if show_smart_batch else ""
+        )
         if not initialized:
+            initial_upload = smart_batch_link if independent else ""
+            initial_summary = "上传材料时会生成此签证类型的材料清单，也可以先初始化清单。" if independent else "点击初始化后，系统会按当前申请类型生成 Phase 2A 材料清单。此阶段只记录材料状态和备注。"
+            source_note = "" if independent else '<p class="visa-material-phase-note">初始化后将自动显示系统已有来源文件；VISA 不复制、不移动源文件，只做签证材料视角引用。</p>'
             return f"""
         <section class="panel visa-material-checklist-panel" id="{esc(panel_id)}">
           <div class="panel-head">
             <div><h2>{esc(title)}</h2><p>当前 Visa Case 还没有生成材料清单。</p></div>
-            <span class="visa-management-section-count">0 项</span>
+            <div class="row-actions">{initial_upload}<span class="visa-management-section-count">{total} 项</span></div>
           </div>
           <div class="visa-material-summary-grid">{summary_cards}</div>
           <div class="visa-management-empty visa-material-empty">
             <h3>暂无材料清单</h3>
-            <p>点击初始化后，系统会按当前申请类型生成 Phase 2A 材料清单。此阶段只记录材料状态和备注。</p>
-            <p class="visa-material-phase-note">初始化后将自动显示系统已有来源文件；VISA 不复制、不移动源文件，只做签证材料视角引用。</p>
+            <p>{initial_summary}</p>
+            {source_note}
             <form method="post" action="/students/{quote(student_id)}/visa-cases/{case['id']}/material-items/init">
               <input type="hidden" name="csrf" value="{esc(self.csrf)}">
               <button class="primary" type="submit">初始化材料清单</button>
@@ -67833,9 +68112,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           {''.join(category_sections)}
           <div class="dialog-actions visa-material-bottom-actions"><button class="primary" form="{esc(save_form_id)}">保存材料状态</button></div>
         """
-        smart_batch_link = (
-            f'<a class="secondary button-link" href="/students/{quote(student_id)}/visa-cases/{case["id"]}/material-batch-upload?visa_tab={quote(tab_key)}">Smart Batch Upload / 智能批量上传</a>'
-            if show_smart_batch else ""
+        source_note = (
+            '<p class="visa-material-phase-note">已确认的材料存放在当前签证案件中。</p>'
+            if independent else
+            '<p class="visa-material-phase-note">系统会从 Application / Offer / COE+OSHC / Homestay 等来源自动引用匹配文件；源文件仍保留在原模块。</p>'
         )
         return f"""
         <section class="panel visa-material-checklist-panel" id="{esc(panel_id)}">
@@ -67846,7 +68126,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <span class="visa-management-section-count">{total} 项</span>
             </div>
           </div>
-            <p class="visa-material-phase-note">系统会从 Application / Offer / COE+OSHC / Homestay 等来源自动引用匹配文件；源文件仍保留在原模块。</p>
+            {source_note}
           <div class="visa-material-summary-grid">{summary_cards}</div>
           {filter_bar}
           {form_start}
@@ -67882,7 +68162,19 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return ("Pending", "Granted", "Refused", "Withdrawn")
 
     def visa_case_guardian_applicant_options(self):
-        return ("School", "Relative + 590", "Parents' Nomination")
+        return {
+            "No": "No / 不需要监护",
+            "School": "School",
+            "Relative + 590": "Relative + 590",
+            "Parents' Nomination": "Parents' Nomination",
+        }
+
+    def visa_case_guardian_applicant_options_html(self, current=""):
+        options = ['<option value="">Please select / 请选择</option>']
+        for value, label in self.visa_case_guardian_applicant_options().items():
+            selected = " selected" if value == current else ""
+            options.append(f'<option value="{esc(value)}"{selected}>{esc(label)}</option>')
+        return "".join(options)
 
     def visa_case_select_options(self, options, current=""):
         current = str(current or "")
@@ -67922,7 +68214,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             {self.visa_case_cycle_field(student_id, values.get("application_cycle_id", ""))}
             <label>Visa Type<select name="visa_type" required><option value="">请选择</option>{self.visa_case_select_options(self.visa_case_type_options(), values.get("visa_type", ""))}</select></label>
             <label>Application Type<input name="application_type" value="{value("application_type", "New Application")}"></label>
-            <label>Guardian Applicant<select name="guardian_applicant"><option value="">Please select / 请选择</option>{self.visa_case_select_options(self.visa_case_guardian_applicant_options(), values.get("guardian_applicant", ""))}</select></label>
+            <label>Guardian Applicant<select name="guardian_applicant">{self.visa_case_guardian_applicant_options_html(values.get("guardian_applicant", ""))}</select></label>
             <label>Main Applicant<input name="main_applicant" value="{value("main_applicant", student_name)}"></label>
             <label>Applicant Count<input type="number" min="1" name="applicant_count" value="{applicant_count}"></label>
             <label>Status<select name="status" required>{self.visa_case_select_options(self.visa_case_status_options(), values.get("status", "Draft"))}</select></label>
@@ -67950,11 +68242,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def student_visa_case_foundation_field_card_html(self, student_id, case, label, value):
         if label == "Guardian Applicant":
-            current = str(value or "")
-            options = '<option value="">Please select / 请选择</option>' + self.visa_case_select_options(
-                self.visa_case_guardian_applicant_options(),
-                current if current in self.visa_case_guardian_applicant_options() else "",
-            )
+            options = self.visa_case_guardian_applicant_options_html(value)
             return f"""
             <div class="visa-management-field-card visa-management-field-card-form">
               <dt>Guardian Applicant</dt>
@@ -68177,7 +68465,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if guardian_applicant and guardian_applicant not in self.visa_case_guardian_applicant_options():
             return self.flash_redirect(
                 f"/students/{quote(student_id)}/visa-cases/new",
-                "Guardian Applicant 只能选择 School、Relative + 590 或 Parents' Nomination。",
+                "请选择有效的 Guardian Applicant 选项。",
                 "error",
             )
         case_owner = form_text_value(form, "case_owner", self.user.get("display_name", "") if self.user else "")
@@ -68402,6 +68690,21 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("Visa Case 不存在。", HTTPStatus.NOT_FOUND)
         if "lodgement_recorded_at" not in case.keys():
             return self.flash_redirect(return_path, "数据库迁移尚未完成，暂时不能记录正式签证递交。", "error")
+        if form_text_value(self.form, "action") == "link-recorded-visa-grant":
+            if not can_workflow_module_save(self.user, "Visa"):
+                return self.deny_module_access("visa")
+            from visa_cycle_assignment import link_recorded_visa_grant
+
+            try:
+                with db.transaction() as connection:
+                    link_recorded_visa_grant(
+                        connection, student_id, int(case_id),
+                        form_text_value(self.form, "application_cycle_id"),
+                        actor=self.user, timestamp=now_iso(),
+                    )
+            except ValueError as exc:
+                return self.flash_redirect(return_path, str(exc), "error")
+            return self.flash_redirect(return_path, "已补关联签证所属申请周期。")
         if case["lodgement_recorded_at"]:
             form = getattr(self, "form", {}) or {}
             if form_text_value(form, "action") == "correct-lodgement-date":
@@ -68512,6 +68815,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             projection = self._visa_display_projection(case)
             acknowledge_date = projection["acknowledge_letter_date"] or projection["processing"]["fields"]["acknowledge_sent_on"]["value"] or ""
         if case["lodgement_recorded_at"]:
+            cycle_link = ""
+            needs_cycle_review = (
+                "application_cycle_id" in case.keys() and case["application_cycle_id"] is None
+                and is_student_visa_case(dict(case))
+                and self.student_visa_result_display(case).lower() == "granted"
+            )
+            if needs_cycle_review:
+                cycle_link = '<p role="status">已下签，待核对签证所属的申请周期。</p>'
+            if needs_cycle_review and can_workflow_module_save(self.user, "Visa"):
+                cycle_field = self.visa_case_cycle_field(student_id, explicit=True)
+                if cycle_field:
+                    cycle_link += f"""
+                    <form class="visa-lodgement-form" method="post" action="/students/{quote(str(student_id))}/visa-cases/{int(case['id'])}/lodgement-submit">
+                      <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                      <input type="hidden" name="action" value="link-recorded-visa-grant">
+                      {cycle_field}
+                      <button type="submit">补关联申请周期</button>
+                    </form>"""
             correction = ""
             if dates_available:
                 suggested_date = acknowledge_date or case["actual_lodgement_date"] or ""
@@ -68533,6 +68854,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 <div class="visa-management-field-card"><dt>记录时间</dt><dd>{esc(display_datetime(case['lodgement_recorded_at']))}</dd></div>
               </dl>
               {correction}
+              {cycle_link}
             </section>"""
         return f"""
         <section class="panel visa-lodgement-panel" id="visa-lodgement-submission">
@@ -70546,7 +70868,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
             log_upload_review_document_detection(file_meta, module, suggested_type, options, extraction_data)
             local_review_attrs = ""
-            if extraction_data.get("local_extraction") is not None:
+            if extraction_data and extraction_data.get("local_extraction") is not None:
                 local_review_attrs = f' data-local-review-url="/students/{student_id}/upload-review/{quote(token)}/{index}/local-extraction"'
             extraction_html = extraction_review_html(index, module, extraction_data).replace(
                 'class="extraction-review-box ',
@@ -70919,7 +71241,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                     or stored_form.get("coe_provider") or stored_form.get("school_name"))
                         context = accepted_offer_context(connection, student_id)
                         decision = choose_coe(context, provider, self.form.get(f"intake_acceptance_{index}"),
-                                              values, self.form.get(f"intake_choice_{index}", ""))
+                                              values, self.form.get(f"intake_choice_{index}", ""),
+                                              confirmed_school=self.form.get(f"intake_coe_school_{index}", ""))
                         validate_tuition_update(connection, context, values if decision == "coe" else context["offer"]["values"])
                         intake_entries[index] = (values, context["acceptance_id"], decision)
                     else:
@@ -71200,7 +71523,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             (business_record_id, student_id),
                         ).fetchone()
                         decision = choose_coe(context, coe_provider, acceptance_id, values,
-                                              self.form.get(f"intake_choice_{index}", ""))
+                                              self.form.get(f"intake_choice_{index}", ""),
+                                              confirmed_school=self.form.get(f"intake_coe_school_{index}", ""))
                         if bound[0] != context["application_cycle_id"] or decision != prior_decision:
                             raise ValueError("当前录取已更新，请重新打开 CoE 核对页。")
                         source = save_source(
@@ -71944,12 +72268,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return self.flash_redirect(f"/students/{student_id}?tab=offer", "已确认递交给最终学校")
 
     def confirm_final_school_coe(self, method, student_id, record_id):
-        from final_school_coe import confirm_school_coe
+        from final_school_coe import confirm_historical_school_coe, confirm_school_coe
 
         if method != "POST":
             return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
         if not can_workflow_module_save(self.user, "COE + OSHC"):
             return self.deny_module_access("coe_oshc")
+        historical_offer = self.form.get("historical_offer_event_id")
+        if historical_offer and not allowed(self.user, "offers.manage"):
+            return self.deny_module_access("offer")
         try:
             if self.form.get("reviewed") != "yes":
                 raise ValueError("请先核对当前最终学校与主课 CoE")
@@ -71958,8 +72285,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     "SELECT 1 FROM sqlite_master WHERE name='final_school_coe_confirmations'"
                 ).fetchone():
                     raise ValueError("CoE 确认功能尚未启用")
-                confirm_school_coe(conn, student_id, int(self.form.get("acceptance_id", "")),
-                                   int(record_id), self.user["id"], now_iso())
+                if historical_offer:
+                    confirm_historical_school_coe(
+                        conn, student_id, int(historical_offer), int(record_id), self.user, now_iso(),
+                    )
+                else:
+                    confirm_school_coe(conn, student_id, int(self.form.get("acceptance_id", "")),
+                                       int(record_id), self.user["id"], now_iso())
         except ValueError as exc:
             return self.flash_redirect(f"/students/{student_id}?tab=coe", str(exc), "error")
         return self.flash_redirect(f"/students/{student_id}?tab=coe", "已确认最终学校主课 CoE")
@@ -78718,9 +79050,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         title, message, status = self.school_plan_share_confirm_permission_problem(link)
         if status != 200:
             return self.school_plan_share_public_page(title, f"<h1>{esc(title)}</h1><p>{esc(message)}</p>", status)
-        existing = db.one("SELECT id FROM school_plan_report_confirmations WHERE report_id=? AND link_id=? AND status='confirmed' ORDER BY id DESC LIMIT 1", (link["report_id"], link["id"]))
+        existing = db.one("SELECT id,confirmed_at FROM school_plan_report_confirmations WHERE report_id=? AND link_id=? AND status='confirmed' ORDER BY id DESC LIMIT 1", (link["report_id"], link["id"]))
         if existing:
-            return self.redirect(f"/school-plan-share/{quote(token)}")
+            return self.school_plan_share_confirmation_receipt(token, existing["confirmed_at"])
         form, _files = parse_request_body(self)
         if form.get("declaration") != "yes":
             raise ValueError("请先勾选确认声明。")
@@ -78740,7 +79072,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             # Another request may have confirmed while this one parsed its form.
             # Recheck under BEGIN IMMEDIATE before writing signatures or archives.
             existing = connection.execute(
-                """SELECT id FROM school_plan_report_confirmations
+                """SELECT id,confirmed_at FROM school_plan_report_confirmations
                      WHERE report_id=? AND link_id=? AND status='confirmed'
                      ORDER BY id LIMIT 1""",
                 (link["report_id"], link["id"]),
@@ -78774,22 +79106,40 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     (link["report_id"], "parent_page_archive_requested", stamp, json.dumps({"confirmation_id": confirmation_id})),
                 )
         if existing:
-            return self.redirect(f"/school-plan-share/{quote(token)}")
-        confirmation_pdf = self.school_plan_generate_confirmation_pdf(confirmation_id)
-        db.execute(
-            "UPDATE school_plan_reports SET confirmation_note=?,updated_at=? WHERE id=?",
-            (f"Confirmation PDF: {confirmation_pdf}", stamp, link["report_id"]),
-        )
-        self.school_plan_share_record_log(
-            link,
-            "confirmed",
-            metadata={
-                "confirmation_id": confirmation_id,
-                "decision_mode": decision.mode,
-                "school_count": len(decision.schools),
-            },
-        )
+            return self.school_plan_share_confirmation_receipt(token, existing["confirmed_at"])
+
+        # Send the complete receipt before invoking PDF rendering or NAS writes.
         try:
+            response = self.school_plan_share_confirmation_receipt(token, stamp)
+            self.wfile.flush()
+        finally:
+            self.school_plan_finish_parent_confirmation(link, confirmation_id, stamp, decision)
+        return response
+
+    def school_plan_share_confirmation_receipt(self, token, stamp):
+        return self.school_plan_share_public_page(
+            "递交成功",
+            f"<h1>确认已递交</h1><p>AAIE 已收到最终学校申请意向和电子签名。确认时间：{esc(display_datetime(stamp))}</p><div class='share-actions'><a class='button-link' href='/school-plan-share/{esc(token)}'>返回查看方案</a></div>",
+        )
+
+    def school_plan_finish_parent_confirmation(self, link, confirmation_id, stamp, decision):
+        try:
+            self.school_plan_share_record_log(
+                link, "confirmed", metadata={
+                    "confirmation_id": confirmation_id,
+                    "decision_mode": decision.mode,
+                    "school_count": len(decision.schools),
+                },
+            )
+        except Exception as exc:
+            append_service_log("admin", "school_plan_confirmation_log_failed", repr(exc),
+                               confirmation_id=confirmation_id)
+        try:
+            confirmation_pdf = self.school_plan_generate_confirmation_pdf(confirmation_id)
+            db.execute(
+                "UPDATE school_plan_reports SET confirmation_note=?,updated_at=? WHERE id=?",
+                (f"Confirmation PDF: {confirmation_pdf}", stamp, link["report_id"]),
+            )
             archive_metadata = self.school_plan_archive_confirmation_documents(confirmation_id)
             self.school_plan_share_record_log(link, "confirmation_archived", metadata=archive_metadata)
         except Exception as exc:
@@ -78802,10 +79152,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 student_id=link["student_id"],
             )
             self.school_plan_share_record_log(link, "confirmation_archive_failed", metadata={"confirmation_id": confirmation_id, "error": repr(exc)})
-        return self.school_plan_share_public_page(
-            "递交成功",
-            f"<h1>确认已递交</h1><p>AAIE 已收到最终学校{'选择' if decision.mode == 'selected' else '排序'}和电子签名。确认时间：{esc(display_datetime(stamp))}</p><div class='share-actions'><a class='button-link' href='/school-plan-share/{esc(token)}'>返回查看方案</a></div>",
-        )
 
     def parent_portal(self, method, token):
         if method != "GET":
@@ -83455,6 +83801,35 @@ def start_optional_startup_task(service, task_name, task):
     ).start()
 
 
+APPLICATION_STATUS_RECONCILIATION_SECONDS = 15 * 60
+
+
+def start_application_status_reconciliation():
+    from visa_cycle_assignment import reconcile_recorded_visa_grants
+
+    stop = threading.Event()
+
+    def reconcile():
+        with db.transaction() as connection:
+            return reconcile_recorded_visa_grants(
+                connection, timestamp=datetime.now().astimezone().isoformat(timespec="seconds")
+            )
+
+    tick = optional_business_task(reconcile, lambda: APP_WRITE_GATE)
+
+    def worker():
+        while not stop.wait(APPLICATION_STATUS_RECONCILIATION_SECONDS):
+            try:
+                linked = tick()
+                if linked:
+                    append_service_log("admin", "application_status_reconciled", linked=linked)
+            except Exception as exc:
+                append_service_log("admin", "application_status_reconciliation_error", repr(exc))
+
+    threading.Thread(target=worker, name="application-status-reconciliation", daemon=True).start()
+    return stop
+
+
 def run_server(
     host,
     port,
@@ -83519,7 +83894,10 @@ def run_server(
         if service == "parent":
             print("Parent Form Portal should remain on 127.0.0.1:8781 for Cloudflare.")
         print("Default login: admin / ChangeMe!2026")
+        reconciliation_stop = None
         try:
+            if service == "admin" and managed is not None and APP_WRITE_GATE is not None:
+                reconciliation_stop = start_application_status_reconciliation()
             if not SAFE_PRODUCTION_ACTIVE and not STAGING and service == "parent":
                 start_optional_startup_task(service, "reminder", run_reminder_engine)
             if not SAFE_PRODUCTION_ACTIVE and not STAGING and service == "admin":
@@ -83531,6 +83909,8 @@ def run_server(
             append_service_log(service, "unexpected_exit", repr(exc), pid=os.getpid())
             raise
         finally:
+            if reconciliation_stop is not None:
+                reconciliation_stop.set()
             server.server_close()
             append_service_log(service, "server_closed", pid=os.getpid())
     finally:

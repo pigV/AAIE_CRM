@@ -24,8 +24,14 @@ class InvalidOnboardingProposal(ValueError):
 class OnboardingProposalDrift(RuntimeError):
     pass
 
+from revenue.visa_fee_policy import (
+    VISA_FEE_KINDS, SignedVisaPackageRequired, fully_executed_contracts, resolve_visa_fee, visa_fee_facts,
+)
+
 
 EXCEPTION_MESSAGES = {
+    "signed_visa_package_required": "首次学生签证套餐待核对，请确认双方签妥的 A$2,400 套餐包含学生签证递交。",
+    "visa_fee_conflict": "签证收费有重复或金额不同，请核对现有收费。",
     "missing_student_authority": "Application Cycle has no authoritative Student.",
     "ambiguous_engagement_contract": "Multiple FullyExecuted contracts have no authoritative supersession.",
     "missing_engagement_contract": "No FullyExecuted engagement contract is authoritative for client fee evaluation.",
@@ -210,18 +216,7 @@ class ControlledOnboardingService:
 
     @staticmethod
     def _fully_executed(contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        result = []
-        for contract in contracts:
-            status = str(contract.get("contract_status") or "")
-            normalized = status.replace("_", "").replace(" ", "").lower()
-            if normalized != "fullyexecuted":
-                continue
-            if contract.get("deleted_at") or contract.get("voided_at"):
-                continue
-            if contract.get("superseded_by_contract_id"):
-                continue
-            result.append(contract)
-        return result
+        return fully_executed_contracts(contracts)
 
     @staticmethod
     def _he_category(applications: list[dict[str, Any]]) -> str | None:
@@ -305,7 +300,8 @@ class ControlledOnboardingService:
             }, ["missing_fee_rule"]
         existing_case = authority.get("revenue_commercial_cases", [])
         existing_fees = authority.get("revenue_fee_items", [])
-        if existing_case and existing_fees:
+        if existing_case and any(f["status"] != "cancelled" and f["milestone_code"] not in VISA_FEE_KINDS
+                                 for f in existing_fees):
             return {
                 "status": "existing",
                 "reason": "existing_revenue_fee_item",
@@ -360,43 +356,40 @@ class ControlledOnboardingService:
         proposals = []
         exception_codes = []
         for visa in visa_rows:
-            normalized = " ".join(
-                str(visa.get(name) or "").strip().lower()
-                for name in (
-                    "case_type", "visa_case_name", "visa_subclass", "visa_type",
-                    "application_type",
-                )
-            )
-            is_590 = "590" in normalized
-            renewal = any(token in normalized for token in ("renewal", "renew", "extension"))
-            independent = renewal or "standalone" in normalized or "independent" in normalized
-            facts = ClientFeeRuleFacts(
-                service_kind="guardian_590" if is_590 else "student_visa",
-                education_stream=cycle["education_stream"],
-                cycle_type=cycle["cycle_type"],
-                existing_aaie_k12=existing_aaie,
-                application_type="renewal" if renewal else "new",
-                independent_service=independent,
+            if visa.get("archived_at") or visa.get("student_id") not in (None, "", cycle["student_id"]):
+                continue
+            facts = visa_fee_facts(
+                visa, education_stream=cycle["education_stream"], cycle_type=cycle["cycle_type"],
+                existing_aaie=existing_aaie,
             )
             try:
-                resolved = self.fee_rules.resolve(facts, engagement_date)
-            except MissingFeeRule:
-                proposals.append(
-                    {
-                        "status": "blocked",
-                        "reason": "missing_fee_rule",
-                        "visa_case_id": visa["id"],
-                        "rule_version_uid": None,
-                        "net_cents": None,
-                    }
+                resolved = resolve_visa_fee(
+                    self.fee_rules, facts, visa, contracts, cycle["student_id"], engagement_date,
                 )
-                exception_codes.append("missing_fee_rule")
+            except MissingFeeRule as exc:
+                reason = "signed_visa_package_required" if isinstance(exc, SignedVisaPackageRequired) else "missing_fee_rule"
+                proposals.append({
+                    "status": "blocked", "reason": reason, "visa_case_id": visa["id"],
+                    "rule_version_uid": None, "net_cents": None,
+                })
+                exception_codes.append(reason)
                 continue
             status = "included" if resolved.net_cents is None else "proposed"
+            reason = "included_in_base_fee" if status == "included" else "controlled_onboarding"
+            cases = authority.get("revenue_commercial_cases", [])
+            matching = self.service.visa_fee_matches(
+                cases[0]["id"], visa["id"], resolved.milestone_code
+            ) if cases else []
+            if matching:
+                if len(matching) == 1 and self.service.visa_fee_matches_amount(matching[0], resolved.net_cents, 0):
+                    status, reason = "existing", "existing_revenue_fee_item"
+                else:
+                    status, reason = "blocked", "visa_fee_conflict"
+                    exception_codes.append(reason)
             proposals.append(
                 {
                     "status": status,
-                    "reason": "included_in_base_fee" if status == "included" else "controlled_onboarding",
+                    "reason": reason,
                     "source": "CONTROLLED_ONBOARDING",
                     "visa_case_id": visa["id"],
                     "contract_id": contract["id"],
@@ -739,16 +732,26 @@ class ControlledOnboardingService:
                         "visa_case_id": fee.get("visa_case_id"),
                         **fee["rule_snapshot"],
                     }
-                    created = self.service.create_fee_items(
-                        case["uid"],
-                        account["uid"],
-                        [fee_item],
-                        actor_user_id,
-                        "controlled-onboarding:"
-                        f"{proposal['proposal_uid']}:fee:{cycle_id}:"
-                        f"{fee.get('visa_case_id') or 'base'}",
-                        fee["rule_version_uid"],
-                    )
+                    fee_key = (f"controlled-onboarding:{proposal['proposal_uid']}:fee:{cycle_id}:"
+                               f"{fee.get('visa_case_id') or 'base'}")
+                    if fee_item["visa_case_id"] is not None:
+                        status, created = self.service.ensure_visa_fee(
+                            case["uid"], account["uid"], fee_item, actor_user_id, fee_key,
+                            fee["rule_version_uid"],
+                        )
+                        if status == "NEEDS_ATTENTION":
+                            orchestrator.open_exception(
+                                "visa_fee_conflict", "commercial_case", case["uid"],
+                                EXCEPTION_MESSAGES["visa_fee_conflict"],
+                            )
+                            exception_count += 1
+                        if status != "CREATED":
+                            continue
+                    else:
+                        created = self.service.create_fee_items(
+                            case["uid"], account["uid"], [fee_item], actor_user_id, fee_key,
+                            fee["rule_version_uid"],
+                        )
                     fee_count += len(created)
 
                 commission = item["commission"]
@@ -804,13 +807,14 @@ class ControlledOnboardingService:
                 result[key] = 0
             return result
 
-        return self.repository.command(
-            idempotency_key=idempotency_key,
-            command_type="controlled_onboarding_proposal_applied",
-            aggregate_type="controlled_onboarding_proposal",
-            payload=payload,
-            actor_user_id=actor_user_id,
-            operation=operation,
-            replay_action="controlled_onboarding_proposal_replayed",
-            replay_result=replay_result,
-        )
+        with self.repository.fee_write_transaction():
+            return self.repository.command(
+                idempotency_key=idempotency_key,
+                command_type="controlled_onboarding_proposal_applied",
+                aggregate_type="controlled_onboarding_proposal",
+                payload=payload,
+                actor_user_id=actor_user_id,
+                operation=operation,
+                replay_action="controlled_onboarding_proposal_replayed",
+                replay_result=replay_result,
+            )

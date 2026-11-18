@@ -130,10 +130,13 @@ def correct_processing_dates(conn,case_id,values,*,actor_user_id,occurred_at,sou
  try:
   if sync_lodgement:
    # Only an explicit staff correction reaches here. Keep the original
-   # submission identity/time and all workflow/result state unchanged.
+   # submission identity/time and the recorded result.
    conn.execute('UPDATE visa_cases SET actual_lodgement_date=?,lodgement_date=?,updated_at=? WHERE id=?',
                 (fields['acknowledge_sent_on']['value'],fields['acknowledge_sent_on']['value'],occurred_at,case_id))
   conn.executemany('INSERT INTO visa_processing_date_revisions(visa_case_id,field,value,document_id,before_json,actor_user_id,occurred_at) VALUES(?,?,?,?,?,?,?)',updates)
+  if sync_lodgement:
+   from visa_cycle_assignment import reconcile_recorded_visa_grants
+   reconcile_recorded_visa_grants(conn,timestamp=occurred_at,case_id=case_id)
   conn.execute('RELEASE processing_correction')
  except Exception:
   conn.execute('ROLLBACK TO processing_correction');conn.execute('RELEASE processing_correction');raise

@@ -190,6 +190,18 @@ def load_workflow_facts(
                AND signature.student_id=contract.student_id
                AND signature.status='signed'
              ORDER BY signature.id DESC LIMIT 1), 1)"""
+    report_columns = _columns(conn, "school_plan_reports")
+    # Unconfirmed legacy reports receive canonical ownership upon confirmation.
+    # Until then, only expose current reports created during this student's initial cycle.
+    current_unconfirmed_report = (
+        """OR (
+            cycle.cycle_type='initial' AND cycle.status='active'
+            AND report.application_cycle_id IS NULL AND report.is_current=1
+            AND report.status IN ('active','generated','shared','viewed')
+            AND julianday(report.created_at) >= julianday(cycle.opened_at)
+        )"""
+        if {"created_at", "is_current", "status"} <= report_columns else ""
+    )
     link_columns = _columns(conn, "contract_signing_links")
     live_signing = "signing.id IS NOT NULL"
     if "expires_at" in link_columns:
@@ -300,17 +312,21 @@ def load_workflow_facts(
         confirmed += " AND confirmation.status='confirmed'"
     for row in conn.execute(
         f"""
-        SELECT report.application_cycle_id,
+        SELECT cycle.id,
                count(*),
                max(CASE WHEN {" AND ".join(live_link)} THEN 1 ELSE 0 END),
                max(CASE WHEN {confirmed} THEN 1 ELSE 0 END)
-        FROM school_plan_reports AS report
+        FROM application_cycles AS cycle
+        JOIN school_plan_reports AS report ON report.student_id=cycle.student_id
         LEFT JOIN school_plan_report_links AS link ON link.report_id=report.id
         LEFT JOIN school_plan_report_confirmations AS confirmation
           ON confirmation.report_id=report.id
-        WHERE report.application_cycle_id IN ({marks})
-          AND report.cycle_is_current=1
-        GROUP BY report.application_cycle_id
+        WHERE cycle.id IN ({marks})
+          AND (
+            (report.application_cycle_id=cycle.id AND report.cycle_is_current=1)
+            {current_unconfirmed_report}
+          )
+        GROUP BY cycle.id
         """,
         ids,
     ).fetchall():
