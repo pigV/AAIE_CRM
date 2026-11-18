@@ -1433,6 +1433,36 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
   .invoice-account-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
+.school-claim-workspace {
+  --claim-font-label: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --claim-font-data: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-family: var(--claim-font-label);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.school-claim-workspace .invoice-composer-title h1 {
+  font-size: 30px;
+  line-height: 1.2;
+}
+.school-claim-workspace :is(.school-claim-name a,.school-claim-proofs li strong) {
+  font-family: var(--claim-font-data);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.school-claim-workspace :is(.school-claim-money,.school-claim-totals dd) {
+  font-family: var(--claim-font-data);
+  font-variant-numeric: tabular-nums;
+}
+.school-claim-workspace .school-claim-gross strong {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+@media (max-width: 850px) {
+  .school-claim-workspace .invoice-composer-title h1 { font-size: 26px; }
+}
+
 .school-claim-school {
   align-items: center;
   background: var(--invoice-school);
@@ -1465,16 +1495,16 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
 .school-claim-workspace :is(h2,h3) { font-size: 1.1rem; margin: 0 0 10px; }
 .school-claim-table .invoice-composer-heading h2 { margin: 0; }
 .school-claim-legend { display: flex; flex-wrap: wrap; gap: 6px; }
-.school-claim-workspace .revenue-student-status { display: inline-block; padding: 4px 8px; border-radius: 5px; font-size: .82rem; white-space: nowrap; }
+.school-claim-workspace .revenue-student-status { display: inline-block; padding: 4px 8px; border-radius: 5px; font-size: 13px; white-space: nowrap; }
 .school-claim-workspace .revenue-student-status--eligible { color: #126256; background: #def3ed; }
 .school-claim-workspace .revenue-student-status--blocked { color: #83521a; background: #fff1da; }
 .school-claim-workspace .revenue-student-status--claimed { color: #553393; background: #eee6ff; }
 .school-claim-workspace :is(.revenue-student-status--historical,.revenue-student-status--review) { color: #4b607e; background: #eef2f7; }
 .school-claim-table table { border-collapse: collapse; min-width: 850px; width: 100%; }
 .school-claim-table :is(th,td) { border-bottom: 1px solid var(--invoice-border); padding: 10px 8px; text-align: left; vertical-align: top; }
-.school-claim-table th { background: #eff3f9; color: var(--invoice-muted); font-size: .84rem; }
-.school-claim-table td small, .school-claim-proofs small { color: var(--invoice-muted); display: block; margin-top: 3px; }
-.school-claim-table .school-claim-reason { color: #83521a; max-width: 220px; }
+.school-claim-table th { background: #eff3f9; color: var(--invoice-muted); font-size: 13px; }
+.school-claim-table td small, .school-claim-proofs small { color: var(--invoice-muted); display: block; font-size: 13px; margin-top: 3px; }
+.school-claim-table .school-claim-reason { color: #83521a; font-size: 14px; font-weight: 400; max-width: 240px; }
 .school-claim-table .school-claim-money { text-align: right; white-space: nowrap; }
 .school-claim-history { display: grid; gap: 14px; grid-template-columns: repeat(2,minmax(0,1fr)); }
 .school-claim-proofs ul { list-style: none; margin: 0; padding: 0; }
@@ -1482,9 +1512,9 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
 .school-claim-proofs li div { display: flex; flex-wrap: wrap; gap: 8px; }
 .school-claim-proofs li a { background: var(--invoice-school); border-radius: 6px; overflow-wrap: anywhere; padding: 6px 10px; }
 .school-claim-totals { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 0; font-variant-numeric: tabular-nums; }
-.school-claim-totals dt { color: var(--invoice-muted); font-size: .84rem; }
+.school-claim-totals dt { color: var(--invoice-muted); font-size: 13px; }
 .school-claim-totals dd { margin: 0; font-weight: 650; }
-.school-claim-totals [data-school-claim-total="gross_cents"] { color: var(--invoice-blue); font-size: 1.3rem; }
+.school-claim-totals [data-school-claim-total="gross_cents"] { color: var(--invoice-blue); font-size: 22px; font-weight: 600; line-height: 1.25; }
 .school-claim-workspace form:has([name="reviewed"]:not(:checked)) button.primary { opacity: .65; }
 @media (max-width: 650px) {
   .school-claim-history, .school-claim-proofs li { grid-template-columns: minmax(0,1fr); }
@@ -1530,8 +1560,9 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
   .school-claim-gross { grid-area: 3 / 6 / 4 / 8; }
   .school-claim-card-label {
     color: var(--invoice-muted);
+    font-family: var(--claim-font-label);
     display: block;
-    font-size: .78rem;
+    font-size: 13px;
     margin-bottom: 3px;
   }
   .school-claim-table .school-claim-student .school-claim-money {
