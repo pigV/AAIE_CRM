@@ -1324,3 +1324,12 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
   .invoice-layout-fields { grid-template-columns: 1fr; }
   .invoice-layout-school > :last-child { border: 0; padding: 0; }
 }
+.invoice-layout-v4 .invoice-line-table .invoice-line-empty {
+  color: var(--invoice-muted);
+  padding: 22px 8px;
+  text-align: center;
+  white-space: normal;
+}
+.invoice-layout-v4 .invoice-line-table:has(.invoice-line-empty) {
+  min-width: 580px;
+}

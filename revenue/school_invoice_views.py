@@ -93,6 +93,8 @@ def _composer_lines(claims, selected_claims, students, saved_rows):
               <td class="invoice-line-gross"><output data-invoice-line-gross>A$0.00</output></td>
               <td><button type="button" data-invoice-manual-remove aria-label="移除此行">×</button></td>
               </tr>""")
+    if not rows:
+        rows.append('<tr><td colspan="10" class="invoice-line-empty">选择学校后可添加发票明细。</td></tr>')
     return f"""<div class="invoice-composer-table">
       <table class="invoice-line-table"><thead><tr>
       <th>来源</th><th>产品 / 服务</th><th>说明</th><th>关联学生</th>
@@ -231,8 +233,9 @@ def render_school_invoice_list(entities, entity_id, claims, invoices, csrf, toke
     selection = ""
     if allow_preview is None:
         allow_preview = allow_invoicing
-    if entity_id and allow_preview:
-        if claims or manual_students is not None:
+    awaiting_school = not entity_id and allow_preview
+    if allow_preview:
+        if awaiting_school or claims or manual_students is not None:
             candidate_link = (f'<a href="{escape(candidate_href, quote=True)}">查看学生和申领条件</a>'
                               if candidate_href else "")
             lines = _composer_lines(claims, selected_claims, manual_students, manual_draft)
@@ -241,47 +244,62 @@ def render_school_invoice_list(entities, entity_id, claims, invoices, csrf, toke
                             '<button type="button" disabled title="这所学校暂无待开票的学生佣金">＋ 添加待开票学生佣金</button>')
             add_button = '<button type="button" data-invoice-manual-add>＋ 添加手工明细</button>' if manual else ""
             clear_button = '<button type="button" data-invoice-clear>清除明细</button>' if manual else ""
-            issue_buttons = ('<button type="submit" name="preview_action" value="issue">仅签发</button>'
-                             '<button type="submit" name="preview_action" value="send">签发并发送</button>'
+            if awaiting_school:
+                claim_button = '<button type="button" disabled>＋ 添加待开票学生佣金</button>'
+                add_button = '<button type="button" disabled>＋ 添加手工明细</button>'
+            disabled = " disabled" if awaiting_school else ""
+            issue_buttons = (f'<button type="submit" name="preview_action" value="issue"{disabled}>仅签发</button>'
+                             f'<button type="submit" name="preview_action" value="send"{disabled}>签发并发送</button>'
                              if allow_invoicing else "")
             bill = billing or {}
             issuer_date = datetime.now(ZoneInfo("Australia/Melbourne")).date()
             bill_to = f'{escape(bill.get("name") or "未填写")}<br>{escape(bill.get("address") or "").replace(chr(10), "<br>")}'
-            recipient = escape(bill.get("recipient") or "未填写")
+            recipient = escape(bill.get("recipient") or ("—" if awaiting_school else "未填写"))
             copies = (f'<p>抄送 {escape(bill.get("cc") or "—")}</p>'
                       f'<p>密送 {escape(bill.get("bcc") or "—")}</p>')
-            inline_picker = select if schools is not None else ""
+            inline_picker = select if awaiting_school or schools is not None else ""
+            pending_message = (
+                "选好学校后，可以添加手工明细或勾选待开票学生佣金。"
+                if awaiting_school else "只有从待开票学生佣金添加的明细，才会在签发时更新申领状态。"
+            )
+            due_label = "—" if awaiting_school else "以预览为准"
+            bill_details = "" if awaiting_school else f"""<details class="invoice-layout-bill-details">
+                  <summary>展开开票资料</summary>
+                  <div><span class="invoice-field-label">发票抬头和地址</span><p>{bill_to}</p>{copies}{billing_edit}</div>
+                </details>"""
             school_control = inline_picker or f'<output>{escape(next((name for value, name in entities if value == entity_id), ""))}</output>'
             details = f"""<section class="invoice-composer-card invoice-layout-billing">
               <div class="invoice-layout-school">
                 <div><span class="invoice-field-label">开票学校</span>{school_control}</div>
-                <div><span class="invoice-field-label">到期日</span><output data-invoice-due>以预览为准</output></div>
+                <div><span class="invoice-field-label">到期日</span><output data-invoice-due>{due_label}</output></div>
               </div>
               <div class="invoice-layout-fields">
                 <div><span class="invoice-field-label">收票邮箱</span><output>{recipient}</output></div>
                 <div><span class="invoice-field-label">开票日期</span><output data-invoice-date="{issuer_date.isoformat()}">{issuer_date:%d/%m/%Y}</output></div>
-                <div>{_payment_terms_field(manual_terms) if manual else ""}
+                <div>{_payment_terms_field(manual_terms) if manual else '<span class="invoice-field-label">付款期限</span><output>—</output>'}
                     <output data-invoice-claim-terms hidden></output></div>
-                <details class="invoice-layout-bill-details">
-                  <summary>展开开票资料</summary>
-                  <div><span class="invoice-field-label">发票抬头和地址</span><p>{bill_to}</p>{copies}{billing_edit}</div>
-                </details>
+                {bill_details}
               </div>
             </section>"""
             if inline_picker:
                 select = ""
-            selection = f"""<form method="post" action="{URL}/preview" data-invoice-composer>
-              {_hidden_security(csrf,token,"toorak-school-preview")}{_hidden("entity_id",entity_id)}
+            if awaiting_school:
+                start, end = '<section aria-label="发票工作台">', '</section>'
+            else:
+                start = (f'<form method="post" action="{URL}/preview" data-invoice-composer>'
+                         f'{_hidden_security(csrf, token, "toorak-school-preview")}{_hidden("entity_id", entity_id)}')
+                end = '</form>'
+            selection = f"""{start}
               {details}
               <section class="invoice-composer-card">
                 <header class="invoice-composer-heading"><h2>发票明细</h2>
                   <div class="invoice-composer-buttons">{claim_button}{add_button}</div></header>
                 {lines}
                 <div class="invoice-line-actions">{clear_button}{candidate_link}</div>
-                <p>只有从待开票学生佣金添加的明细，才会在签发时更新申领状态。</p>
+                <p>{pending_message}</p>
               </section>
               <section class="invoice-composer-card invoice-composer-summary">
-                <label>给学校的备注（选填）<textarea name="customer_note" maxlength="500" rows="2">{escape(draft_note)}</textarea></label>
+                <label>给学校的备注（选填）<textarea name="customer_note" maxlength="500" rows="2"{disabled}>{escape(draft_note)}</textarea></label>
                 <dl data-invoice-totals aria-label="发票金额">
                   <div><dt>未税小计</dt><dd data-invoice-total-net>A$0.00</dd></div>
                   <div><dt>GST</dt><dd data-invoice-total-gst>A$0.00</dd></div>
@@ -290,11 +308,11 @@ def render_school_invoice_list(entities, entity_id, claims, invoices, csrf, toke
               </section>
               <div class="invoice-composer-actions"><a href="/revenue">‹ 返回收入与佣金</a>
                 <div class="invoice-composer-buttons">
-                  <button type="submit">预览 Invoice</button>
-                  <button type="submit" class="primary" name="preview_action" value="pdf" formtarget="_blank">预览 PDF</button>
+                  <button type="submit"{disabled}>预览 Invoice</button>
+                  <button type="submit" class="primary" name="preview_action" value="pdf" formtarget="_blank"{disabled}>预览 PDF</button>
                   {f'<span class="invoice-layout-issue">{issue_buttons}</span>' if issue_buttons else ""}
-                </div></div></form>"""
-        else:
+                </div></div>{end}"""
+        elif entity_id:
             selection = '<p>该付款主体目前没有可开票的 Claim。</p>'
     history = "".join(
         f'<li><a href="{URL}?invoice={quote(invoice["uid"],safe="")}">{escape(invoice["invoice_number"])}</a>'
@@ -310,7 +328,7 @@ def render_school_invoice_list(entities, entity_id, claims, invoices, csrf, toke
         heading = "逾期佣金发票" if overdue_only else "已签发佣金发票"
         history = f'<h2>{heading}</h2><p>{filters}</p>' + (f'<ul>{history}</ul>' if history else '<p>暂无匹配发票。</p>')
     mode = "隔离测试 · " if simulation else ""
-    instruction = "选学校后勾选一笔或多笔已审核、尚未开票的 Claim。" if allow_invoicing else "开票已暂停，可查看已签发发票。"
+    instruction = "选好学校后，可以添加手工明细或勾选待开票学生佣金。" if allow_invoicing else "开票已暂停，可查看已签发发票。"
     if allow_preview and not allow_invoicing:
         instruction = "当前只开放预览。"
     mail = ""
