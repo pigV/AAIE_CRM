@@ -1624,6 +1624,11 @@ def render_revenue_workspace(data: dict, csrf: str, mobile: bool = False) -> str
             f'<a class="revenue-primary-link" href="{escape(href, quote=True)}">{escape(label)}</a>'
             for label, href in data["school_contract_links"]
         )
+    invoice_href = data.get("school_invoice_href")
+    if invoice_href and not mobile:
+        school_contract_button += (
+            f'<a class="revenue-primary-link" href="{escape(invoice_href, quote=True)}">开学校 Invoice</a>'
+        )
     template_href = data.get("commission_invoice_template_href")
     template_button = (
         f'<a class="revenue-primary-link" href="{escape(template_href, quote=True)}">佣金发票模板</a>'

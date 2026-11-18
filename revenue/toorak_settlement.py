@@ -136,12 +136,22 @@ class ToorakSettlement:
             (invoice["id"],self.formal,self.formal,self.simulation,
              invoice["revenue_entity_id"],invoice["revenue_entity_id"]),
         )]
+        claimed = lines
+        if self.formal:
+            manual_kind = "school_manual_test" if self.simulation else "school_manual"
+            lines = claimed + [dict(row) for row in self.connection.execute(
+                """SELECT id AS invoice_line_id,uid AS invoice_line_uid,description,
+                          coalesce(student_id,'') AS student_id,net_cents,gst_cents,gross_cents,
+                          '手工明细' AS claim_number,NULL AS instalment_id,NULL AS commercial_case_id
+                     FROM revenue_invoice_lines WHERE invoice_id=? AND source_kind=? ORDER BY sort_order,id""",
+                (invoice["id"], manual_kind),
+            )]
         expected = self.connection.execute(
             "SELECT count(*) FROM revenue_invoice_lines WHERE invoice_id=?",(invoice["id"],),
         ).fetchone()[0]
         if (not lines or len(lines)!=expected
                 or len({line["invoice_line_id"] for line in lines})!=expected
-                or len({line["instalment_id"] for line in lines})!=expected
+                or len({line["instalment_id"] for line in claimed})!=len(claimed)
                 or (invoice["commercial_case_id"] is not None
                     and (len(lines)!=1 or lines[0]["commercial_case_id"]!=invoice["commercial_case_id"]))
                 or any(sum(line[key] for line in lines)!=invoice[key]
@@ -149,9 +159,11 @@ class ToorakSettlement:
             raise ValueError(error)
         result = {**dict(invoice),"lines":lines}
         if self.formal:
-            terms = {line["payment_days"] for line in lines}
+            terms = {line["payment_days"] for line in claimed}
+            if not claimed:
+                terms.add((date.fromisoformat(invoice["due_date"]) - date.fromisoformat(invoice["issue_date"])).days)
             if len(terms)!=1 or not terms <= {0,7,15,30}:
-                raise ValueError("正式发票缺少统一的合同付款期限。")
+                raise ValueError("正式发票缺少统一的付款期限。")
             result["payment_days"] = terms.pop()
         return result
 
@@ -196,16 +208,16 @@ class ToorakSettlement:
 
     def _reconciliation_lines_valid(self, lines):
         return all(line["commission_status"] == "claimed" and line["instalment_status"] == "claimed"
-                   for line in lines)
+                   for line in lines if line["instalment_id"] is not None)
 
     def _mark_reconciled_lines(self, lines):
         self.connection.executemany(
             "UPDATE revenue_commission_instalments SET status='paid' WHERE id=?",
-            [(line["instalment_id"],) for line in lines],
+            [(line["instalment_id"],) for line in lines if line["instalment_id"] is not None],
         )
         self.connection.executemany(
             "UPDATE revenue_commission_lines SET status='paid' WHERE id=?",
-            [(line["commission_line_id"],) for line in lines],
+            [(line["commission_line_id"],) for line in lines if line["instalment_id"] is not None],
         )
 
     def delivery(self, case_uid, invoice_uid, received_on, staged, term_days=30):

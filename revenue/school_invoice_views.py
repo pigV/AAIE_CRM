@@ -2,58 +2,298 @@
 
 from datetime import datetime, timezone
 from html import escape
+import json
 from zoneinfo import ZoneInfo
 from urllib.parse import quote, urlencode
 
 from revenue.views import _aud_money, _hidden_security, _toorak_settlement_controls
+from ui import ASSET_VERSION
 
 
 URL = "/revenue/school-commission-invoices"
+STYLESHEET = f'<link rel="stylesheet" href="/assets/revenue.css?v={ASSET_VERSION}">'
 
 
 def _hidden(name, value):
     return f'<input type="hidden" name="{name}" value="{escape(str(value), quote=True)}">'
 
 
-def _claim_table(lines, *, selectable=False):
+def _claim_table(lines, *, selectable=False, selected=()):
     select_header = '<th scope="col">选择</th>' if selectable else ""
     rows = []
     for line in lines:
         checkbox = ""
         if selectable:
             uid = escape(line["claim_uid"], quote=True)
-            label = escape("选择 " + line["student_id"], quote=True)
-            checkbox = f'<td><input type="checkbox" name="claim_uids" value="{uid}" aria-label="{label}"></td>'
+            label = escape("选择 " + (line.get("student_name", line["student_id"])), quote=True)
+            checked = " checked" if line["claim_uid"] in selected else ""
+            checkbox = (
+                f'<td><input type="checkbox" name="claim_uids" value="{uid}" aria-label="{label}"'
+                f' data-invoice-net="{int(line["net_cents"])}"'
+                f' data-invoice-gst="{int(line["gst_cents"])}"{checked}></td>'
+            )
         rows.append(
-            f'<tr>{checkbox}<td>{escape(line["student_id"])}</td><td>{escape(line["claim_number"])}</td>'
-            f'<td>{line["rate"]}%</td><td>{_aud_money(line["net_cents"])}</td>'
+            f'<tr>{checkbox}<td>{escape(line.get("student_name", line["student_id"]))}</td>'
+            f'<td>{escape(line["claim_number"] or "手工明细")}</td>'
+            f'<td>{escape(str(line["rate"]) + "%" if line["claim_uid"] else " · ".join(dict.fromkeys(filter(None, (line["product"], line["description"])))))}</td><td>{_aud_money(line["net_cents"])}</td>'
             f'<td>{_aud_money(line["gst_cents"])}</td><td>{_aud_money(line["gross_cents"])}</td></tr>'
         )
-    return (f'<table><thead><tr>{select_header}<th>学生</th><th>Claim</th><th>佣金档位</th>'
+    return (f'<table><thead><tr>{select_header}<th>学生</th><th>Claim</th><th>项目 / 佣金档位</th>'
             f'<th>未税金额</th><th>GST</th><th>含税金额</th></tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table>')
 
 
+def _composer_lines(claims, selected_claims, students, saved_rows):
+    from revenue.school_invoice_manual import MAX_LINES
+
+    rows = []
+    for line in claims:
+        uid = escape(line["claim_uid"], quote=True)
+        name = escape(line.get("student_name") or line["student_id"], quote=True)
+        checked = " checked" if line["claim_uid"] in selected_claims else ""
+        rows.append(f"""<tr>
+          <td><label class="invoice-source invoice-source-claim"><input type="checkbox" name="claim_uids" value="{uid}" aria-label="选择 {name}"
+            data-invoice-net="{int(line['net_cents'])}" data-invoice-gst="{int(line['gst_cents'])}"
+            data-invoice-terms="{escape(str(line.get('payment_days', '')), quote=True)}"{checked}>学生佣金</label></td>
+          <td>招生佣金</td><td>{escape(line["claim_number"])}</td><td>{name}</td>
+          <td>1</td><td>{_aud_money(line["net_cents"])}</td><td>{_aud_money(line["net_cents"])}</td>
+          <td>{_aud_money(line["gst_cents"])}</td><td class="invoice-line-gross">{_aud_money(line["gross_cents"])}</td><td></td></tr>""")
+
+    def selected(value, current):
+        return " selected" if value == current else ""
+
+    if students is not None:
+        for index in range(MAX_LINES):
+            values = saved_rows[index] if index < len(saved_rows) else {}
+            visibility = "" if index == 0 or values else " hidden"
+            attributes = {key: escape(values.get(key, ""), quote=True)
+                          for key in ("product", "description", "unit_price")}
+            options = "".join(
+                f'<option value="{escape(student_id, quote=True)}"{selected(student_id, values.get("student_id"))}>'
+                f'{escape(name)}</option>'
+                for student_id, name in students.items()
+            )
+            quantity = escape(values.get("quantity") or "1", quote=True)
+            gst = values.get("gst")
+            rows.append(f"""<tr data-invoice-manual-row{visibility}>
+              <td><span class="invoice-source invoice-source-manual">手工服务</span></td>
+              <td><div class="invoice-product-selector">
+                <input aria-label="项目" name="manual_product_{index}" maxlength="100" value="{attributes['product']}" placeholder="输入产品或服务">
+                <select aria-label="选择产品或服务" data-invoice-service-select hidden><option value="">选择服务</option></select>
+              </div></td>
+              <td><input aria-label="说明" name="manual_description_{index}" maxlength="300" value="{attributes['description']}"></td>
+              <td><select aria-label="关联学生" name="manual_student_id_{index}"><option value="">不关联学生</option>{options}</select></td>
+              <td><input aria-label="数量" type="number" name="manual_quantity_{index}" value="{quantity}" min="1" max="1000"></td>
+              <td><input aria-label="未税单价（AUD）" type="number" name="manual_unit_price_{index}"
+                value="{attributes['unit_price']}" min="0.01" max="1000000" step="0.01"></td>
+              <td><output data-invoice-line-net>A$0.00</output></td>
+              <td><select aria-label="GST" name="manual_gst_{index}"><option value="">请选择</option>
+                <option value="taxable"{selected('taxable', gst)}>GST 10%</option>
+                <option value="no_gst"{selected('no_gst', gst)}>不计 GST</option></select></td>
+              <td class="invoice-line-gross"><output data-invoice-line-gross>A$0.00</output></td>
+              <td><button type="button" data-invoice-manual-remove aria-label="移除此行">×</button></td>
+              </tr>""")
+    return f"""<div class="invoice-composer-table">
+      <table class="invoice-line-table"><thead><tr>
+      <th>来源</th><th>产品 / 服务</th><th>说明</th><th>关联学生</th>
+      <th>数量</th><th>未税单价</th><th>未税金额</th><th>GST</th><th>含税金额</th><th></th>
+      </tr></thead><tbody>{''.join(rows)}</tbody></table></div>"""
+
+
+def _payment_terms_field(payment_terms):
+    from revenue.school_invoice_manual import DEFAULT_PAYMENT_TERMS
+
+    current = payment_terms or str(DEFAULT_PAYMENT_TERMS)
+    options = "".join(
+        f'<option value="{days}"{" selected" if days == current else ""}>{label}</option>'
+        for days, label in (("0", "开票当天"), ("7", "Net 7"), ("15", "Net 15"), ("30", "Net 30"))
+    )
+    return f'<label>付款期限<select name="manual_terms">{options}</select></label>'
+
+
+def render_school_invoice_account(school_id, name, billing, csrf, token, *, authority=""):
+    def field(key, label, value, required=False):
+        return (f'<label>{label}<input name="{key}" value="{escape(value or "", quote=True)}"'
+                + (' required' if required else '') + '></label>')
+
+    fields = (
+        field("billing_name", "发票抬头", billing.get("name") or name, True)
+        + f'<label>账单地址<textarea name="billing_address" rows="2" required>{escape(billing.get("address") or "")}</textarea></label>'
+        + field("billing_phone", "联系电话", billing.get("phone"))
+        + field("recipient", "学校收票邮箱", billing.get("recipient"), True)
+        + field("cc", "抄送", billing.get("cc"))
+        + field("bcc", "密送", billing.get("bcc"))
+    )
+    return f"""{STYLESHEET}<section class="invoice-composer">
+      <header class="invoice-composer-title"><h1>补齐开票资料</h1></header>
+      <form class="invoice-composer-card" method="post" action="{URL}/account">
+        <h2>{escape(name)}</h2>
+        {_authority_label(authority)}
+        {_hidden_security(csrf,token,"school-invoice-account")}{_hidden("school_id",school_id)}
+        {_hidden("billing_revision",billing.get("revision",""))}
+        {_hidden("settings_revision",billing.get("settings_revision",""))}
+        {fields}
+        <label><input type="checkbox" name="verified" value="1" {"checked" if billing.get("verified") else ""}>已核对学校财务邮箱</label>
+        <label><input type="checkbox" name="enabled" value="1" {"checked" if billing.get("enabled") else ""}>允许从 CRM 发送发票</label>
+        <div class="invoice-composer-actions"><a href="{URL}">返回学校选择</a><button class="primary">保存并继续</button></div>
+      </form></section>"""
+
+
+def _authority_label(authority):
+    return f'<span class="invoice-school-status">{escape(authority)}</span>' if authority else ""
+
+
+def _contract_badge(contracted, authority):
+    if authority:
+        status = "教育局合同已确认" if contracted else "教育局合同未确认"
+    else:
+        status = "有佣金合同" if contracted else "无佣金合同"
+    value = "contract" if contracted else "no-contract"
+    return f'<span class="invoice-school-status {value}">{status}</span>'
+
+
+def _school_picker(schools, selected=None, institutions=()):
+    rows = []
+    for school_id, name, _, contracted, authority in schools:
+        value = "contract" if contracted else "no-contract"
+        rows.append(
+            f'<li data-school-row data-contract="{value}"><a href="{URL}?school_id={school_id}">'
+            f'{escape(name)} <span>{_authority_label(authority)} {_contract_badge(contracted, authority)}</span></a></li>'
+        )
+    for name, contract_uid in institutions:
+        destination = f"/revenue/institution-commission-drafts/{quote(contract_uid, safe='')}"
+        rows.append(
+            f'<li data-school-row data-contract="contract"><a href="{destination}">'
+            f'{escape(name)} <span>{_authority_label("高等教育机构")} '
+            '<span class="invoice-school-status contract">合同已确认</span></span></a></li>'
+        )
+    caption = "选择开票学校或机构"
+    if selected:
+        _, name, _, contracted, authority = selected
+        caption = f"{escape(name)} {_authority_label(authority)} {_contract_badge(contracted, authority)}"
+    return f"""<details data-school-picker>
+      <summary aria-label="选择开票学校或机构"><span>{caption}</span><span aria-hidden="true">⌄</span></summary>
+      <div class="invoice-school-popover">
+      <label>搜索学校或机构名称<input type="search" data-school-search></label>
+      <label>合同状态<select data-school-contract>
+        <option value="">全部</option><option value="contract">有合同</option><option value="no-contract">无合同</option>
+      </select></label>
+      <ul class="invoice-school-list">{"".join(rows)}</ul>
+      <p data-school-no-results hidden>未找到匹配的学校或机构。</p></div>
+      </details>"""
+
+
+def _invoice_service_directory(services, csrf, token, allow_manage):
+    config = json.dumps(services, ensure_ascii=False).replace("<", r"\u003c")
+    picker = f'<script type="application/json" data-invoice-services>{config}</script>'
+    if not allow_manage:
+        return picker
+    return picker + f"""<dialog class="invoice-service-directory" aria-labelledby="invoice-service-title">
+      <header class="invoice-composer-heading"><div><h2 id="invoice-service-title">产品／服务管理</h2>
+        <p>目录可在任何学校的发票上搜索和选用。</p></div>
+        <button type="button" data-invoice-service-close>返回开票</button></header>
+      <div class="invoice-composer-heading">
+        <label>搜索产品或服务<input type="search" data-invoice-service-filter></label>
+        <button type="button" data-invoice-service-new>＋ 新增产品／服务</button>
+      </div>
+      <table class="invoice-service-table"><thead><tr><th>名称</th><th>常用说明</th><th>操作</th></tr></thead>
+        <tbody data-invoice-service-rows></tbody></table>
+      <form method="post" action="{URL}/services" data-invoice-service-form hidden>
+        {_hidden_security(csrf,token,"school-invoice-service")}
+        <input type="hidden" name="service_uid"><input type="hidden" name="service_revision">
+        <div class="invoice-service-fields">
+          <label>产品／服务名称<input name="service_name" maxlength="100" required></label>
+          <label>常用说明（可选）<input name="service_description" maxlength="300"></label>
+        </div>
+        <button type="submit" class="primary">保存到通用目录</button>
+      </form>
+      <p role="status" data-invoice-service-status></p>
+    </dialog>"""
+
+
 def render_school_invoice_list(entities, entity_id, claims, invoices, csrf, token, *,
                                allow_invoicing=True, simulation=True, overdue_only=False, auto_mail_settings=None, smtp_recipient=None,
-                               allow_preview=None, mail_release=None, show_mail_history=False):
+                               allow_preview=None, mail_release=None, show_mail_history=False, manual_students=None,
+                               candidate_href=None, selected_claims=(), manual_draft=(), manual_terms="", draft_note="", billing=None, schools=None, school_id=None, institutions=(), services=None):
     options = "".join(
         f'<option value="{value}"{" selected" if value == entity_id else ""}>{escape(name)}</option>'
         for value, name in entities
     )
-    select = f"""<form method="get" action="{URL}" class="revenue-action-form">
-      <label>学校付款主体<select name="entity_id" required><option value="">请选择学校</option>{options}</select></label>
-      <button type="submit">查看可开票学生</button></form>"""
+    select = f"""<form method="get" action="{URL}" class="revenue-action-form invoice-composer-school">
+      <label>学校 / 开票主体<select name="entity_id" required><option value="">请选择学校</option>{options}</select></label>
+      <button type="submit">继续开票</button></form>"""
+    billing_edit = ""
+    if schools is not None:
+        selected_school = next((row for row in schools if row[0] == school_id), None)
+        select = _school_picker(schools, selected_school, institutions)
+        if selected_school:
+            billing_edit = f'<a href="{URL}?school_id={school_id}&amp;edit_billing=1">编辑开票资料</a>'
     selection = ""
     if allow_preview is None:
         allow_preview = allow_invoicing
     if entity_id and allow_preview:
-        if claims:
-            selection = f"""<form method="post" action="{URL}/preview">
+        if claims or manual_students is not None:
+            candidate_link = (f'<a href="{escape(candidate_href, quote=True)}">查看学生和申领条件</a>'
+                              if candidate_href else "")
+            lines = _composer_lines(claims, selected_claims, manual_students, manual_draft)
+            manual = manual_students is not None
+            claim_button = ('<button type="button" data-invoice-select-claim>＋ 添加待开票学生佣金</button>' if claims else
+                            '<button type="button" disabled title="这所学校暂无待开票的学生佣金">＋ 添加待开票学生佣金</button>')
+            add_button = '<button type="button" data-invoice-manual-add>＋ 添加手工明细</button>' if manual else ""
+            clear_button = '<button type="button" data-invoice-clear>清除明细</button>' if manual else ""
+            issue_buttons = ('<button type="submit" name="preview_action" value="issue">仅签发</button>'
+                             '<button type="submit" name="preview_action" value="send">签发并发送</button>'
+                             if allow_invoicing else "")
+            bill = billing or {}
+            issuer_date = datetime.now(ZoneInfo("Australia/Melbourne")).date()
+            bill_to = f'{escape(bill.get("name") or "未填写")}<br>{escape(bill.get("address") or "").replace(chr(10), "<br>")}'
+            recipient = escape(bill.get("recipient") or "未填写")
+            copies = (f'<p>抄送 {escape(bill.get("cc") or "—")}</p>'
+                      f'<p>密送 {escape(bill.get("bcc") or "—")}</p>')
+            inline_picker = select if schools is not None else ""
+            school_control = inline_picker or f'<output>{escape(next((name for value, name in entities if value == entity_id), ""))}</output>'
+            details = f"""<section class="invoice-composer-card invoice-layout-billing">
+              <div class="invoice-layout-school">
+                <div><span class="invoice-field-label">开票学校</span>{school_control}</div>
+                <div><span class="invoice-field-label">到期日</span><output data-invoice-due>以预览为准</output></div>
+              </div>
+              <div class="invoice-layout-fields">
+                <div><span class="invoice-field-label">收票邮箱</span><output>{recipient}</output></div>
+                <div><span class="invoice-field-label">开票日期</span><output data-invoice-date="{issuer_date.isoformat()}">{issuer_date:%d/%m/%Y}</output></div>
+                <div>{_payment_terms_field(manual_terms) if manual else ""}
+                    <output data-invoice-claim-terms hidden></output></div>
+                <details class="invoice-layout-bill-details">
+                  <summary>展开开票资料</summary>
+                  <div><span class="invoice-field-label">发票抬头和地址</span><p>{bill_to}</p>{copies}{billing_edit}</div>
+                </details>
+              </div>
+            </section>"""
+            if inline_picker:
+                select = ""
+            selection = f"""<form method="post" action="{URL}/preview" data-invoice-composer>
               {_hidden_security(csrf,token,"toorak-school-preview")}{_hidden("entity_id",entity_id)}
-              {_claim_table(claims,selectable=True)}
-              <label>客户备注（选填）<textarea name="customer_note" maxlength="500" rows="2"></textarea></label>
-              <button type="submit" class="primary">预览所选发票</button></form>"""
+              {details}
+              <section class="invoice-composer-card">
+                <header class="invoice-composer-heading"><h2>发票明细</h2>
+                  <div class="invoice-composer-buttons">{claim_button}{add_button}</div></header>
+                {lines}
+                <div class="invoice-line-actions">{clear_button}{candidate_link}</div>
+                <p>只有从待开票学生佣金添加的明细，才会在签发时更新申领状态。</p>
+              </section>
+              <section class="invoice-composer-card invoice-composer-summary">
+                <label>给学校的备注（选填）<textarea name="customer_note" maxlength="500" rows="2">{escape(draft_note)}</textarea></label>
+                <dl data-invoice-totals aria-label="发票金额">
+                  <div><dt>未税小计</dt><dd data-invoice-total-net>A$0.00</dd></div>
+                  <div><dt>GST</dt><dd data-invoice-total-gst>A$0.00</dd></div>
+                  <div><dt>应收合计</dt><dd data-invoice-total-gross>A$0.00</dd></div>
+                </dl>
+              </section>
+              <div class="invoice-composer-actions"><a href="/revenue">‹ 返回收入与佣金</a>
+                <div class="invoice-composer-buttons">
+                  <button type="submit">预览 Invoice</button>
+                  <button type="submit" class="primary" name="preview_action" value="pdf" formtarget="_blank">预览 PDF</button>
+                  {f'<span class="invoice-layout-issue">{issue_buttons}</span>' if issue_buttons else ""}
+                </div></div></form>"""
         else:
             selection = '<p>该付款主体目前没有可开票的 Claim。</p>'
     history = "".join(
@@ -81,18 +321,65 @@ def render_school_invoice_list(entities, entity_id, claims, invoices, csrf, toke
     if show_mail_history:
         suffix = f"?entity_id={entity_id}" if entity_id else ""
         mail_history = f'<p><a href="{URL}/mail-history{suffix}">发票发送历史</a></p>'
-    return f"""<section class="revenue-panel">
-      <h1>学校佣金开票</h1><p>{mode}{instruction}</p>
-      {mail_history}{select}{mail}{selection}{history}</section>"""
+    picker_panel = f'<div class="invoice-composer-card"><h2>开票资料</h2>{select}{billing_edit}<p>{mode}{instruction}</p></div>' if select else ""
+    return f"""{STYLESHEET}<section class="invoice-composer invoice-layout-v4">
+      <header class="invoice-composer-title">
+        <div><p>收入与佣金 / 学校佣金开票</p><h1>开学校 Invoice</h1></div>{mail_history}
+      </header>
+      {picker_panel}
+      {mail}{selection}{history}
+      {_invoice_service_directory(services, csrf, token, allow_invoicing) if services is not None else ""}
+      <script src="/assets/school-invoice-composer.js?v={ASSET_VERSION}" defer></script></section>"""
 
 
-def render_school_invoice_preview(data, csrf, token, *, simulation=True, allow_issue=True):
+def _invoice_draft_fields(data):
     hidden = "".join(_hidden(k,v) for k,v in (
         ("entity_id",data["entity_id"]),("claim_uids",",".join(data["claim_uids"])),("preview_digest",data["digest"]),
         ("customer_note",data.get("customer_note","")),
     ))
+    if data.get("manual_lines"):
+        hidden += _hidden("manual_lines", json.dumps(data["manual_lines"], ensure_ascii=False))
+        hidden += _hidden("manual_terms", data.get("manual_terms") if data.get("manual_terms") is not None else "")
+    return hidden
+
+
+def render_school_invoice_pdf_view(data, csrf, token, *, image, page_number, page_count):
+    previous = f'<button type="submit" name="draft_page" value="{page_number - 1}">上一页</button>' if page_number > 1 else ""
+    following = f'<button type="submit" name="draft_page" value="{page_number + 1}">下一页</button>' if page_number < page_count else ""
+    if image:
+        preview = (f'<p class="invoice-pdf-page-number">第 {page_number} 页，共 {page_count} 页</p>'
+                   f'<img class="invoice-pdf-page" src="data:image/png;base64,{image}" alt="发票草稿第 {page_number} 页">')
+    else:
+        preview = '<p role="status">票面暂时无法显示。你可以重试，或下载 PDF 草稿查看。</p>'
+        previous = '<button type="submit">重试预览</button>'
+        following = ""
+    return f"""{STYLESHEET}<section class="invoice-composer invoice-pdf-view">
+      <header class="invoice-composer-title"><div><p>{escape(data["bill_to"])}</p><h1>PDF 草稿预览</h1></div></header>
+      <form method="post" action="{URL}/pdf" class="invoice-composer-actions invoice-pdf-actions">
+        {_hidden_security(csrf,token,"toorak-school-pdf")}{_invoice_draft_fields(data)}
+        <div class="invoice-composer-buttons">{previous}{following}</div>
+        <button type="submit" class="primary" name="draft_format" value="download" formtarget="_blank">下载 PDF 草稿</button>
+      </form>
+      {preview}
+      </section>"""
+
+
+def render_school_invoice_preview(data, csrf, token, *, simulation=True, allow_issue=True, allow_send=False, intent=""):
+    hidden = _invoice_draft_fields(data)
+    if data.get("manual_lines"):
+        hidden += _hidden("draft_token", token)
     mode = "TEST ONLY · " if simulation else ""
     issue = '<button type="submit" class="primary">确认签发佣金发票</button>' if allow_issue else ""
+    if allow_issue and allow_send:
+        issue = (
+            '<button type="submit">仅签发</button>'
+            '<button type="submit" class="primary" name="send_invoice" value="1">签发并发送</button>'
+        )
+    if intent == "issue" and allow_issue:
+        issue = '<button type="submit" class="primary">确认仅签发</button>'
+    elif intent == "send":
+        issue = ('<button type="submit" class="primary" name="send_invoice" value="1">确认签发并发送</button>'
+                 if allow_issue and allow_send else '<p>当前无法发送，请核对学校邮件设置。</p>')
     action = "issue" if allow_issue else "pdf"
     terms = ""
     if data.get("due_date"):
@@ -103,9 +390,16 @@ def render_school_invoice_preview(data, csrf, token, *, simulation=True, allow_i
         terms += (f'<p>收件人 {escape(copies["recipient"] or "未填写")} · '
                   f'Cc {escape(", ".join(filter(None, (FINANCE_COPY_ADDRESS, copies["cc"]))))} · '
                   f'Bcc {escape(copies["bcc"] or "未填写")}</p>')
+        if allow_send and (message := copies.get("message")):
+            terms += (
+                '<details open><summary>邮件预览</summary>'
+                f'<p>主题 {escape(message["subject"])}</p>'
+                f'<p>{escape(message["body"]).replace(chr(10), "<br>")}</p>'
+                '<p>附件为发票 PDF。签发时会将 DRAFT 换成正式发票编号。</p></details>'
+            )
     if note := data.get("customer_note"):
         terms += f'<p>客户备注 {escape(note)}</p>'
-    return f"""<section class="revenue-panel">
+    return f"""{STYLESHEET}<section class="revenue-panel invoice-composer">
       <h1>学校佣金发票预览</h1>
       <p>{mode}{escape(data["bill_to"])} · 预览阶段尚未分配 COM 编号。</p>
       {_claim_table(data["lines"])}{terms}
@@ -113,16 +407,16 @@ def render_school_invoice_preview(data, csrf, token, *, simulation=True, allow_i
       · 合计 <strong>{_aud_money(data["gross_cents"])}</strong></p>
       <form method="post" action="{URL}/{action}">
       {_hidden_security(csrf,token,"toorak-school-issue")}{hidden}
+      <button type="submit" formaction="{URL}/edit">返回编辑</button>
       <button type="submit" formaction="{URL}/pdf" formtarget="_blank">查看 PDF 草稿</button>
-      {issue}</form>
-      <a href="{URL}?entity_id={data["entity_id"]}">返回重新选择</a></section>"""
+      {issue}</form></section>"""
 
 
 def render_school_invoice_detail(data, csrf, token, *, allow_settlement=True, simulation=True, reminder_records=(), auto_mail=None, show_mail=False, allow_mail_retry=False, reminder_direct=False, reminder_mails=()):
     number = escape(data["invoice_number"])
     document = quote(data["document_uid"],safe="")
     rows = "".join(
-        f'<tr><td>{escape(line["student_id"])}</td><td>{escape(line["claim_number"])}</td>'
+        f'<tr><td>{escape(line["student_id"])}</td><td>{escape(line["claim_number"])}</td><td>{escape(line["description"])}</td>'
         f'<td>{_aud_money(line["gross_cents"])}</td><td>{_aud_money(line["received_cents"])}</td>'
         f'<td>{_aud_money(line["outstanding_cents"])}</td></tr>'
         for line in data["lines"]
@@ -154,7 +448,7 @@ def render_school_invoice_detail(data, csrf, token, *, allow_settlement=True, si
       <h1>学校佣金发票 {number}</h1>
       <p>{mode}学校付款主体 {escape(data["legal_name"])} · <a href="/revenue/documents/{document}/download">下载 {number}</a>
       · <a href="{URL}?entity_id={data["revenue_entity_id"]}">返回学校开票</a></p>
-      <table><thead><tr><th>学生</th><th>Claim</th><th>含税应收</th><th>已分配</th><th>未收</th></tr></thead>
+      <table><thead><tr><th>学生</th><th>Claim / 来源</th><th>明细</th><th>含税应收</th><th>已分配</th><th>未收</th></tr></thead>
       <tbody>{rows}</tbody></table><p>{_invoice_payment_label(data["settlement"])}</p>{mail}{reminder}{history}{controls}</section>"""
 
 

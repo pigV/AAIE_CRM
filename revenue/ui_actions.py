@@ -323,7 +323,9 @@ class RevenueUIActions:
         library = (getattr(self.school_pilot, "template_library_entity_id", None)
                    or getattr(self.school_pilot, "entity_id", None))
         return ToorakClaims(self.service,self.actor_user_id,self.actor_role,lambda: self.document_root,
-                            mail_release=self.school_mail_release,library_entity_id=library,**self._school_scope())
+                            mail_release=self.school_mail_release,library_entity_id=library,
+                            issuer_profile_entity_id=getattr(self.school_pilot, "issuer_profile_entity_id", None),
+                            **self._school_scope())
 
     def upload_toorak_claim_evidence(self, case_uid, form, upload):
         if not self.school_pilot:

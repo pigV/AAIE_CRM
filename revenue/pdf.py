@@ -222,7 +222,7 @@ def render_configured_commission_invoice(snapshot: dict, layout: dict) -> bytes:
             weights={"product":1.5,"description":2.65,"quantity":0.6,"rate":1.0,"gst":0.8,"amount":1.0}
             for line in snapshot["lines"]:
                 quantity=int(line.get("quantity",1))
-                row={"product":"School recruitment commission","description":line["description"],
+                row={"product":line.get("product","School recruitment commission"),"description":line["description"],
                      "quantity":quantity,"rate":_money(line["net_cents"]//quantity),
                      "gst":commission_gst_indicator(line["gst_cents"], line.get("gst_mode") or snapshot.get("gst_mode")),
                      "amount":_money(line["net_cents"])}

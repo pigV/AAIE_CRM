@@ -302,17 +302,19 @@ def invoice_layout_selection(connection, *, formal=False, entity_id=None, simula
 
 
 def invoice_origin_predicate():
-    """Match invoice alias i to one origin using its immutable Claim evaluations."""
+    """Match the invoice's Claim or manual lines to one environment."""
     return """(?=0 OR (EXISTS (
                  SELECT 1 FROM revenue_invoice_lines ol WHERE ol.invoice_id=i.id)
                AND NOT EXISTS (
                  SELECT 1 FROM revenue_invoice_lines ol WHERE ol.invoice_id=i.id
-                   AND NOT EXISTS (
-                     SELECT 1 FROM revenue_claims oc
-                     JOIN revenue_claim_eligibility_evaluations oe ON oe.claim_id=oc.id
-                    WHERE ol.source_kind='claim' AND oc.uid=ol.source_uid AND oe.eligible=1
-                      AND json_extract(oe.authoritative_facts_json,'$.school_commission_formal')=1
-                      AND json_extract(oe.authoritative_facts_json,'$.school_commission_simulation')=?))))"""
+                   AND (CASE ol.source_kind
+                        WHEN 'school_manual' THEN 0
+                        WHEN 'school_manual_test' THEN 1
+                        WHEN 'claim' THEN (SELECT json_extract(oe.authoritative_facts_json,'$.school_commission_simulation')
+                            FROM revenue_claims oc JOIN revenue_claim_eligibility_evaluations oe ON oe.claim_id=oc.id
+                            WHERE oc.uid=ol.source_uid AND oe.eligible=1
+                              AND json_extract(oe.authoritative_facts_json,'$.school_commission_formal')=1)
+                        END) IS NOT ?)))"""
 
 
 def _version(connection, uid, source):
@@ -336,12 +338,13 @@ def financial_profile(connection, *, formal=False, entity_id=None, simulation=Tr
 
 
 def current_invoice_template_revisions(connection, *, formal=False, entity_id=None, simulation=True,
-                                       include_billing=False, template_target=None, library_entity_id=None):
+                                       include_billing=False, template_target=None, library_entity_id=None, issuer_profile_entity_id=None):
     uid, _ = invoice_layout_selection(
         connection, formal=formal, entity_id=entity_id, simulation=simulation,
         template_target=template_target, library_entity_id=library_entity_id,
     )
-    revisions = (uid, financial_profile(connection,formal=formal,entity_id=entity_id,simulation=simulation)[1] or "")
+    profile_entity = issuer_profile_entity_id if formal and issuer_profile_entity_id is not None else entity_id
+    revisions = (uid, financial_profile(connection,formal=formal,entity_id=profile_entity,simulation=simulation)[1] or "")
     if formal and include_billing:
         from revenue.invoice_billing_details import billing_details
 
@@ -366,13 +369,14 @@ def _bill_to_layout(layout, data):
 
 
 def render_with_active_template(connection, snapshot, *, formal=False, simulation=True, entity_id=None,
-                                template_target=None, library_entity_id=None):
-    _,profile_source = _sources(formal,entity_id,simulation)
+                                template_target=None, library_entity_id=None, issuer_profile_entity_id=None):
+    profile_entity = issuer_profile_entity_id if formal and issuer_profile_entity_id is not None else entity_id
+    _,profile_source = _sources(formal,profile_entity,simulation)
     uid, layout_source = invoice_layout_selection(
         connection, formal=formal, entity_id=entity_id, simulation=simulation,
         template_target=template_target, library_entity_id=library_entity_id,
     )
-    profile,profile_uid = financial_profile(connection,formal=formal,entity_id=entity_id,simulation=simulation)
+    profile,profile_uid = financial_profile(connection,formal=formal,entity_id=profile_entity,simulation=simulation)
     if formal and (not uid or not profile_uid):
         raise ValueError("正式签发须先发布发票模板并批准完整的开票及收款资料。")
     if not uid:
@@ -384,7 +388,12 @@ def render_with_active_template(connection, snapshot, *, formal=False, simulatio
 
         _formal_profile(profile)
         fields = snapshot.get("invoice_bill_to")
-        data.update(bill_to_fields(connection, entity_id, simulation) if fields is None else fields)
+        fields = bill_to_fields(connection, entity_id, simulation) if fields is None else fields
+        if profile_entity != entity_id:
+            if not fields.get("bill_to"):
+                raise ValueError("请先补齐该学校的开票资料。")
+            data.pop("bill_to_address", None)
+        data.update(fields)
         layout = _bill_to_layout(layout, data)
         approved = _latest_event(connection,(FORMAL_PROFILE_APPROVED,),profile_source)
         if not simulation and approved.get("simulation") is not False:

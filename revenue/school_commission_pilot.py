@@ -28,6 +28,7 @@ class PilotPolicy:
     contract_intake: bool = False
     education_authorities: tuple[str, ...] = ()
     template_library_entity_id: int = 0
+    issuer_profile_entity_id: int | None = None
 
     @property
     def toorak_draft_release(self):

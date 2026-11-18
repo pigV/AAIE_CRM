@@ -406,6 +406,14 @@ def _message_fields(event, sender=None):
     }
 
 
+def payer_invoice_mail_preview(payer_name, gross_cents, *, simulation):
+    return _message_fields({
+        "invoice_number": "DRAFT", "gross_cents": gross_cents,
+        "payer_name": " ".join(payer_name.split()),
+        "transport": "mock" if simulation else "production",
+    }, SENDER)
+
+
 def _message(event, created_at, pdf, sender=None):
     fields = event.get("message") or _message_fields(event, sender)
     message = EmailMessage(policy=policy.SMTP)
@@ -587,16 +595,17 @@ def payer_invoice_approved(connection, event, simulation):
                  WHERE {column}=? AND revenue_entity_id=? AND effective_to IS NULL""",
             (target[1], event["entity_id"]),
         ).fetchone())
+    manual_kind = "school_manual_test" if simulation else "school_manual"
     return bool(connection.execute(
-        """SELECT 1 FROM revenue_invoice_lines l JOIN revenue_claims c ON c.uid=l.source_uid
-            WHERE l.invoice_id=? AND l.source_kind='claim' AND c.status='issued'
-              AND c.revenue_entity_id=?
-              AND NOT EXISTS (SELECT 1 FROM revenue_invoice_lines bad
+        """SELECT EXISTS(SELECT 1 FROM revenue_invoice_lines WHERE invoice_id=?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM revenue_invoice_lines bad
                   LEFT JOIN revenue_claims bc ON bc.uid=bad.source_uid
-                  WHERE bad.invoice_id=l.invoice_id AND (bad.source_kind!='claim'
-                    OR bc.id IS NULL OR bc.revenue_entity_id!=c.revenue_entity_id OR bc.status!='issued'))""",
-        (row["id"], event["entity_id"]),
-    ).fetchone())
+                  WHERE bad.invoice_id=? AND bad.source_kind<>?
+                    AND (bad.source_kind!='claim' OR bc.id IS NULL
+                         OR bc.revenue_entity_id!=? OR bc.status!='issued'))""",
+        (row["id"], row["id"], manual_kind, event["entity_id"]),
+    ).fetchone()[0])
 
 
 def _smtp_invoice_approved(connection, event, transport):

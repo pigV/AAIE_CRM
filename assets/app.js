@@ -1604,9 +1604,14 @@
       event.preventDefault();
       return;
     }
+    const invoiceForm = form.matches("[data-invoice-composer], .invoice-composer form");
+    const submitter = invoiceForm ? event.submitter : null;
+    if (submitter?.formTarget === "_blank") return;
     form.dataset.submitting = "true";
     form.setAttribute("aria-busy", "true");
     qa('button[type="submit"], input[type="submit"]', form).forEach((button) => {
+      // A disabled submitter is excluded from the native form payload.
+      if (button === submitter && button.name) return;
       button.disabled = true;
       if (button.tagName === "BUTTON" && !button.dataset.originalText) {
         button.dataset.originalText = button.textContent || "";

@@ -17,8 +17,9 @@ from revenue.money import apply_basis_points, commission_gst_amounts
 from revenue.repository import canonical_json, new_uid
 from revenue.secure_storage import StorageUnavailable, read_secure, write_immutable
 from revenue.data_invoice_storage import configured_invoice_store
-from revenue.school_invoice_mail import enqueue_mail
+from revenue.school_invoice_mail import enqueue_mail, payer_invoice_mail_preview
 from revenue.toorak_forecast import ToorakForecast
+from revenue.school_invoice_manual import DEFAULT_PAYMENT_TERMS, PAYMENT_TERMS, prepare_manual_lines, student_invoice_label
 
 
 EVIDENCE_FIELDS = (
@@ -61,7 +62,7 @@ def _today():
 class ToorakClaims:
     def __init__(self, service, actor, role, storage_root, *,
                  formal=False, simulation=True, school_id=None, entity_id=None, mail_release=None,
-                 library_entity_id=None):
+                 library_entity_id=None, issuer_profile_entity_id=None):
         if role != "Admin":
             raise PermissionError("School commission claims require Admin")
         self.service = service
@@ -74,7 +75,8 @@ class ToorakClaims:
         self.simulation = simulation
         self.entity_id = entity_id
         self.template_context = {"template_target": ("school", school_id) if school_id else None,
-                                 "library_entity_id": library_entity_id}
+                                 "library_entity_id": library_entity_id,
+                                 "issuer_profile_entity_id": issuer_profile_entity_id}
         self.invoice_kind = FORMAL_INVOICE_KIND if formal else TEST_INVOICE_KIND
         self.workflow = "school-commission" if formal else "toorak"
         self.claim_action = "school_commission_claim_issued" if formal else "toorak_internal_claim_issued"
@@ -425,7 +427,8 @@ class ToorakClaims:
         rows = self._invoice_claims(entity_id)
         return {
             "entities": sorted({(row["revenue_entity_id"],row["legal_name"]) for row in rows}),
-            "claims": [self._invoice_line(row) for row in rows if not row["invoiced"]],
+            "claims": [{**self._invoice_line(row), "payment_days": json.loads(row["authoritative_facts_json"]).get("payment_days", "")}
+                       for row in rows if not row["invoiced"]],
         }
 
     def school_invoices(self, entity_id, *, issued_by=None):
@@ -441,61 +444,75 @@ class ToorakClaims:
             (entity_id,self.invoice_kind,issued_by,issued_by,self.formal,self.simulation),
         )]
 
-    @staticmethod
-    def _invoice_line(row):
+    def _invoice_line(self, row):
         facts = json.loads(row["authoritative_facts_json"])
         basis = "local" if facts["tier"]["tuition_kind"] == "local" else "international"
         basis_points = facts["tier"]["rate_basis_points"]
         rate = basis_points // 100 if basis_points % 100 == 0 else basis_points / 100
+        student = student_invoice_label(self.connection, row["student_id"]) if self.formal else row["student_id"]
         return {
             "claim_uid":row["uid"],"claim_number":row["claim_number"],"student_id":row["student_id"],
-            "rate":rate,"quantity":1,
+            "rate":rate,"quantity":1,"student_name":student,
             **({"gst_mode": facts["gst_mode"]} if facts.get("gst_mode") else {}),
-            "description":(f'{row["student_id"]} | {row["claim_number"]} | first-year {basis} tuition '
+            "description":(f'{student} | {row["claim_number"]} | first-year {basis} tuition '
                            f'commission ({rate}%)'),
             **{key:row[key] for key in ("net_cents","gst_cents","gross_cents")},
         }
 
     @staticmethod
-    def _selected_claims(claim_uids):
-        if not claim_uids or len(claim_uids)>100 or len(set(claim_uids))!=len(claim_uids):
+    def _selected_claims(claim_uids, *, manual_lines=()):
+        if (not claim_uids and not manual_lines) or len(claim_uids)>100 or len(set(claim_uids))!=len(claim_uids):
             raise ValueError("请选择 1 至 100 条不同的申领记录。")
         return sorted(claim_uids)
 
-    def _invoice_snapshot(self, rows, number):
-        lines = [self._invoice_line(row) for row in rows]
+    def _invoice_snapshot(self, rows, number, *, manual_lines=(), bill_to=None, manual_terms=None):
+        lines = [self._invoice_line(row) for row in rows] + list(manual_lines)
         amounts = {key:sum(line[key] for line in lines) for key in ("net_cents","gst_cents","gross_cents")}
         issued_on = _today()
         due_date = None
         payment_terms = "Payment due date is confirmed after school receipt."
         if self.formal:
-            terms = {json.loads(row["authoritative_facts_json"]).get("payment_days") for row in rows}
-            if len(terms)!=1 or not terms <= {0,7,15,30}:
-                raise ValueError("正式发票的 Claim 必须使用同一已确认的付款期限。")
-            days = terms.pop()
+            if rows:
+                terms = {json.loads(row["authoritative_facts_json"]).get("payment_days") for row in rows}
+                if len(terms) != 1 or not terms <= PAYMENT_TERMS:
+                    raise ValueError("正式发票的 Claim 必须使用同一已确认的付款期限。")
+                days = terms.pop()
+            else:
+                days = DEFAULT_PAYMENT_TERMS if manual_terms is None else manual_terms
+                if days not in PAYMENT_TERMS:
+                    raise ValueError("请选择有效的学校付款期限。")
             due_date = (date.fromisoformat(issued_on) + timedelta(days=days)).isoformat()
             payment_terms = (f"Payment within {days} days of the invoice date."
                              if days else "Payment due on the invoice date.")
         return dict(
             document_number=number, issue_date=issued_on, due_date=due_date, issuer_name="AAIE Education Services",
-            issuer_abn="Test fixture", bill_to=rows[0]["legal_name"], currency_code="AUD",
-            student_id="\n".join(line["student_id"] for line in lines),
-            claim_number="\n".join(line["claim_number"] for line in lines),
+            issuer_abn="Test fixture", bill_to=bill_to or rows[0]["legal_name"], currency_code="AUD",
+            student_id="\n".join(line["student_name"] for line in lines if line["student_name"]),
+            claim_number="\n".join(line["claim_number"] for line in lines if line["claim_number"]),
             payment_terms=payment_terms,
             lines=lines, **amounts,
         )
 
     def _checked_invoice_claims(self, entity_id, claim_uids):
-        rows = self._invoice_claims(entity_id, claim_uids)
+        rows = self._invoice_claims(entity_id, claim_uids) if claim_uids else []
         if len(rows)!=len(claim_uids):
             raise ValueError("请选择本付款主体下已审核的学校佣金 Claim。")
         if any(row["invoiced"] for row in rows):
             raise ValueError("所选 Claim 已生成发票，请刷新后重新选择。")
         return rows
 
-    def _school_invoice_preview(self, entity_id, claim_uids, customer_note=""):
+    def _school_invoice_preview(self, entity_id, claim_uids, customer_note="", *, manual_lines=(), manual_terms=None):
         rows = self._checked_invoice_claims(entity_id, claim_uids)
-        snapshot = self._invoice_snapshot(rows,"DRAFT")
+        bill_to = None
+        lines = []
+        if manual_lines:
+            if not self.formal or self.entity_id != entity_id:
+                raise ValueError("手工明细仅适用于已授权的学校付款主体。")
+            from revenue.invoice_billing_details import billing_details
+
+            bill_to = billing_details(self.connection, entity_id, self.simulation)["name"]
+            lines = prepare_manual_lines(self.connection, self.forecast.school_id, manual_lines)
+        snapshot = self._invoice_snapshot(rows, "DRAFT", manual_lines=lines, bill_to=bill_to, manual_terms=manual_terms)
         if note := invoice_customer_note(customer_note):
             snapshot["customer_note"] = note
         revisions = current_invoice_template_revisions(self.connection,formal=self.formal,entity_id=self.entity_id,
@@ -508,18 +525,29 @@ class ToorakClaims:
         digest = hashlib.sha256(canonical_json(preview_data).encode()).hexdigest()
         return rows,snapshot,digest
 
-    def invoice_preview(self, entity_id, claim_uids, *, customer_note=""):
-        ids = self._selected_claims(claim_uids)
-        _,snapshot,digest = self._school_invoice_preview(entity_id,ids,customer_note)
+    def invoice_preview(self, entity_id, claim_uids, *, customer_note="", manual_lines=(), manual_terms=None):
+        ids = self._selected_claims(claim_uids, manual_lines=manual_lines)
+        _,snapshot,digest = self._school_invoice_preview(
+            entity_id, ids, customer_note, manual_lines=manual_lines, manual_terms=manual_terms,
+        )
         if self.formal:
             from revenue.invoice_billing_details import billing_details
 
             settings = billing_details(self.connection, self.entity_id, self.simulation)
             snapshot["mail_preview"] = {key: settings[key] for key in ("recipient", "cc", "bcc")}
+            payer_name, = self.connection.execute(
+                "SELECT legal_name FROM revenue_entities WHERE id=?", (entity_id,),
+            ).fetchone()
+            snapshot["mail_preview"]["message"] = payer_invoice_mail_preview(
+                payer_name, snapshot["gross_cents"], simulation=self.simulation,
+            )
         return {**snapshot,"entity_id":entity_id,"claim_uids":ids,"digest":digest}
 
-    def invoice_preview_pdf(self, entity_id, claim_uids, digest, *, customer_note=""):
-        _,snapshot,current_digest = self._school_invoice_preview(entity_id,self._selected_claims(claim_uids),customer_note)
+    def invoice_preview_pdf(self, entity_id, claim_uids, digest, *, customer_note="", manual_lines=(), manual_terms=None):
+        ids = self._selected_claims(claim_uids, manual_lines=manual_lines)
+        _,snapshot,current_digest = self._school_invoice_preview(
+            entity_id, ids, customer_note, manual_lines=manual_lines, manual_terms=manual_terms,
+        )
         if digest!=current_digest:
             raise ValueError("发票明细、模板或财务资料已更新，请重新预览。")
         return self._render_invoice(snapshot, use_default=True)[0]
@@ -535,7 +563,7 @@ class ToorakClaims:
         data = {**snapshot,**profile,"bill_to_address":school_test_billing_address(snapshot["bill_to"])}
         return render_configured_commission_invoice(data,default_layout()),None,profile_uid
 
-    def _persist_invoice(self, rows, snapshot, command_key, *, use_default=False):
+    def _persist_invoice(self, rows, snapshot, command_key, *, use_default=False, send=None):
         invoice_store = configured_invoice_store() if self.formal else None
         if self.formal and not self.simulation and invoice_store is None:
             raise StorageUnavailable()
@@ -560,24 +588,28 @@ class ToorakClaims:
             self.invoice_kind,str(path),digest,"application/pdf",len(pdf),"generated",
             self.actor,command_key,
         )
+        case_id = rows[0]["case_id"] if len(rows) == len(data["lines"]) == 1 else None
+        entity_id = rows[0]["revenue_entity_id"] if rows else self.entity_id
         invoice_id, = self.connection.execute(
             """INSERT INTO revenue_invoices(uid,document_kind,invoice_number,commercial_case_id,
                   revenue_entity_id,issue_date,due_date,currency_code,net_cents,gst_cents,gross_cents,
                   status,document_id,issued_by,issued_at,created_at)
                 VALUES(?,'direct_commission_invoice',?,?,?,?,?,'AUD',?,?,?,'issued',?,?,?,?) RETURNING id""",
-            (uid,number,rows[0]["case_id"] if len(rows)==1 else None,rows[0]["revenue_entity_id"],today,data.get("due_date"),
+            (uid,number,case_id,entity_id,today,data.get("due_date"),
              data["net_cents"],data["gst_cents"],data["gross_cents"],document["id"],self.actor,now,now),
         ).fetchone()
         self.connection.executemany(
             """INSERT INTO revenue_invoice_lines(uid,invoice_id,source_kind,source_uid,student_id,
                    description,quantity,net_cents,gst_cents,gross_cents,sort_order)
-                VALUES(?,?,'claim',?,?,?,1,?,?,?,?)""",
-            [(new_uid("invoice-line"),invoice_id,line["claim_uid"],line["student_id"],line["description"],
-              line["net_cents"],line["gst_cents"],line["gross_cents"],index)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            [(new_uid("invoice-line"), invoice_id,
+              "claim" if line["claim_uid"] else ("school_manual_test" if self.simulation else "school_manual"),
+              line["claim_uid"] or new_uid("manual-invoice-source"), line["student_id"] or None,
+              line["description"] if line["claim_uid"] else " · ".join(dict.fromkeys(filter(None, (line["product"], line["description"])))),
+              line["quantity"], line["net_cents"],line["gst_cents"],line["gross_cents"],index)
              for index,line in enumerate(data["lines"])],
         )
         if self.formal:
-            case_id = rows[0]["case_id"] if len(rows)==1 else None
             for field,account in (("net_cents","CommissionRevenue"),("gst_cents","GSTPayable")):
                 if data[field]:
                     self.service.append_balanced_ledger_event(
@@ -585,31 +617,55 @@ class ToorakClaims:
                         "CommissionReceivable",account,self.actor,commercial_case_id=case_id,
                     )
         invoice = self.repository.require_by_uid("revenue_invoices",uid)
-        if self.formal and (self.simulation or self.mail_release):
+        if send is not False and self.formal and (self.simulation or self.mail_release):
             if self.mail_release == "payer" or self.simulation:
                 enqueue_mail(self.repository, invoice, document, invoice["revenue_entity_id"],
                              self.actor, payer_routing=True, simulation=self.simulation)
             if self.mail_release != "payer":
                 enqueue_mail(self.repository, invoice, document, invoice["revenue_entity_id"], self.actor,
-                             release=self.mail_release, claim_uids=[line["claim_uid"] for line in data["lines"]])
+                             release=self.mail_release, claim_uids=[line["claim_uid"] for line in data["lines"] if line["claim_uid"]])
+        if send:
+            from revenue.school_invoice_mail import mail_status
+
+            queued = mail_status(self.connection, uid)
+            if not queued or queued["status"] != "pending":
+                raise ValueError("邮件未成功排队，请检查学校收件资料。")
         return {**invoice,"document_uid":document["uid"],
                 "template_uid":template_uid,"finance_profile_uid":profile_uid,
                 **({"simulation":self.simulation, "invoice_bill_to":data["invoice_bill_to"]} if self.formal else {})}
 
-    def issue_school_invoice(self, entity_id, claim_uids, digest, *, customer_note=""):
-        ids = self._selected_claims(claim_uids)
-        key = hashlib.sha256(canonical_json([entity_id,ids]).encode()).hexdigest()
+    def issue_school_invoice(self, entity_id, claim_uids, digest, *, customer_note="", manual_lines=(),
+                             manual_terms=None, draft_token="", send=None):
+        ids = self._selected_claims(claim_uids, manual_lines=manual_lines)
+        if not ids and not re.fullmatch(r"[a-zA-Z0-9_-]{20,128}", draft_token):
+            raise ValueError("手工发票草稿已失效，请重新预览。")
+        identity = [entity_id, ids] if ids else [entity_id, draft_token]
+        key = hashlib.sha256(canonical_json(identity).encode()).hexdigest()
 
         def operation():
-            rows,snapshot,current_digest = self._school_invoice_preview(entity_id,ids,customer_note)
+            rows,snapshot,current_digest = self._school_invoice_preview(
+                entity_id, ids, customer_note, manual_lines=manual_lines, manual_terms=manual_terms,
+            )
             if digest!=current_digest:
                 raise ValueError("发票明细、模板或财务资料已更新，请重新预览。")
-            return self._persist_invoice(rows,snapshot,f"{self.workflow}-school-invoice-pdf:{key}",use_default=True)
+            if send:
+                from revenue.invoice_billing_details import billing_details
 
+                billing = billing_details(self.connection, entity_id, self.simulation)
+                if not self.formal or not (self.simulation or self.mail_release == "payer") or not (
+                    billing["recipient"] and billing["verified"] and billing["enabled"]
+                ):
+                    raise ValueError("请先在学校开票资料核对收件人并启用发票邮件。")
+            return self._persist_invoice(
+                rows, snapshot, f"{self.workflow}-school-invoice-pdf:{key}", use_default=True, send=send,
+            )
+
+        payload = {"entity_id":entity_id,"claim_uids":ids,"preview_digest":digest}
+        if send:
+            payload["send"] = True
         return self.repository.command(
             idempotency_key=f"{self.workflow}-school-invoice:{key}",command_type=self.invoice_action,
-            aggregate_type="invoice",payload={"entity_id":entity_id,"claim_uids":ids,"preview_digest":digest},
-            actor_user_id=self.actor,operation=operation,
+            aggregate_type="invoice",payload=payload, actor_user_id=self.actor,operation=operation,
         )
 
     def issue_invoice(self, case_uid, claim_uid, template_confirmed, expected_revisions=None):

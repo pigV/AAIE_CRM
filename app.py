@@ -2432,7 +2432,7 @@ def school_invoice_smtp_payer(connection, scope):
     ).fetchone()) and payer_matches(scope,connection)
 
 
-def school_commission_authority(user, stage, *, school_id=None, entity_id=None, case_uid=None, invoice_uid=None):
+def school_commission_authority(user, stage, *, school_id=None, entity_id=None, case_uid=None, invoice_uid=None, invoice_workspace=False):
     """Return the validated pilot, None for legacy staging, or False for denied."""
     if not is_revenue_admin(user):
         return False
@@ -2463,14 +2463,19 @@ def school_commission_authority(user, stage, *, school_id=None, entity_id=None, 
             if len(schools)!=1 or (school_id is not None and school_id!=schools[0][0]):
                 return False
             school_id = schools[0][0]
-        if pilot.self_service and invoice_uid:
+        if (pilot.self_service or invoice_workspace) and invoice_uid:
             invoice = connection.execute(
                 "SELECT revenue_entity_id FROM revenue_invoices WHERE uid=?",(invoice_uid,),
             ).fetchone()
             if not invoice or (entity_id is not None and entity_id!=invoice[0]):
                 return False
             entity_id = invoice[0]
-        scope = school_pilot_scope(connection,pilot,school_id=school_id,entity_id=entity_id)
+        if invoice_workspace and (school_id is not None or entity_id is not None):
+            from revenue.school_invoice_workspace import invoice_school_scope
+
+            scope = invoice_school_scope(connection, pilot, school_id=school_id, entity_id=entity_id)
+        else:
+            scope = school_pilot_scope(connection,pilot,school_id=school_id,entity_id=entity_id)
         if not scope or not scope.allows(user,stage):
             return False
         return scope if stage=="read" or payer_matches(scope,connection) else False
@@ -27445,7 +27450,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/revenue/documents/([^/]+)/(view|download)$", self.revenue_document),
                 (r"^/revenue/school-commission-candidates(?:/(review|confirm))?$",
                  self.revenue_school_claim_candidates),
-                (r"^/revenue/school-commission-invoices(?:/(preview|pdf|issue|delivery|payment|reconcile|reminder|reminder-send|reminder-retry|reminder-sent|mail-settings|mail-retry|mail-history))?$",
+                (r"^/revenue/school-commission-invoices(?:/(account|services|preview|edit|pdf|issue|delivery|payment|reconcile|reminder|reminder-send|reminder-retry|reminder-sent|mail-settings|mail-retry|mail-history))?$",
                  self.revenue_school_commission_invoices),
                 (r"^/revenue/commission-invoice-templates(?:/(save|rename|publish|rollback|profile|preview))?$", self.revenue_commission_invoice_templates),
                 (r"^/revenue/cases/([^/]+)/toorak-settlement/(delivery|payment|reconcile)$", self.revenue_case_toorak_settlement),
@@ -28710,6 +28715,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             data["school_contract_href"] = (
                 f"/revenue/contracts?school_id={contract_scope.school_id}#school-commission-contracts"
             )
+        if school_commission_authority(self.user, "read") is not False:
+            data["school_invoice_href"] = SCHOOL_INVOICE_URL
         template_pilot, _ = self._commission_invoice_template_scope()
         if template_pilot is not False:
             data["commission_invoice_template_href"] = "/revenue/commission-invoice-templates"
@@ -29169,11 +29176,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             presentation_surface="desktop",
         )
 
-    def _begin_school_commission_write(self, connection, pilot, stage):
+    def _begin_school_commission_write(self, connection, pilot, stage, *, invoice_workspace=False):
         connection.execute("BEGIN IMMEDIATE")
         setup_stage = stage in {"setup","contract-intake"}
         scope_args = {"school_id":pilot.school_id,"entity_id":pilot.entity_id} if pilot and not setup_stage else {}
-        current = school_commission_authority(self.user, stage, **scope_args) if pilot else None
+        current = school_commission_authority(self.user, stage, invoice_workspace=invoice_workspace, **scope_args) if pilot else None
         if current and setup_stage and pilot.entity_id == 0:
             current = replace(current, school_id=pilot.school_id, entity_id=0)
         if pilot and current != pilot:
@@ -29430,6 +29437,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 for scope in list_school_pilot_scopes(connection, pilot)
                 if scope.allows(self.user, "read")
             ]
+            if getattr(pilot, "enabled", False):
+                from revenue.school_invoice_workspace import invoice_school_scopes
+
+                known = dict(entities)
+                for scope in invoice_school_scopes(connection, pilot):
+                    if scope.entity_id not in known:
+                        payer = connection.execute("SELECT legal_name FROM revenue_entities WHERE id=?", (scope.entity_id,)).fetchone()
+                        if payer:
+                            entities.append((scope.entity_id, payer[0]))
             intake = school_commission_authority(self.user, "contract-intake")
             if intake and intake.education_authorities:
                 from revenue.authority_formal import authority_payer
@@ -29478,15 +29494,93 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return retry_mail(repository, mail["uid"], invoice["revenue_entity_id"], int(self.user["id"]),
                           key, int(self.form.get("attempt_count") or 0))
 
+    def revenue_school_invoice_account(self, method, operation, school_id):
+        from revenue.invoice_billing_details import billing_details
+        from revenue.school_invoice_workspace import (
+            education_authority_label, invoice_school_scope, public_school_authorities, save_school_invoice_account,
+        )
+        from revenue.school_invoice_views import render_school_invoice_account
+
+        stage = "invoicing" if method == "POST" else "preview"
+        pilot = school_commission_authority(self.user, stage)
+        if (not pilot or self.request_view_mode() == MOBILE_MODE
+                or method != ("POST" if operation == "account" else "GET")):
+            return self.error_page("学校开票资料未开放或无权限。", HTTPStatus.FORBIDDEN)
+        connection = db.connect()
+        try:
+            if method == "POST":
+                self._begin_school_commission_write(connection, pilot, "invoicing")
+                actions = RevenueUIActions(connection, None, int(self.user["id"]), self.user["role_name"], school_pilot=pilot)
+                entity_id, _ = save_school_invoice_account(actions, school_id, self.form)
+                connection.commit()
+                return self.redirect(f"{SCHOOL_INVOICE_URL}?entity_id={entity_id}")
+
+            school = connection.execute(
+                "SELECT school_name FROM schools WHERE id=? AND deleted_at IS NULL", (school_id,),
+            ).fetchone()
+            if not school:
+                raise ValueError("请选择有效的学校。")
+            scope = invoice_school_scope(connection, pilot, school_id=school_id)
+            editing = self.query.get("edit_billing") == ["1"]
+            if scope and not editing:
+                return self.redirect(f"{SCHOOL_INVOICE_URL}?entity_id={scope.entity_id}")
+            if school_commission_authority(self.user, "invoicing") is False:
+                return self.error_page("当前只开放预览。", HTTPStatus.FORBIDDEN)
+            links = connection.execute(
+                """SELECT e.id FROM revenue_entity_provider_links l
+                     JOIN revenue_entities e ON e.id=l.revenue_entity_id AND e.status='active' AND e.entity_type='school'
+                    WHERE l.school_id=? AND l.effective_to IS NULL""", (school_id,),
+            ).fetchall()
+            if len(links) > 1:
+                raise ValueError("该学校的付款主体存在冲突，请先核对。")
+            billing = billing_details(connection, links[0][0], pilot.simulation) if links else {}
+            authority = education_authority_label(public_school_authorities(connection).get(school_id))
+            body = render_school_invoice_account(school_id, school[0], billing, self.csrf, new_token(), authority=authority)
+            return self.send_html(page("补齐开票资料", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                                  headers=[("Cache-Control", "no-store")], presentation_surface="desktop")
+        except (LookupError, TypeError, ValueError, sqlite3.Error, OSError) as error:
+            connection.rollback()
+            message = str(error) if isinstance(error, ValueError) else "无法保存学校开票资料，请重试。"
+            return self.error_page(message, HTTPStatus.BAD_REQUEST)
+        finally:
+            db._release_connection(connection)
+
+    def revenue_school_invoice_service(self, method):
+        from revenue.school_invoice_services import list_invoice_services, save_invoice_service
+
+        pilot = school_commission_authority(self.user, "invoicing")
+        if method != "POST" or not pilot or self.request_view_mode() == MOBILE_MODE:
+            return self.json_response({"error": "当前账号无权修改产品／服务目录。"}, 403)
+        connection = db.connect()
+        try:
+            self._begin_school_commission_write(connection, pilot, "invoicing")
+            save_invoice_service(RevenueRepository(connection), int(self.user["id"]), self.form)
+            items = list_invoice_services(connection)
+            connection.commit()
+            return self.json_response({"items": items, "token": new_token()})
+        except ValueError as error:
+            connection.rollback()
+            return self.json_response({"error": str(error), "token": new_token()}, 400)
+        except sqlite3.Error:
+            connection.rollback()
+            return self.json_response({"error": "产品／服务未保存，请重试。", "token": new_token()}, 500)
+        finally:
+            db._release_connection(connection)
+
     def revenue_school_commission_invoices(self, method, operation):
+        if operation == "services":
+            return self.revenue_school_invoice_service(method)
         settlement_operation = operation in {"delivery","payment","reconcile"}
         reminder_operation = operation in {"reminder", "reminder-send", "reminder-retry", "reminder-sent"}
         stage = "settlement" if settlement_operation or reminder_operation else {
-            None:"read","preview":"preview","pdf":"preview","mail-history":"read",
+            None:"read","preview":"preview","edit":"preview","pdf":"preview","mail-history":"read",
         }.get(operation,"invoicing")
         invoice_uid = ((self.query.get("invoice") or [""])[0] if method=="GET"
                        else str(self.form.get("invoice_uid") or ""))
         selected_entity = self._school_commission_scope_id("entity_id")
+        school_id = self._school_commission_scope_id("school_id")
+        if operation == "account" or (method == "GET" and operation is None and school_id is not None):
+            return self.revenue_school_invoice_account(method, operation, school_id)
         if operation == "mail-history":
             pilot = school_commission_authority(self.user, "read")
             if method != "GET":
@@ -29494,12 +29588,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if not pilot or self.request_view_mode() == MOBILE_MODE:
                 return self.error_page("发票发送历史未开放。", HTTPStatus.FORBIDDEN)
             return self.revenue_school_invoice_mail_history(pilot, selected_entity)
-        pilot = school_commission_authority(self.user,stage,entity_id=selected_entity,invoice_uid=invoice_uid)
+        pilot = school_commission_authority(self.user,stage,entity_id=selected_entity,invoice_uid=invoice_uid,invoice_workspace=True)
         if pilot is False or self.request_view_mode()==MOBILE_MODE:
             return self.error_page("学校佣金试点阶段未开放或无权限。",HTTPStatus.FORBIDDEN)
         mail_enabled = bool(pilot and pilot.simulation and school_invoice_mail_rehearsal())
         if settlement_operation:
-            return self.revenue_case_toorak_settlement(method,None,operation)
+            return self.revenue_case_toorak_settlement(method,None,operation,invoice_workspace=True)
         if method != ("GET" if operation in (None, "mail-history") else "POST"):
             return self.error_page("不支持此请求方式。",HTTPStatus.METHOD_NOT_ALLOWED)
         connection = db.connect()
@@ -29520,9 +29614,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if operation == "mail-settings":
                 if selected_entity != pilot.entity_id:
                     raise ValueError("请先选择学校付款主体。")
-                self._begin_school_commission_write(connection,pilot,"invoicing")
+                self._begin_school_commission_write(connection,pilot,"invoicing", invoice_workspace=True)
                 if payer_mail or mail_settings(connection, pilot.entity_id).get("routing") == "payer":
-                    raise ValueError("请在已确认学校佣金合同页核对收票邮箱。")
+                    raise ValueError(f"请在「{CONFIRMED_TITLE}」页核对收票邮箱。")
                 if mail_release:
                     release_stage = self.form.get("mail_stage")
                     recipient = str(self.form.get("recipient") or "").strip()
@@ -29546,7 +29640,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 connection.commit()
                 return self.redirect(SCHOOL_INVOICE_URL+f"?entity_id={pilot.entity_id}")
             if operation == "mail-retry":
-                self._begin_school_commission_write(connection,pilot,"invoicing")
+                self._begin_school_commission_write(connection,pilot,"invoicing", invoice_workspace=True)
                 settlement.detail(invoice_uid)
                 retry_mail(actions.repository,invoice_uid,pilot.entity_id,int(self.user["id"]),
                            self.form.get("idempotency_key"),int(self.form.get("attempt_count") or 0))
@@ -29566,13 +29660,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         return self.send_html(page("催款邮件预览", body, self.user, self.csrf,
                                                    REVENUE_MODULE_KEY, nas.status()),
                                               headers=[("Cache-Control", "no-store")], presentation_surface="desktop")
-                    self._begin_school_commission_write(connection, pilot, "settlement")
+                    self._begin_school_commission_write(connection, pilot, "settlement", invoice_workspace=True)
                     self._submit_commission_reminder(actions.repository, details, simulation, operation)
                     connection.commit()
                     return self.redirect(back)
                 recipient = self.form.get("recipient")
                 if operation == "reminder-sent":
-                    self._begin_school_commission_write(connection,pilot,"settlement")
+                    self._begin_school_commission_write(connection,pilot,"settlement", invoice_workspace=True)
                     settlement.detail(invoice_uid)
                     record_reminder(settlement,invoice_uid,recipient,self.form.get("digest"),
                                     self.form.get("idempotency_key"),self.form.get("confirmed")=="1")
@@ -29581,10 +29675,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 details = settlement.detail(invoice_uid)
                 draft = draft_reminder(details,recipient)
                 body = render_school_reminder_preview(details,draft,self.csrf,new_token(),simulation=simulation)
-            elif operation is None:
-                if invoice_uid:
+            elif operation in (None, "edit"):
+                if invoice_uid and operation is None:
                     details = settlement.detail(invoice_uid)
-                    allow_settlement = school_commission_authority(self.user,"settlement",invoice_uid=invoice_uid) is not False
+                    allow_settlement = school_commission_authority(self.user,"settlement",invoice_uid=invoice_uid,invoice_workspace=True) is not False
                     body = render_school_invoice_detail(details,self.csrf,new_token(),allow_settlement=allow_settlement,
                                                         simulation=simulation,
                                                         reminder_records=reminder_history(connection,invoice_uid),
@@ -29592,25 +29686,79 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                                         show_mail=bool(pilot), reminder_direct=payer_mail and allow_settlement,
                                                         reminder_mails=reminder_mail_history(connection, invoice_uid),
                                                         allow_mail_retry=(mail_enabled or mail_release or payer_mail) and
-                                                        school_commission_authority(self.user,"invoicing",invoice_uid=invoice_uid) is not False)
+                                                        school_commission_authority(self.user,"invoicing",invoice_uid=invoice_uid,invoice_workspace=True) is not False)
                 else:
-                    entity_id = int((self.query.get("entity_id") or ["0"])[0])
-                    entities = issuer.invoice_candidates(pilot.entity_id if pilot else None)["entities"]
-                    if pilot and pilot.self_service:
-                        entities = [(scope.entity_id,connection.execute(
-                            "SELECT legal_name FROM revenue_entities WHERE id=?",(scope.entity_id,),
-                        ).fetchone()[0]) for scope in list_school_pilot_scopes(connection,pilot)]
+                    entity_id = selected_entity or 0
+                    entities = issuer.invoice_candidates()["entities"] if not pilot else []
+                    if pilot:
+                        for scope in list_school_pilot_scopes(connection, pilot):
+                            if not scope.allows(self.user, "read"):
+                                continue
+                            payer = connection.execute(
+                                """SELECT e.legal_name,s.school_name FROM revenue_entities e
+                                   JOIN schools s ON s.id=? WHERE e.id=? AND e.status='active'""",
+                                (scope.school_id, scope.entity_id),
+                            ).fetchone()
+                            if payer:
+                                entities.append((scope.entity_id, " · ".join(dict.fromkeys((payer[1],payer[0])))))
+                    if pilot and entity_id and entity_id == pilot.entity_id and entity_id not in dict(entities):
+                        payer = connection.execute("SELECT legal_name FROM revenue_entities WHERE id=?", (entity_id,)).fetchone()
+                        if payer:
+                            entities.append((entity_id, payer[0]))
                     if entity_id and entity_id not in dict(entities):
                         raise ValueError("请选择可开票的学校付款主体。")
                     allow_invoicing = school_commission_authority(self.user,"invoicing",
-                                                                    entity_id=selected_entity) is not False
-                    allow_preview = school_commission_authority(self.user,"preview",entity_id=selected_entity) is not False
+                                                                    entity_id=selected_entity,invoice_workspace=True) is not False
+                    allow_preview = school_commission_authority(self.user,"preview",entity_id=selected_entity,invoice_workspace=True) is not False
                     claims = issuer.invoice_candidates(entity_id)["claims"] if entity_id and allow_preview else []
+                    students = None
+                    candidate_href = None
+                    if entity_id and allow_preview and pilot and pilot.school_id:
+                        from revenue.school_invoice_manual import manual_students, student_invoice_label
+
+                        students = manual_students(connection, pilot.school_id)
+                        students = {
+                            sid: student_invoice_label(connection, sid, name, missing_birthday=True)
+                            for sid, name in students.items()
+                        }
+                        if pilot.simulation or pilot.toorak_claim_drafts:
+                            candidate_href = f"/revenue/school-commission-candidates?school_id={pilot.school_id}"
+                    selected_claims = (self.query.get("claims") or [""])[0].split(",")
+                    manual_draft, manual_terms, draft_note = [], "", ""
+                    if operation == "edit":
+                        from revenue.school_invoice_manual import parse_manual_form, prepare_manual_lines
+
+                        manual_draft = parse_manual_form(self.form)
+                        if manual_draft:
+                            prepare_manual_lines(connection, pilot.school_id if pilot else None, manual_draft)
+                        manual_terms = str(self.form.get("manual_terms") or "")
+                        draft_note = str(self.form.get("customer_note") or "")[:500]
+                        selected_claims = str(self.form.get("claim_uids") or "").split(",")
                     overdue_only = (self.query.get("overdue") or [""])[0] == "1"
                     invoices = invoice_overviews(issuer,settlement,entity_id) if entity_id else []
                     if overdue_only:
                         invoices = [invoice for invoice in invoices
                                     if invoice["settlement"] and invoice["settlement"]["overdue_days"]]
+                    billing = None
+                    if students is not None:
+                        from revenue.invoice_billing_details import billing_details
+
+                        billing = billing_details(connection, entity_id, simulation)
+                    schools = None
+                    institutions = []
+                    base = school_commission_authority(self.user, "read")
+                    if base and getattr(base, "enabled", False):
+                        from revenue.school_invoice_workspace import invoice_institutions, invoice_school_catalogue
+
+                        intake = school_commission_authority(self.user, "contract-intake")
+                        confirmed = confirmed_contracts(connection, intake, int(self.user["id"])) if intake else {}
+                        institutions = invoice_institutions(confirmed)
+                        schools = invoice_school_catalogue(connection, base, confirmed_schools={
+                            key for kind, key in confirmed if kind == "school"
+                        })
+                    from revenue.school_invoice_services import list_invoice_services
+
+                    services = list_invoice_services(connection) if students is not None else None
                     body = render_school_invoice_list(entities,entity_id,claims,invoices,self.csrf,new_token(),
                                                       allow_invoicing=allow_invoicing,simulation=simulation,
                                                       overdue_only=overdue_only,
@@ -29618,39 +29766,96 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                                                       if entity_id and allow_invoicing and (mail_enabled or mail_release)
                                                       and mail_settings(connection, entity_id).get("routing") != "payer" else None,
                                                       smtp_recipient=smtp_recipient,allow_preview=allow_preview,
-                                                      mail_release=mail_release, show_mail_history=bool(pilot))
+                                                      mail_release=mail_release, show_mail_history=bool(pilot),
+                                                      manual_students=students, candidate_href=candidate_href,
+                                                      selected_claims=selected_claims, manual_draft=manual_draft,
+                                                      manual_terms=manual_terms, draft_note=draft_note, billing=billing, schools=schools,
+                                                      school_id=pilot.school_id if entity_id and pilot else None, institutions=institutions,
+                                                      services=services)
             else:
                 entity_id = int(self.form.get("entity_id") or 0)
                 if pilot and entity_id!=pilot.entity_id:
                     raise ValueError("请选择试点学校付款主体。")
                 raw_claims = self.form.get("claim_uids") or []
-                claim_uids = raw_claims.split(",") if isinstance(raw_claims,str) else raw_claims
+                claim_uids = [uid for uid in raw_claims.split(",") if uid] if isinstance(raw_claims,str) else raw_claims
+                from revenue.school_invoice_manual import parse_manual_form
+
+                manual_lines = parse_manual_form(self.form)
+                manual_terms = str(self.form.get("manual_terms") or "")
+                if manual_terms not in {"", "0", "7", "15", "30"}:
+                    raise ValueError("请选择有效的付款期限。")
+                invoice_fields = {
+                    "customer_note": self.form.get("customer_note", ""),
+                    "manual_lines": manual_lines,
+                    "manual_terms": int(manual_terms) if manual_terms else None,
+                }
                 digest = str(self.form.get("preview_digest") or "")
                 if operation == "issue":
-                    self._begin_school_commission_write(connection,pilot,"invoicing")
+                    self._begin_school_commission_write(connection,pilot,"invoicing", invoice_workspace=True)
                     if issuer.mail_release == "payer" and not school_invoice_payer_mail_live():
                         issuer.mail_release = None
-                    issued = issuer.issue_school_invoice(entity_id,claim_uids,digest, customer_note=self.form.get("customer_note", ""))
+                    issued = issuer.issue_school_invoice(
+                        entity_id, claim_uids, digest, **invoice_fields,
+                        draft_token=str(self.form.get("draft_token") or ""),
+                        send=self.form.get("send_invoice") == "1",
+                    )
                     connection.commit()
                     return self.redirect(SCHOOL_INVOICE_URL+"?invoice="+quote(issued["uid"],safe=""))
                 connection.execute("BEGIN")
-                if operation == "pdf":
-                    payload = issuer.invoice_preview_pdf(entity_id,claim_uids,digest, customer_note=self.form.get("customer_note", ""))
+                intent = str(self.form.get("preview_action") or "") if operation == "preview" else ""
+                if operation == "pdf" or intent == "pdf":
+                    draft = issuer.invoice_preview(entity_id, claim_uids, **invoice_fields)
+                    if intent == "pdf":
+                        digest = draft["digest"]
+                    payload = issuer.invoice_preview_pdf(entity_id, claim_uids, digest, **invoice_fields)
                     connection.commit()
-                    self.send_response(HTTPStatus.OK)
-                    self.send_header("Content-Type","application/pdf")
-                    self.send_header("Content-Disposition",'inline; filename="school-commission-draft.pdf"')
-                    self.send_header("Content-Length",str(len(payload)))
-                    self.send_header("Cache-Control","private, no-store")
-                    self.send_header("X-Content-Type-Options","nosniff")
-                    self.end_headers()
-                    self.wfile.write(payload)
-                    return
-                preview = issuer.invoice_preview(entity_id,claim_uids, customer_note=self.form.get("customer_note", ""))
+                    if operation == "pdf" and self.form.get("draft_format") == "download":
+                        self.send_response(HTTPStatus.OK)
+                        self.send_header("Content-Type","application/pdf")
+                        self.send_header("Content-Disposition",'attachment; filename="school-commission-draft.pdf"')
+                        self.send_header("Content-Length",str(len(payload)))
+                        self.send_header("Cache-Control","private, no-store")
+                        self.send_header("X-Content-Type-Options","nosniff")
+                        self.end_headers()
+                        self.wfile.write(payload)
+                        return
+                    page_number = int(self.form.get("draft_page") or 1)
+                    if page_number < 1:
+                        raise ValueError("请核对预览页码。")
+                    page_count = 1
+                    image = ""
+                    try:
+                        page_count = pdf_page_count(payload, max_pages=None)
+                        if page_number > page_count:
+                            raise ValueError("请核对预览页码。")
+                        png = _run_pdf_preview_worker("render", payload, page_number)
+                        image = base64.b64encode(png).decode("ascii")
+                    except (PreviewRenderError, OSError):
+                        pass
+                    from revenue.school_invoice_views import render_school_invoice_pdf_view
+
+                    if manual_lines:
+                        draft.update(manual_lines=manual_lines, manual_terms=invoice_fields["manual_terms"])
+                    body = render_school_invoice_pdf_view(
+                        draft, self.csrf, new_token(), image=image, page_number=page_number, page_count=page_count,
+                    )
+                    return self.send_html(
+                        page("PDF 草稿预览", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                        headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop",
+                    )
+                preview = issuer.invoice_preview(entity_id, claim_uids, **invoice_fields)
+                if manual_lines:
+                    preview.update(manual_lines=manual_lines, manual_terms=invoice_fields["manual_terms"])
+                allow_send = False
+                if pilot and (payer_mail or simulation):
+                    from revenue.invoice_billing_details import billing_details
+
+                    billing = billing_details(connection, entity_id, simulation)
+                    allow_send = bool(billing["recipient"] and billing["verified"] and billing["enabled"])
                 connection.commit()
-                body = render_school_invoice_preview(preview,self.csrf,new_token(),simulation=simulation,
+                body = render_school_invoice_preview(preview,self.csrf,new_token(),simulation=simulation, allow_send=allow_send, intent=intent,
                                                      allow_issue=school_commission_authority(self.user,"invoicing",
-                                                                                             entity_id=selected_entity) is not False)
+                                                                                             entity_id=selected_entity,invoice_workspace=True) is not False)
             return self.send_html(page("学校佣金开票",body,self.user,self.csrf,REVENUE_MODULE_KEY,nas.status()),
                                   headers=[("Cache-Control","no-store")],presentation_surface="desktop")
         except (LookupError,TypeError,ValueError,sqlite3.Error,OSError) as error:
@@ -29662,11 +29867,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         finally:
             db._release_connection(connection)
 
-    def revenue_case_toorak_settlement(self, method, case_uid, operation):
+    def revenue_case_toorak_settlement(self, method, case_uid, operation, *, invoice_workspace=False):
         if method != "POST":
             return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
         pilot = school_commission_authority(self.user,"settlement",case_uid=case_uid,
-                                             invoice_uid=str(self.form.get("invoice_uid") or ""))
+                                             invoice_uid=str(self.form.get("invoice_uid") or ""), invoice_workspace=invoice_workspace)
         if (not can_perform_revenue_action(self.user,f"toorak-settlement/{operation}")
                 or pilot is False
                 or self.request_view_mode()==MOBILE_MODE):
@@ -29683,7 +29888,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 connection,None,int(self.user["id"]),self.user["role_name"],
                 legacy_document_root=Path(db.path).parent/"revenue_documents",school_pilot=pilot,
             )
-            self._begin_school_commission_write(connection,pilot,"settlement")
+            self._begin_school_commission_write(connection,pilot,"settlement", invoice_workspace=invoice_workspace)
             if operation=="delivery":
                 result = actions.confirm_toorak_delivery(case_uid,self.form,upload)
             elif operation=="payment":

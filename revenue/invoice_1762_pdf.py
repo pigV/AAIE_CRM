@@ -166,7 +166,7 @@ def render_invoice_1762(snapshot, layout, canvas_class):
                      right_small if f["key"] in right_columns else small) for f in fields]]
     for item in snapshot["lines"]:
         quantity=int(item.get("quantity",1))
-        row={"product":"School recruitment commission","description":item["description"],
+        row={"product":item.get("product","School recruitment commission"),"description":item["description"],
              "quantity":quantity,"rate":_number(item["net_cents"] // quantity),
              "gst":commission_gst_indicator(item["gst_cents"], item.get("gst_mode") or snapshot.get("gst_mode")),
              "amount":_number(item["net_cents"])}
