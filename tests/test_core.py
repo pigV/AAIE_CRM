@@ -1282,6 +1282,12 @@ def prepare_visa_candidate_test_database(database):
         conn.execute("INSERT OR IGNORE INTO users(id,username,display_name,password_hash,role_id,created_at) VALUES(1,'visa-fixture','Visa Fixture','synthetic-no-login',?,'2026-09-07')", (role,))
 
 
+def visible_visa_material_items(markup):
+    """Client-filtered rows stay in DOM so their unsaved fields remain submitted."""
+    articles = re.findall(r'(<article\b[^>]*visa-material-compact-row[^>]*>)(.*?)</article>', markup, re.S)
+    return ''.join(start + body + '</article>' for start, body in articles if not re.search(r'\bhidden(?:\s|>)', start))
+
+
 class CoreTests(unittest.TestCase):
     def test_student_info_docx_filename_uses_trimmed_student_name(self):
         self.assertEqual(
@@ -12590,7 +12596,7 @@ class CoreTests(unittest.TestCase):
                 self.assertIn("Smart Batch Upload / 智能批量上传", material_html)
                 material_panel = material_html.split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0]
                 self.assertNotIn('class="visa-material-file-upload"', material_panel)
-                self.assertNotIn('type="file"', material_panel)
+                self.assertIn('type="file"', material_panel)
                 self.assertNotIn('value="needs_update"', material_panel)
                 self.assertNotIn('value="reviewed"', material_panel)
                 self.assertNotIn(">需补充<", material_panel)
@@ -14656,20 +14662,19 @@ class CoreTests(unittest.TestCase):
                 material_panel = detail_html.split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0]
                 missing = material_total - 3
                 completed = 3
-                self.assertIn(f"<span>总材料项</span><strong>{material_total}</strong>", material_panel)
-                self.assertIn(f"<span>未收到</span><strong>{missing}</strong>", material_panel)
-                self.assertIn("<span>已收到</span><strong>2</strong>", material_panel)
+                self.assertIn(f'data-quick-filter="all" data-count="{material_total}"', material_panel)
+                self.assertIn(f'data-quick-filter="unfinished" data-count="{missing}"', material_panel)
+                self.assertIn('data-quick-filter="uploaded" data-count="2"', material_panel)
                 self.assertNotIn("<span>需补充</span>", material_panel)
                 self.assertNotIn("<span>已审核</span>", material_panel)
-                self.assertIn("<span>不适用</span><strong>1</strong>", material_panel)
-                self.assertIn(f"<span>完成度</span><strong>{round((completed / material_total) * 100)}%</strong>", material_panel)
+                self.assertIn('data-quick-filter="not_applicable" data-count="1"', material_panel)
                 self.assertIn("全部", material_panel)
                 self.assertIn("必交", material_panel)
                 self.assertIn("可选", material_panel)
                 self.assertIn("条件材料", material_panel)
-                self.assertIn("只看未完成材料", material_panel)
-                self.assertIn("只看必交未完成材料", material_panel)
-                self.assertIn("Notarial / 公证材料：", material_panel)
+                self.assertIn("全部未完成", material_panel)
+                self.assertIn("必交未完成", material_panel)
+                self.assertIn("Notarial / 公证材料", material_panel)
                 self.assertIn("已完成", material_panel)
                 self.assertIn("资金证明已收到", material_panel)
 
@@ -14677,7 +14682,7 @@ class CoreTests(unittest.TestCase):
                 handler.send_html = lambda html, *args, **kwargs: missing_capture.setdefault("html", html)
                 handler.query = {"material_filter": ["missing"]}
                 handler.student_visa_case_detail("GET", "260920", str(case_id))
-                missing_html = missing_capture["html"].split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0]
+                missing_html = visible_visa_material_items(missing_capture["html"].split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0])
                 self.assertIn("Personal Statement / 学生个人陈述", missing_html)
                 self.assertNotIn("Certificate of Deposit / 存款证明", missing_html)
                 self.assertNotIn("Birth Certificate / 出生公证", missing_html)
@@ -14686,7 +14691,7 @@ class CoreTests(unittest.TestCase):
                 handler.send_html = lambda html, *args, **kwargs: required_capture.setdefault("html", html)
                 handler.query = {"material_filter": ["required"]}
                 handler.student_visa_case_detail("GET", "260920", str(case_id))
-                required_html = required_capture["html"].split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0]
+                required_html = visible_visa_material_items(required_capture["html"].split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0])
                 self.assertIn("Certificate of Deposit / 存款证明", required_html)
                 self.assertNotIn("Form 1229 / 父母同意表", required_html)
 
@@ -14694,7 +14699,7 @@ class CoreTests(unittest.TestCase):
                 handler.send_html = lambda html, *args, **kwargs: unfinished_capture.setdefault("html", html)
                 handler.query = {"material_filter": ["unfinished"]}
                 handler.student_visa_case_detail("GET", "260920", str(case_id))
-                unfinished_html = unfinished_capture["html"].split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0]
+                unfinished_html = visible_visa_material_items(unfinished_capture["html"].split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0])
                 self.assertIn("Notarial Used Name / 曾用名公证", unfinished_html)
                 self.assertIn("Parents Statement / 父母声明", unfinished_html)
                 self.assertNotIn("Certificate of Deposit / 存款证明", unfinished_html)
@@ -14704,7 +14709,7 @@ class CoreTests(unittest.TestCase):
                 handler.send_html = lambda html, *args, **kwargs: required_unfinished_capture.setdefault("html", html)
                 handler.query = {"material_filter": ["required_unfinished"]}
                 handler.student_visa_case_detail("GET", "260920", str(case_id))
-                required_unfinished_html = required_unfinished_capture["html"].split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0]
+                required_unfinished_html = visible_visa_material_items(required_unfinished_capture["html"].split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0])
                 self.assertIn("Parents Statement / 父母声明", required_unfinished_html)
                 self.assertNotIn("Certificate of Deposit / 存款证明", required_unfinished_html)
                 self.assertNotIn("Form 1229 / 父母同意表", required_unfinished_html)
@@ -14801,9 +14806,9 @@ class CoreTests(unittest.TestCase):
                 material_panel = detail_html.split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0]
                 result_panel = detail_html.split('id="visa-tab-visa-result"', 1)[1].split('id="visa-tab-evidence-ai-review"', 1)[0]
                 self.assertIn("亲属陪读", detail_html)
-                self.assertIn(f"<span>总材料项</span><strong>{material_total}</strong>", material_panel)
-                self.assertIn(f"<span>未收到</span><strong>{material_total - 1}</strong>", material_panel)
-                self.assertIn("<span>已收到</span><strong>1</strong>", material_panel)
+                self.assertIn(f'data-quick-filter="all" data-count="{material_total}"', material_panel)
+                self.assertIn(f'data-quick-filter="unfinished" data-count="{material_total - 1}"', material_panel)
+                self.assertIn('data-quick-filter="uploaded" data-count="1"', material_panel)
                 self.assertNotIn("<span>需补充</span>", material_panel)
                 self.assertIn("Notarial No Criminal Record / 无犯罪公证", material_panel)
                 self.assertIn("Student Passport / 学生护照", material_panel)
@@ -14821,7 +14826,7 @@ class CoreTests(unittest.TestCase):
                 handler.send_html = lambda html, *args, **kwargs: missing_capture.setdefault("html", html)
                 handler.query = {"material_filter": ["missing"]}
                 handler.student_visa_case_detail("GET", "260921", str(case_id))
-                missing_html = missing_capture["html"].split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0]
+                missing_html = visible_visa_material_items(missing_capture["html"].split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0])
                 self.assertIn("GTE / 真实短暂停留陈述", missing_html)
                 self.assertNotIn("Notarial No Criminal Record / 无犯罪公证", missing_html)
                 material_html = detail_html.split('id="visa-tab-material-checklist"', 1)[1].split('id="visa-tab-visa-result"', 1)[0]
@@ -14940,18 +14945,18 @@ class CoreTests(unittest.TestCase):
                 handler.send_html = lambda html, *args, **kwargs: captured.setdefault("html", html)
                 handler.student_visa_case_detail("GET", "260930", str(case_one))
                 self.assertIn("未找到对应文件。可先到 Application / Offer / COE+OSHC 等来源模块上传，或使用 Smart Batch Upload / 智能批量上传补充。", captured["html"])
-                self.assertNotIn(f"/students/260930/visa-cases/{case_one}/material-items/{deposit_item['id']}/files", captured["html"])
+                self.assertIn(f"/students/260930/visa-cases/{case_one}/material-items/{deposit_item['id']}/files", captured["html"])
                 self.assertNotIn('class="visa-material-file-upload"', captured["html"])
                 self.assertIn("系统会从 Application / Offer / COE+OSHC / Homestay 等来源自动引用匹配文件；源文件仍保留在原模块。", captured["html"])
                 self.assertIn("data-preview-dialog", captured["html"])
 
-                handler.form = {"csrf": "csrf"}
+                handler.form = {"csrf": "csrf", "material_filter": "required_unfinished", "return_anchor": f"material-checklist-item-{deposit_item['id']}"}
                 handler.files = [
                     Upload("file", "bank-one.pdf", "application/pdf", b"%PDF-1.4\nbank-one"),
                     Upload("file", "bank-two.png", "image/png", b"\x89PNG\r\n\x1a\nbank-two"),
                 ]
                 handler.student_visa_case_material_file_upload("POST", "260930", str(case_one), str(deposit_item["id"]))
-                self.assertEqual(redirects[-1][0], f"/students/260930/visa-cases/{case_one}?visa_tab=material_checklist#material-checklist")
+                self.assertEqual(redirects[-1][0], f"/students/260930/visa-cases/{case_one}?visa_tab=material_checklist&material_filter=required_unfinished#material-checklist-item-{deposit_item['id']}")
 
                 link_columns = {row["name"] for row in db.all("PRAGMA table_info(visa_case_document_links)")}
                 link_document_expr = (
@@ -15010,7 +15015,6 @@ class CoreTests(unittest.TestCase):
                 self.assertIn("bank-two.png", detail_html)
                 self.assertIn("birth.pdf", detail_html)
                 self.assertIn("材料项：Certificate of Deposit / 存款证明", detail_html)
-                self.assertIn("文件类型：VisaMaterialChecklist", detail_html)
                 self.assertIn("文件大小：", detail_html)
                 self.assertIn("上传时间：", detail_html)
                 self.assertIn("data-preview-open", detail_html)

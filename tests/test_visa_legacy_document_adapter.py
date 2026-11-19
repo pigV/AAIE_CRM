@@ -98,6 +98,7 @@ class LegacyTests(unittest.TestCase):
   exec(compile(ast.Module(body=[node],type_ignores=[]),'actual-default-detail','exec'),env)
   class DetailBase:
    def student_visa_case_foundation_fields(this,case):return []
+   def student_visa_result_display(this,case):return dict(case).get('result_status','Pending')
   class Handler(VisaWorkspaceCandidateMixin,DetailBase):
    csrf='safe';user={};query={}
    student_visa_case_detail=env['student_visa_case_detail']

@@ -25,15 +25,23 @@ def document_edit_html(case_id, csrf, document):
     delete=_form(case_id,csrf,'archive-document',hidden+'<button class="danger" type="submit">Delete / 删除</button>')
     return badges+'<details class="visa-document-edit"><summary>Edit / 编辑</summary>'+_form(case_id,csrf,'edit-document',edit)+_form(case_id,csrf,'reclassify',hidden+'<button>Run automatic classification / 重新自动识别</button>')+evidence+delete+'</details>'
 
-def processing_dates_html(case_id, csrf, summary, documents):
+def processing_dates_html(case_id, csrf, summary, documents, *, compact=False):
     cards=''.join('<p>'+label+': <strong>'+('Pending' if summary.get(key) is None else str(summary[key])+' days')+'</strong></p>' for key,label in [('total_processing_days','Total Processing Days'),('medical_completed_to_grant_days','Medical Completed to Grant Days')])
     validation=''.join('<p role="alert">'+escape(str(v))+'</p>' for v in summary.get('validation',[]))
     fields=[]
     for key,label in FIELDS.items():
+        if compact:
+            label={'acknowledge_sent_on':'Acknowledge Sent On Date / 递交确认信发送日期',
+                   'health_exam_date':'Health Exam Date / 体检通知发送日期',
+                   'grant_sent_on':'Grant Sent On Date / 下签信发送日期',
+                   'medical_completed_date':'Medical Completed Date / 体检完成日期'}[key]
         state=summary.get('fields',{}).get(key,{})
         control=f'<label>{label}<input type="date" name="{key}" value="{escape(str(state.get("value") or ""),quote=True)}"></label>'
         fields.append(control)
-    return '<section class="panel" id="visa-processing-dates"><h2>Processing speed</h2><p>Calendar days. Grant Sent On is separate from Date of Grant. Medical Completed is entered by Staff.</p><p>Enter or correct the dates below. Health Exam Date is the Sent on date of the Health Examinations letter. Manual corrections are retained.</p>'+cards+validation+_form(case_id,csrf,'correct-processing-dates',''.join(fields)+'<button>Save processing dates</button>')+'</section>'
+    heading='处理日期 / Processing speed' if compact else 'Processing speed'
+    note=('Grant Sent On 是信件发送日期，与 Date of Grant 分开。体检完成日期由工作人员核对填写；更正保留审计。' if compact else 'Calendar days. Grant Sent On is separate from Date of Grant. Medical Completed is entered by Staff.')
+    help_text='' if compact else '<p>Enter or correct the dates below. Health Exam Date is the Sent on date of the Health Examinations letter. Manual corrections are retained.</p>'
+    return '<section class="panel" id="visa-processing-dates"><h2>'+heading+'</h2><p>'+note+'</p>'+help_text+cards+validation+_form(case_id,csrf,'correct-processing-dates',''.join(fields)+'<button>Save processing dates</button>')+'</section>'
 
 def keyword_rules_html(case_id, csrf, rules):
     from visa_document_metadata import CATEGORIES

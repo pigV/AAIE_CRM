@@ -1,6 +1,16 @@
 import unittest
 from pathlib import Path
 class WorkspaceTests(unittest.TestCase):
+    def test_embedded_independent_documents_keep_official_review_without_duplicate_result_controls(self):
+        import json
+        from visa_workspace_candidate import document_workspace_html
+        extractions=[{'id':1,'document_id':1,'document_label':'Grant letter','proposed_json':json.dumps({'document_kind':'grant','decision_date':'2026-11-19'})}]
+        html=document_workspace_html(7,'csrf',[],[],extractions,include_result_section=False)
+        self.assertIn('Confirm official Visa decision',html)
+        self.assertIn('id="visa-official-review"',html)
+        self.assertNotIn('Current Result',html)
+        self.assertNotIn('Correct Result',html)
+        self.assertNotIn('id="visa-result"',html)
     def test_workspace_has_separate_document_sections_and_business_result_controls(self):
         from visa_workspace_candidate import document_workspace_html
         result={'effective_result':'Granted','authority':'auto','auto_detected_result':'Granted','manual_override':False,'conflict':False,'history':[]}

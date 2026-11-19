@@ -10,6 +10,16 @@ class Controls(HTMLParser):
         if tag in ('input','select','button'):self.inputs.append(a)
 
 class ProcessingUI(unittest.TestCase):
+    def test_compact_dates_keep_original_fields_and_audit_action(self):
+        from visa_document_processing_ui import processing_dates_html
+        html=processing_dates_html(7,'csrf',{'fields':{},'total_processing_days':None,'medical_completed_to_grant_days':0,'validation':[]},[],compact=True)
+        controls=Controls(html)
+        self.assertEqual(len(controls.forms),1)
+        self.assertIn('Pending',html)
+        self.assertIn('0 days',html)
+        for name in ('acknowledge_sent_on','health_exam_date','grant_sent_on','medical_completed_date'):
+            self.assertTrue(any(x.get('name')==name for x in controls.inputs))
+        self.assertIn('value="correct-processing-dates"',html)
     def test_edit_targets_same_document_and_escapes_display_name(self):
         from visa_document_processing_ui import document_edit_html
         html=document_edit_html(1,'csrf',{'id':7,'archived_at':None,'display_name':'<script>evil</script>','effective_category':'salary','manual_override':True,'auto_category':'deposit'})

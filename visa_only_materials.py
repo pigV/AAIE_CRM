@@ -148,7 +148,13 @@ class VisaOnlyMaterialsMixin:
         except (OSError, sqlite3.Error):
             return self.error_page("材料确认失败，待确认文件仍保留，请重试。", 409)
 
-        location = self.visa_case_return_path("", case["id"], return_tab)
+        from visa_material_workspace_ui import material_upload_target
+        target = material_upload_target(
+            self.form, {}, self.visa_material_batch_available_items(case["id"]),
+        ) if form_value("target_material_item") else ""
+        prefix = {'material_checklist':'material-checklist', 'visa_result':'visa-result'}.get(return_tab)
+        anchor = f"{prefix}-item-{target}" if target and prefix else ""
+        location = self.visa_case_return_path("", case["id"], return_tab, anchor)
         return self.flash_redirect(location, f"成功挂载 {confirmed} 个文件。")
 
     def visa_only_material_confirm_item(self, connection, case, upload, item, manual_type):

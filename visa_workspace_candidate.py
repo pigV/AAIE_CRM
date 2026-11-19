@@ -13,7 +13,7 @@ from visa_only_materials import VisaOnlyMaterialsMixin
 AI_UNAVAILABLE_MESSAGE = 'AI-READY · AI is not enabled. Visa documents continue to use the approved deterministic workflow.'
 
 
-def document_workspace_html(case_id, csrf, documents, submissions, extractions, result=None, *, show_official_review=True, official_decision_confirmed=False):
+def document_workspace_html(case_id, csrf, documents, submissions, extractions, result=None, *, show_official_review=True, official_decision_confirmed=False, include_result_section=True, compact_result_controls=False):
     from visa_ai_candidate import provider_from_environment, VisaAIError
     try: ai_available = provider_from_environment() is not None
     except VisaAIError: ai_available = False
@@ -64,8 +64,13 @@ def document_workspace_html(case_id, csrf, documents, submissions, extractions, 
     current_result=str(result.get('effective_result') or 'Pending')
     result_options=''.join(f'<option'+(' selected' if item==current_result else '')+f'>{item}</option>' for item in ('Pending','Granted','Refused','Withdrawn'))
     correction=form('correct-result-status',f'<label>Correct Result<select name="result_status">{result_options}</select></label><label>Reason<input name="reason" required maxlength="500"></label><button>Save correction</button>')
+    if compact_result_controls:
+        correction='<details class="visa-result-correction"><summary>更正结果记录</summary>'+correction+'</details>'
     # Result events remain retained in the audit store; daily UI omits their history.
-    return '<section class="panel" id="visa-documents"><h2>Prepared / Case Documents</h2>'+form('upload','<label>Document Upload<input type="file" name="document" required accept=".pdf,.png,.jpg,.jpeg,.docx,.txt"></label><button>Upload prepared document</button>')+form('link','<label>Existing linked Student Document ID<input name="student_document_id" required inputmode="numeric"></label><button>Link existing physical file</button>')+'<div class="visa-document-grid">'+''.join(prepared)+'</div></section><section class="panel" id="immi-submitted"><h2>IMMI Submitted Documents</h2><p>Only these submitted versions enter Visa Submission Analysis. Prepared records and physical files are retained.</p>'+submitted+'</section><section class="panel" id="visa-result"><h2>Visa Result</h2>'+result_card+correction+'<div class="visa-result-documents">'+''.join(reviews)+'</div></section>'
+    prepared_html='<section class="panel" id="visa-documents"><h2>Prepared / Case Documents</h2>'+form('upload','<label>Document Upload<input type="file" name="document" required accept=".pdf,.png,.jpg,.jpeg,.docx,.txt"></label><button>Upload prepared document</button>')+form('link','<label>Existing linked Student Document ID<input name="student_document_id" required inputmode="numeric"></label><button>Link existing physical file</button>')+'<div class="visa-document-grid">'+''.join(prepared)+'</div></section><section class="panel" id="immi-submitted"><h2>IMMI Submitted Documents</h2><p>Only these submitted versions enter Visa Submission Analysis. Prepared records and physical files are retained.</p>'+submitted+'</section>'
+    if not include_result_section:
+        return prepared_html+'<section class="panel" id="visa-official-review"><h2>官方结果确认</h2>'+(''.join(reviews) or '<p>当前没有待确认的官方结果。收到下签或拒签信后，请先在签证结果文件分组上传并核对。</p>')+'</section>'
+    return prepared_html+'<section class="panel" id="visa-result"><h2>Visa Result</h2>'+result_card+correction+'<div class="visa-result-documents">'+''.join(reviews)+'</div></section>'
 
 
 def submitted_analysis_context(conn,case_id,read_text,ownership):
@@ -320,31 +325,51 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                 cache[cid]=case_projection(conn,cid,read_text=lambda d:self._visa_read_text(dict(case),d))
         return cache[cid]
 
-    def visa_processing_panel_html(self,case):
+    def visa_processing_panel_html(self,case,*,compact=False):
         db=self._visa_runtime()['db'];cid=int(case['id'])
         if not db.one("SELECT 1 FROM sqlite_master WHERE name='visa_processing_date_revisions'"):
             return '<section class="panel"><p>Visa processing dates require the approved migration.</p></section>'
         from visa_document_processing_ui import processing_dates_html
         projection=self._visa_display_projection(case)
         summary=projection['processing']
+        if compact:
+            from visa_result_workspace_ui import result_processing_display
+            summary=result_processing_display(summary,self.student_visa_result_display(case))
         with db.transaction() as conn:
             documents=[dict(r) for r in conn.execute('SELECT * FROM visa_case_documents WHERE visa_case_id=?',(cid,))]
         official=projection['official_decision']
         source=f'<a href="{escape(official["source_href"],quote=True)}">Review original official letter / retained record</a>' if official['source_href'] else ''
-        html='<section class="panel"><h2>Official Visa decision</h2><p>Date of Grant: '+escape(official['grant_date'] or 'No exact confirmed grant source')+'</p><p>Length of Stay: '+escape(official['length_of_stay'] or 'Not retained as a separate field; review original linked letter')+'</p><p>Visa expiry date: '+escape(official['expiry_date'] or 'Not retained')+'</p>'+source+'<p>Retained official values; separate from processing sent-on dates. Original notes remain in the Student VISA record.</p></section>'
-        html+=f'<p><a href="/visa-management/cases/{cid}/workspace#visa-result">Confirm official Visa decision</a></p>'
-        html+=processing_dates_html(cid,self.csrf,summary,documents)
-        html+=f'<form method="post" action="/visa-management/cases/{cid}/workspace"><input type="hidden" name="csrf" value="{escape(self.csrf,quote=True)}"><input type="hidden" name="action" value="correct-grant-date"><label>Date of Grant<input type="date" name="grant_date" value="{escape(projection["grant_date"],quote=True)}"></label><button>Save Date of Grant</button></form>'
+        grant=official['grant_date'] or ('尚未确认' if compact else 'No exact confirmed grant source')
+        stay=official['length_of_stay'] or ('请核对原始信件' if compact else 'Not retained as a separate field; review original linked letter')
+        expiry=official['expiry_date'] or ('尚未确认' if compact else 'Not retained')
+        note=('官方结果与信件发送日期分开记录。请以核对后的官方信件为准。' if compact else 'Retained official values; separate from processing sent-on dates. Original notes remain in the Student VISA record.')
+        html='<section class="panel"><h2>'+('官方签证结果 / ' if compact else '')+'Official Visa decision</h2><p>Date of Grant: '+escape(grant)+'</p><p>Length of Stay: '+escape(stay)+'</p><p>Visa expiry date: '+escape(expiry)+'</p>'+source+'<p>'+note+'</p></section>'
+        from visa_result_workspace_ui import official_review_url
+        html+=f'<p><a href="{escape(official_review_url(case),quote=True)}">Confirm official Visa decision</a></p>'
+        html+=processing_dates_html(cid,self.csrf,summary,documents,compact=compact)
+        grant_form=f'<form method="post" action="/visa-management/cases/{cid}/workspace"><input type="hidden" name="csrf" value="{escape(self.csrf,quote=True)}"><input type="hidden" name="action" value="correct-grant-date"><label>Date of Grant<input type="date" name="grant_date" value="{escape(projection["grant_date"],quote=True)}"></label><button>Save Date of Grant</button></form>'
+        html+=('<details class="visa-result-correction"><summary>更正 Date of Grant</summary>'+grant_form+'</details>') if compact else grant_form
         # The normal Case page shows business results and dates, without a
         # second document-analysis form. Explicit review stays in the workspace.
         result=None
         if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'"):
             from visa_result_status import result_summary
             with db.transaction() as conn:result=result_summary(conn,cid)
-        review_html=document_workspace_html(cid,self.csrf,[],[],[],result,show_official_review=False)
+        review_html=document_workspace_html(cid,self.csrf,[],[],[],result,show_official_review=False,compact_result_controls=compact)
         marker='<section class="panel" id="visa-result">'
         html+=marker+review_html.partition(marker)[2]
-        return html.replace('<input type="hidden" name="action"', '<input type="hidden" name="return_legacy" value="1"><input type="hidden" name="action"')
+        return_fields='<input type="hidden" name="return_legacy" value="1">'
+        if compact:return_fields+='<input type="hidden" name="return_result_ui" value="1">'
+        return html.replace('<input type="hidden" name="action"', return_fields+'<input type="hidden" name="action"')
+
+    def visa_result_workspace_html(self,case,materials,processing,lodgement='',case_documents=''):
+        from visa_result_workspace_ui import render_result_workspace
+        db=self._visa_runtime()['db']
+        result={'effective_result':self.student_visa_result_display(case)}
+        if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'"):
+            from visa_result_status import result_summary
+            with db.transaction() as connection:result=result_summary(connection,int(case['id']))
+        return render_result_workspace(dict(case),result,materials,processing,lodgement,case_documents)
 
     def visa_legacy_document_display_name(self,case_id,file):
         original=file['original_name'] or file['stored_name']
@@ -513,6 +538,9 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                     g['advance_workflow_stage_to'](case['student_id'],'签证下签或拒签')
                 if result_action and case['student_id']:
                     g['refresh_workflow_completion_metrics'](case['student_id'],source='visa_result_authority')
+                if value('return_result_ui') == '1':
+                    target=(f'/students/{quote(case["student_id"])}/visa-cases/{case_id}' if case['student_id'] else f'/visa-management/cases/{case_id}/workspace')
+                    return self.redirect(target+'?visa_tab=visa_result&message='+quote('签证信息已保存。')+'&kind=success#visa-result-dates')
                 if case['student_id'] and (action.startswith('legacy-') or value('return_legacy')=='1'):
                     return self.redirect(f'/students/{quote(case["student_id"])}/visa-cases/{case_id}?visa_tab=visa_result')
                 workspace = f'/visa-management/cases/{case_id}/workspace'
@@ -551,11 +579,13 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         official_decision_confirmed = bool(db.one(
             'SELECT 1 FROM visa_case_confirmed_decisions WHERE visa_case_id=?', (case_id,)
         ))
+        independent = not case['student_id'] and case['applicant_id']
         document_panel = document_workspace_html(
             case_id, self.csrf, documents, submitted, extractions, result,
             official_decision_confirmed=official_decision_confirmed,
+            include_result_section=not independent,
         )
-        if processing is not None:
+        if processing is not None and not independent:
             from visa_document_processing_ui import processing_dates_html, keyword_rules_html
             document_panel += processing_dates_html(case_id, self.csrf, processing, documents)
             document_panel += keyword_rules_html(case_id, self.csrf, rules)
@@ -602,25 +632,29 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
             title='Visa Result / S56 / 签证结果', show_filter_bar=False,
             form_id_suffix='-result', tab_key='visa_result',
         )
+        results = self.visa_result_workspace_html(case,results,self.visa_processing_panel_html(case,compact=True),case_documents=document_panel)
         sections = (
             ('info_collection', 'Info Collection', info),
             ('material_checklist', 'Material Checklist', materials),
-            ('visa_result', 'Visa Result', results + document_panel),
+            ('visa_result', 'Visa Result', results),
             ('evidence_ai_review', 'Evidence / AI Review', evidence),
         )
         tabs = ''.join(self.visa_case_tab_link('', case_id, key, active_tab, label) for key, label, _ in sections)
         panels = ''.join(self.visa_case_tab_panel(key, active_tab, content) for key, _, content in sections)
         message = (query.get('message') or [''])[0]
         notice = f'<p class="notice" role="status">{escape(message)}</p>' if message else ''
+        overview = f'<dl class="visa-management-detail-grid">{cards}</dl>'
+        if active_tab in {'material_checklist','visa_result'}:
+            overview = f'<details class="visa-material-case-details"><summary>展开案件详情</summary>{overview}</details>'
         return self._visa_send('Visa Case Workspace', f"""
-            <div class="visa-management-page">{notice}
+            <div class="visa-management-page{' visa-material-case-page' if active_tab in {'material_checklist','visa_result'} else ''}">{notice}
               <section class="panel visa-management-hero">
                 <div><h2>Visa Case #{case_id} · {name}</h2><p>Visa-only Applicant / 独立签证申请人</p></div>
                 <a class="secondary button-link" href="/visa-management">返回 Visa Management</a>
               </section>
               <section class="panel visa-management-detail-panel" id="case-overview">
                 <div class="panel-head"><h2>Case Overview / 案件概览</h2></div>
-                <dl class="visa-management-detail-grid">{cards}</dl>
+                {overview}
               </section>
               <nav class="visa-case-section-nav visa-case-tabs" aria-label="Visa Case tabs">{tabs}</nav>
               <section class="visa-case-tab-content" data-visa-active-tab="{escape(active_tab)}">{panels}</section>

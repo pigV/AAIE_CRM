@@ -68177,6 +68177,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             </form>
           </div>
         </section>"""
+        if tab_key == "visa_result" and category_filter == "Visa Result / S56":
+            from visa_result_workspace_ui import render_result_materials
+            return render_result_materials(self, student_id, case, initialized_rows)
+        if tab_key == "material_checklist" and not category_filter and panel_id == "material-checklist":
+            from visa_material_workspace_ui import render_material_workspace
+            return render_material_workspace(
+                self, student_id, case, initialized_rows, panel_id=panel_id,
+                title=title, description=description, show_smart_batch=show_smart_batch,
+            )
         active_filter = self.visa_material_current_filter() if show_filter_bar else "all"
         filter_bar = self.visa_material_filter_bar_html(student_id, case["id"], active_filter, tab_key) if show_filter_bar else ""
         display_rows = [row for row in initialized_rows if self.visa_material_matches_filter(row, active_filter)]
@@ -69007,14 +69016,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             for label, value in self.student_visa_case_foundation_fields(case)
         )
         active_tab = self.visa_case_active_tab()
-        processing_panel = self.visa_processing_panel_html(case)
+        processing_panel = self.visa_processing_panel_html(case, compact=True)
         applicant_information_collection = self.visa_information_collection_html(student_id, case)
         material_checklist = self.visa_material_checklist_html(
             student_id,
             case,
             exclude_categories=("Visa Result / S56", "Declaration", "Visa Information Form"),
         )
-        visa_result = self.visa_application_submitted_html(student_id, case) + self.visa_material_checklist_html(
+        visa_result = self.visa_material_checklist_html(
             student_id,
             case,
             category_filter="Visa Result / S56",
@@ -69026,6 +69035,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             form_id_suffix="-result",
             tab_key="visa_result",
         )
+        visa_result = self.visa_result_workspace_html(case, visa_result, processing_panel, self.visa_application_submitted_html(student_id, case))
         evidence_ai_review_content = self.visa_evidence_ai_review_content_html(
             student_id,
             case,
@@ -69051,13 +69061,21 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         student_name = f'{student["passport_first_name"] or ""} {student["passport_last_name"] or ""}'.strip() or student_id
         zip_export_url = f"/students/{quote(student_id)}/visa-cases/{case['id']}/materials-zip"
+        material_mode = active_tab in {"material_checklist", "visa_result"}
+        overview_fields = f'<a class="button-link" href="/visa-management/cases/{case["id"]}/workspace">Prepared / IMMI Submitted / Staff Confirm</a><dl class="visa-management-detail-grid">{field_cards}</dl>'
+        if material_mode:
+            overview_fields = f'<details class="visa-material-case-details"><summary>展开案件详情与更多操作</summary>{overview_fields}</details>'
+        processing_entry = (f'<a class="visa-material-case-details" href="{esc(self.visa_case_return_path(student_id, case["id"], "visa_result", "visa-result-dates"))}">查看签证日期与处理信息</a>' if active_tab == "material_checklist" else "")
+        hero_title = f'{student_name} · {student_id}' if material_mode else "Visa Case 基础信息"
+        hero_description = (f'{case["visa_type"] or ""} · {case["case_owner"] or "未分配负责人"} · {case["status"]}' if material_mode
+                            else f'{student_name} · {student_id}。本页按工作区分为 Info Collection、Material Checklist、Visa Result 和 Evidence / AI Review。')
         body = f"""
-        <div class="visa-management-page">
+        <div class="visa-management-page{' visa-material-case-page' if material_mode else ''}">
           <section class="panel visa-management-hero">
             <div>
               <span class="eyebrow">Visa Case Detail</span>
-              <h2>Visa Case 基础信息</h2>
-              <p>{esc(student_name)} · {esc(student_id)}。本页按工作区分为 Info Collection、Material Checklist、Visa Result 和 Evidence / AI Review。</p>
+              <h2>{esc(hero_title)}</h2>
+              <p>{esc(hero_description)}</p>
             </div>
             <div class="row-actions"><a class="secondary button-link" href="/students/{quote(student_id)}/visa-cases">返回列表</a><a class="secondary button-link" href="/students/{quote(student_id)}">学生详情</a></div>
           </section>
@@ -69066,9 +69084,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <div><h2>Case Overview / 案件概览</h2><p>当前 Visa Case 的核心资料，用于后续材料和证据信息管理。</p></div>
               <div class="row-actions"><a class="primary button-link" href="{esc(zip_export_url)}">打包下载签证材料 ZIP</a></div>
             </div>
-            <a class="button-link" href="/visa-management/cases/{case['id']}/workspace">Prepared / IMMI Submitted / Staff Confirm</a><dl class="visa-management-detail-grid">{field_cards}</dl>
+            {overview_fields}
           </section>
-          {processing_panel}
+          {processing_entry}
           <nav class="visa-case-section-nav visa-case-tabs" aria-label="Visa Case tabs">{tabs}</nav>
           <section class="visa-case-tab-content" data-visa-active-tab="{esc(active_tab)}">{tab_panels}</section>
         </div>
@@ -69328,13 +69346,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return "".join(options)
 
     def visa_material_batch_review_html(self, student_id, case, documents, *, selected_items=None):
+        from visa_material_workspace_ui import material_upload_target
+        requested_tab = form_text_value(getattr(self, 'form', {}) or {}, 'return_tab') or self.visa_case_active_tab()
+        return_tab = 'visa_result' if requested_tab == 'visa_result' else 'material_checklist'
+        return_label = 'Visa Result' if return_tab == 'visa_result' else 'Material Checklist'
         available_items = self.visa_material_batch_available_items(case["id"])
+        target_item = material_upload_target(getattr(self, "form", {}) or {}, getattr(self, "query", {}) or {}, available_items)
         rows = []
         for doc in documents:
             suggestion = self._visa_batch_suggestion(case, doc, available_items)
             suggested_label = suggestion.get("chinese_label") or "Unmatched / 待确认"
             selected_id = suggestion.get("item_id") if suggestion["confidence"] in {"High", "Medium"} else ""
-            selected_id = (selected_items or {}).get(doc["id"], selected_id)
+            selected_id = (selected_items or {}).get(doc["id"], target_item or selected_id)
             rows.append(f"""
               <tr class="visa-material-batch-review-row">
                 <td class="visa-material-batch-review-file"><strong>{esc(doc['original_name'])}</strong><input type="hidden" name="document_ids" value="{esc(doc['id'])}"></td>
@@ -69349,13 +69372,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         <div class="visa-management-page visa-material-batch-review-page">
           <section class="panel visa-management-hero visa-material-batch-header">
             <div><span class="eyebrow">Review / 确认页面</span><h2>文件已上传，正在确认材料归类</h2><p>系统建议仅用于辅助判断。请为每个文件确认最终材料项；留空跳过的文件仍会保留为 pending，不会显示到正式 Material Checklist。</p></div>
-            <div class="row-actions visa-material-batch-actions"><a class="secondary button-link" href="{esc(self.visa_case_return_path(student_id, case['id'], 'material_checklist', 'material-checklist'))}">返回 Material Checklist</a></div>
+            <div class="row-actions visa-material-batch-actions"><a class="secondary button-link" href="{esc(self.visa_case_return_path(student_id, case['id'], return_tab))}">返回 {return_label}</a></div>
           </section>
           <section class="panel visa-material-batch-review-panel">
             <div class="visa-material-batch-review-summary"><strong>{len(documents)} 个文件等待确认</strong><span>系统建议不是最终结果，请检查 Final Item / 最终选择。</span></div>
             <form class="visa-material-batch-review-form" method="post" action="/students/{quote(student_id)}/visa-cases/{case['id']}/material-batch-upload/confirm">
               <input type="hidden" name="csrf" value="{esc(self.csrf)}">
-              <input type="hidden" name="return_tab" value="{esc(form_text_value(getattr(self, 'form', {}) or {}, 'return_tab') or self.visa_case_active_tab())}">
+              <input type="hidden" name="target_material_item" value="{esc(target_item)}">
+              <input type="hidden" name="return_tab" value="{esc(return_tab)}">
               <div class="table-wrap visa-material-batch-review-table"><table><thead><tr><th>File Name / 文件名</th><th>Suggested Item / 系统建议材料项</th><th>Chinese Label / 中文名称</th><th>Confidence / 置信度</th><th>Match Reason / 匹配原因</th><th>Final Item / 最终选择</th><th>Action / 操作</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
               <div class="dialog-actions visa-material-batch-review-actions"><span>留空的文件将保持 pending。</span><button class="primary" type="submit">Confirm Upload / 确认上传</button></div>
             </form>
@@ -69364,24 +69388,34 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         {preview_dialog_html()}"""
 
     def visa_material_batch_upload_page_html(self, student_id, case):
+        from visa_material_workspace_ui import material_upload_target
+        requested_tab = form_text_value(getattr(self, 'form', {}) or {}, 'return_tab') or self.visa_case_active_tab()
+        return_tab = 'visa_result' if requested_tab == 'visa_result' else 'material_checklist'
+        return_label = 'Visa Result' if return_tab == 'visa_result' else 'Material Checklist'
+        available_items = self.visa_material_batch_available_items(case["id"])
+        target_item = material_upload_target(getattr(self, "form", {}) or {}, getattr(self, "query", {}) or {}, available_items)
+        target = next((item for item in available_items if str(item["id"]) == target_item), None)
+        target_notice = f'<p role="status">上传目标：{esc(self.visa_material_item_title(target))}。上传后仍需核对最终材料项。</p>' if target else ""
         return f"""
         <div class="visa-management-page visa-material-batch-upload-page">
           <section class="panel visa-management-hero visa-material-batch-header">
             <div>
-              <span class="eyebrow">Material Checklist</span>
+              <span class="eyebrow">{return_label}</span>
               <h2>Visa Case 批量材料上传</h2>
               <p>一次上传多个文件，系统会根据文件名建议对应材料项，再由人工确认最终归类。</p>
             </div>
-            <div class="row-actions visa-material-batch-actions"><a class="secondary button-link" href="{esc(self.visa_case_return_path(student_id, case['id'], 'material_checklist', 'material-checklist'))}">返回 Material Checklist</a></div>
+            <div class="row-actions visa-material-batch-actions"><a class="secondary button-link" href="{esc(self.visa_case_return_path(student_id, case['id'], return_tab))}">返回 {return_label}</a></div>
           </section>
           <section class="panel visa-material-batch-upload-panel">
+            {target_notice}
             <div class="visa-material-batch-notice">
               <strong>上传即保存</strong>
               <p>点击上传后，文件会立即保存并创建 pending 文档，随后进入材料匹配确认。未选择材料项的文件仍会保留为 pending。</p>
             </div>
             <form class="upload-box visa-material-batch-upload-form" method="post" enctype="multipart/form-data" action="/students/{quote(student_id)}/visa-cases/{case['id']}/material-batch-upload">
               <input type="hidden" name="csrf" value="{esc(self.csrf)}">
-              <input type="hidden" name="return_tab" value="{esc(form_text_value(getattr(self, 'form', {}) or {}, 'return_tab') or self.visa_case_active_tab())}">
+              <input type="hidden" name="target_material_item" value="{esc(target_item)}">
+              <input type="hidden" name="return_tab" value="{esc(return_tab)}">
               <label class="visa-material-batch-file-input"><span>选择批量材料文件</span><input type="file" name="files" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.heic" multiple required></label>
               <div class="visa-material-batch-format-help"><strong>支持格式</strong><span>PDF、DOC、DOCX、JPG、JPEG、PNG、HEIC</span><small>250MB 为整个请求的总限制，不是单个文件限制。</small></div>
               <button class="primary" type="submit">上传并进入 Review / 确认页面</button>
@@ -69688,7 +69722,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             self.form, self.files = form, files
         uploads = [upload for upload in files if upload.field_name in {"file", "files"} and upload.filename]
         if not uploads:
-            target_tab = "visa_result" if self.visa_material_record_value(item, "category") == "Visa Result / S56" else "material_checklist"
+            target_tab = "visa_result" if self.visa_material_saved_item_category(case, item) == "Visa Result / S56" else "material_checklist"
             return self.flash_redirect(self.visa_case_return_path(student_id, case_id, target_tab), "请选择要上传的文件。", "error")
         student = self.student_detail_row(student_id)
         folder = self.visa_material_file_folder(student, case_id, item_id)
@@ -69741,8 +69775,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             db.audit(self.user, "visa_material_file_uploaded", "visa_management", item_id, file_path=str(folder), new_value=f"{saved_count} file(s)", student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"))
         except Exception:
             pass
-        target_tab = "visa_result" if self.visa_material_record_value(item, "category") == "Visa Result / S56" else "material_checklist"
-        return self.flash_redirect(self.visa_case_return_path(student_id, case_id, target_tab), f"已上传 {saved_count} 个材料文件。"+"; ".join(skipped), "success" if saved_count else "error")
+        target_tab = "visa_result" if self.visa_material_saved_item_category(case, item) == "Visa Result / S56" else "material_checklist"
+        expected_anchor = ("material-checklist" if target_tab == "material_checklist" else "visa-result") + f"-item-{int(item_id)}"
+        return_anchor = expected_anchor if form_text_value(form, "return_anchor") == expected_anchor else ""
+        material_filter = form_text_value(form, "material_filter")
+        if material_filter not in {key for key, _label in self.visa_material_filter_options()}:
+            material_filter = ""
+        return self.flash_redirect(self.visa_case_return_path(student_id, case_id, target_tab, return_anchor, material_filter), f"已上传 {saved_count} 个材料文件。"+"; ".join(skipped), "success" if saved_count else "error")
 
     def student_visa_case_material_file_download(self, method, student_id, case_id, item_id, document_id):
         if method != "GET":

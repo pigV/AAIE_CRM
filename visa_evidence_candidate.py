@@ -114,6 +114,8 @@ class VisaEvidenceCandidateMixin:
 
     def visa_material_checklist_html(self, *args, **kwargs):
         html = super().visa_material_checklist_html(*args, **kwargs)
+        if 'data-visa-material-workspace' in html:
+            return html
         if 'visa-material-row' not in html:
             return html
         return html.replace('<div class="panel-head">', checklist_search_html(kwargs.get('panel_id', 'material-checklist')) + '<div class="panel-head">', 1)

@@ -1,0 +1,140 @@
+/* Only the initialized Material Checklist opts in. Result/evidence panels retain their styles. */
+.visa-management-page .visa-material-workspace {
+  --material-blue: #255ca7;
+  --material-blue-soft: #edf4ff;
+  --material-amber: #855006;
+  --material-amber-soft: #fff7e7;
+  --material-green: #256441;
+  --material-green-soft: #edf7f0;
+  min-width: 0;
+  display: block;
+  gap: 14px;
+}
+.visa-material-workspace > * + * { margin-top: 14px; }
+.visa-material-workspace > [data-material-save] { display: none; }
+.visa-material-workspace [hidden] { display: none !important; }
+.visa-material-workspace :is(button, a, input, select, textarea, summary):focus-visible {
+  outline: 3px solid var(--material-blue);
+  outline-offset: 3px;
+}
+.visa-material-workspace .visa-material-quick-filters {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+.visa-material-workspace .visa-material-quick-filter {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  align-items: center;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--foreground);
+  background: var(--card);
+  text-decoration: none;
+}
+.visa-material-workspace .visa-material-quick-filter strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.visa-material-workspace .visa-material-quick-filter[data-quick-filter="required_unfinished"] { background: var(--material-amber-soft); color: var(--material-amber); }
+.visa-material-workspace .visa-material-quick-filter[aria-current="true"] { outline: 2px solid var(--material-blue); outline-offset: -2px; }
+.visa-material-workspace .visa-material-workspace-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+  padding: 12px 0;
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+}
+.visa-material-workspace .visa-material-workspace-toolbar label { display: grid; gap: 5px; min-width: 0; }
+.visa-material-workspace .visa-material-workspace-toolbar .visa-material-search-label { flex: 1 1 240px; }
+.visa-material-workspace .visa-material-workspace-toolbar input { width: 100%; }
+.visa-material-workspace .visa-material-workspace-body { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 16px; }
+.visa-material-workspace .visa-material-category-nav { display: grid; gap: 6px; align-self: start; position: sticky; top: 112px; max-height: calc(100dvh - 210px); overflow-y: auto; padding: 3px; }
+.visa-material-workspace .visa-material-category-mobile { display: none; }
+.visa-material-workspace .visa-material-category-nav button { display: flex; align-items: center; justify-content: space-between; gap: 8px; text-align: left; min-width: 0; white-space: normal; }
+.visa-material-workspace .visa-material-category-nav small { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.visa-material-workspace .visa-material-category-nav [aria-pressed="true"] { background: var(--material-blue-soft); color: var(--material-blue); border-color: var(--material-blue); }
+.visa-material-workspace .visa-material-workspace-list { min-width: 0; }
+.visa-material-workspace .visa-material-search-count { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+.visa-management-page .visa-material-workspace .visa-material-category { margin: 0 0 14px; }
+.visa-management-page .visa-material-workspace .visa-material-category-head { padding: 10px 12px; }
+.visa-management-page .visa-material-workspace .visa-material-compact-row {
+  display: block;
+  border-left: 3px solid transparent;
+  padding: 12px;
+  scroll-margin-top: 120px;
+  background: var(--card);
+}
+.visa-material-workspace .visa-material-compact-row[data-status="missing"] { border-left-color: var(--material-amber); background: var(--material-amber-soft); }
+.visa-material-workspace .visa-material-compact-row[data-status="uploaded"] .visa-material-item-status select { border-color: var(--material-green); color: var(--material-green); background: var(--material-green-soft); }
+.visa-material-workspace .visa-material-compact-row[data-status="not_applicable"] { background: var(--surface); }
+.visa-material-workspace .visa-material-compact-row.is-dirty { border-left-color: var(--material-blue); background: var(--material-blue-soft); }
+.visa-material-workspace .visa-material-item-main { display: grid; grid-template-columns: minmax(0,1fr) 130px auto; align-items: center; gap: 12px; }
+.visa-material-workspace .visa-material-item-name { display: block; overflow-wrap: anywhere; font-size: 14px; }
+.visa-material-workspace .visa-material-item-meta { display: flex; gap: 7px 12px; flex-wrap: wrap; margin-top: 5px; color: var(--muted); font-size: 12px; }
+.visa-material-workspace [data-required="required"] .visa-material-requirement { color: var(--material-amber); font-weight: 700; }
+.visa-material-workspace .visa-material-item-status { display: grid; gap: 4px; min-width: 0; font-size: 12px; }
+.visa-material-workspace .visa-material-item-status select { width: 100%; }
+.visa-material-workspace .visa-material-item-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.visa-material-workspace .visa-material-item-details { margin-top: 10px; }
+.visa-material-workspace .visa-material-item-details > summary { font-size: 12px; color: var(--material-blue); padding: 4px 0; }
+.visa-material-workspace .visa-material-item-detail-content { display: grid; gap: 12px; margin-top: 12px; }
+.visa-material-workspace .visa-material-item-detail-content > label { display: grid; gap: 5px; }
+.visa-material-workspace .visa-material-item-detail-content textarea { width: 100%; }
+.visa-material-workspace .visa-material-item-detail-content .visa-material-file-info { overflow-wrap: anywhere; }
+.visa-material-workspace .visa-material-upload { margin-top: 8px; }
+.visa-material-workspace .visa-material-upload > summary { color: var(--material-blue); padding: 5px 0; font-weight: 700; }
+.visa-material-workspace .visa-material-upload form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 10px 0; }
+.visa-material-workspace .visa-material-upload label { display: grid; gap: 5px; flex: 1 1 200px; min-width: 0; }
+.visa-material-workspace .visa-material-upload input { width: 100%; min-width: 0; }
+.visa-material-workspace .visa-material-workspace-save { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 12px; border: 1px solid var(--border); background: var(--card); border-radius: 7px; position: sticky; bottom: 76px; z-index: 5; }
+.visa-material-workspace .visa-material-workspace-save:has(button:not(:disabled)) { border-color: var(--material-blue); }
+.visa-material-workspace .visa-material-workspace-legend { color: var(--muted); font-size: 12px; margin: 0; }
+.visa-material-workspace mark { color: var(--material-amber); background: #ffe6a3; }
+.visa-material-workspace .visa-material-compact-row.is-located { outline: 2px solid var(--material-blue); outline-offset: -2px; }
+.visa-material-workspace .visa-material-recent { color: var(--material-blue); font-weight: 700; }
+.visa-management-page.visa-material-case-page:has(> #case-overview):has(> .visa-case-tabs) > .visa-management-hero { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px 18px; }
+.visa-management-page.visa-material-case-page:has(> #case-overview):has(> .visa-case-tabs) > .visa-management-hero > div:first-child { flex: 1 1 260px; min-width: 0; }
+.visa-management-page.visa-material-case-page:has(> #case-overview):has(> .visa-case-tabs) > .visa-management-hero .row-actions { display: flex; flex: 0 1 auto; min-width: 0; flex-wrap: wrap; }
+.visa-management-page.visa-material-case-page:has(> #case-overview):has(> .visa-case-tabs) > .visa-management-hero .eyebrow { display: none; }
+.visa-management-page.visa-material-case-page:has(> #case-overview):has(> .visa-case-tabs) > #case-overview { padding: 12px 18px; }
+.visa-material-case-page .visa-material-case-details > summary { color: var(--accent); padding: 5px 0; }
+.visa-material-case-page .visa-material-case-details > :not(summary) { margin-top: 12px; }
+.visa-material-case-page .visa-case-tabs { position: sticky; top: 0; z-index: 6; }
+.visa-material-case-page .visa-material-workspace-toolbar { top: 58px; }
+.visa-material-case-page .visa-material-category-nav { top: 172px; }
+@media (max-width: 760px) {
+  .visa-material-case-page .visa-case-tabs { position: static; }
+  .visa-management-page.visa-material-case-page:has(> #case-overview):has(> .visa-case-tabs) > #case-overview > .panel-head { flex-wrap: wrap; }
+}
+@media (max-width: 1150px) {
+  .visa-material-workspace .visa-material-item-main { grid-template-columns: minmax(0, 1fr) 130px; }
+  .visa-material-workspace .visa-material-item-actions { grid-column: 1 / -1; }
+}
+@media (max-width: 760px) {
+  .visa-material-workspace .visa-material-quick-filters { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .visa-material-workspace .visa-material-workspace-body { grid-template-columns: minmax(0,1fr); }
+  .visa-material-workspace .visa-material-category-nav { display: none; }
+  .visa-material-workspace .visa-material-category-mobile { display: grid; gap: 5px; }
+  .visa-material-workspace .visa-material-category-mobile select { width: 100%; min-width: 0; }
+  .visa-material-workspace .visa-material-workspace-toolbar { position: static; }
+  .visa-material-workspace .visa-material-workspace-save { bottom: 76px; }
+  .visa-material-workspace .visa-material-item-detail-content .visa-material-file-row { display: flex; flex-wrap: wrap; min-width: 0; }
+  .visa-material-workspace .visa-material-item-detail-content .visa-material-file-info { flex: 1 1 150px; min-width: 0; }
+}
+@media (max-width: 380px) {
+  .visa-material-workspace .visa-material-item-main { grid-template-columns: minmax(0,1fr); }
+  .visa-material-workspace .visa-material-item-status { width: 100%; }
+}
+@media (pointer: coarse) {
+  .visa-material-workspace :is(button, select, input, summary, .button-link, .visa-material-quick-filter) { min-height: 44px; }
+  .visa-material-workspace :is(input, select, textarea) { font-size: 16px; }
+}
+@media (prefers-color-scheme: dark) {
+  [data-theme="dark"] .visa-material-workspace { --material-blue: #a8caff; --material-blue-soft: #213754; --material-amber: #f0cb83; --material-amber-soft: #342c1d; --material-green: #9ddcb6; --material-green-soft: #21392b; }
+}
