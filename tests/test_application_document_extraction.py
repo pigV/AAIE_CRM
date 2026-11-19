@@ -51,6 +51,42 @@ class ApplicationExtractionTests(unittest.TestCase):
                 language + '\nSchool:\nEast Doncaster Secondary College\nAddress:\n'
                 '20 George Street\nYear Level:\n10\nAccommodation and Welfare Option\n')
 
+    def test_acknowledge_hsp_uses_issue_date_not_dob_and_total_deposit(self):
+        text = ('Student LeƩer of Oﬀer and Student Acceptance Agreement\n'
+                'Oﬀer/Student ID: 95833 DOB: 11/09/2011 Date of Issue: 03/08/2026\n'
+                'Acknowledge Education Pty Ltd, trading as Melbourne Language Centre\n'
+                'CRICOS Code Course Name Mode of Study Start Date End Date\n'
+                '080627B HSP English for Secondary Schools C 31/08/2026 25/09/2026 Melbourne 4 Week $1,700.00\n'
+                'Total TuiƟon Fees $1,700.00\n'
+                'Deposit required to conﬁrm acceptance $2,280.00\n')
+        details = self.ns['infer_offer_details'](upload(text))
+        self.assertEqual(details['school_name'], 'Melbourne Language Centre')
+        self.assertEqual(details['offer_date'], '2026-08-03')
+        self.assertEqual(details['course_start_date'], '2026-08-31')
+        self.assertEqual(float(details['deposit_amount']), 2280)
+        self.assertEqual(details['school_student_number'], '95833')
+
+    def test_acknowledge_hsp_does_not_guess_missing_or_conflicting_fields(self):
+        parse = self.ns['infer_acknowledge_hsp_offer_details']
+        self.assertIsNone(parse('Melbourne Language Centre DOB: 11/09/2011'))
+        text = ('Acknowledge Education Pty Ltd trading as Melbourne Language Centre\n'
+                'Offer/Student ID: 95833 DOB: 11/09/2011\n'
+                '080627B HSP English for Secondary Schools C 31/08/2026\n'
+                '080627B HSP English for Secondary Schools C 07/09/2026\n'
+                'Deposit required to confirm acceptance $2,280.00\n'
+                'Deposit required to confirm acceptance $2,500.00\n')
+        details = parse(text)
+        self.assertEqual(details['offer_date'], '')
+        self.assertEqual(details['course_start_date'], '')
+        self.assertEqual(details['deposit_amount'], '')
+
+    def test_acknowledge_hsp_requires_both_course_dates_in_valid_order(self):
+        parse = self.ns['infer_acknowledge_hsp_offer_details']
+        header = 'Acknowledge Education Pty Ltd trading as Melbourne Language Centre\n'
+        for dates in ('25/09/2026', '25/09/2026 31/08/2026', '31/02/2026 25/09/2026'):
+            details = parse(header + '080627B HSP English for Secondary Schools C ' + dates)
+            self.assertEqual(details['course_start_date'], '')
+
     def test_nsw_offer_uses_language_program_and_its_start_date(self):
         text = (
             "COURSE DETAILS\n"
@@ -63,6 +99,56 @@ class ApplicationExtractionTests(unittest.TestCase):
         details = self.ns["infer_nsw_public_offer_details"](upload(text), text, text.splitlines())
         self.assertEqual(details.get("language_school_name"), "Central Sydney Intensive English High School")
         self.assertEqual(details.get("course_start_date"), "2026-07-21")
+
+    def test_nsw_program_location_preserves_iec_and_full_main_school_name(self):
+        parse = self.ns['nsw_coe_cover_letter_school_name']
+        self.assertEqual(parse('High School Preparation Delivered through the High School Curriculum at IEC Marrickville\nNorthcote Street\nMarrickville NSW 2204'), 'IEC Marrickville')
+        self.assertEqual(parse('Dulwich High School of Visual Arts and Design - Year 8 to 10\nSeaview St\nDulwich Hill NSW 2203'), 'Dulwich High School of Visual Arts and Design')
+        self.assertEqual(parse('High School Preparation Delivered through the High School Curriculum at Central Sydney Intensive\nEnglish High School\n57-77 Mitchell Road'), 'Central Sydney Intensive English High School')
+
+    def test_nsw_ocr_language_value_precedes_split_program_label(self):
+        text = ('COURSE DETAILS\nCRICOS course Junior Secondary (Years 7 to 10)\n'
+                'High School Preparation Delivered through the High School Curriculum at IEC Marrickville\n'
+                'Program name Northcote Street\nand location\nMarrickville NSW 2204\n'
+                'Start date 03-Feb-2027 Finish date 02-Jul-2027 Term(s) 2\n'
+                'Program name Dulwich High School of Visual Arts and Design - Year 8 to 10\n'
+                'and location Seaview St\nDulwich Hill NSW 2203\n'
+                'Start date 20-Jul-2027 Finish date 18-Dec-2029 Term(s) 10\n')
+        details = self.ns['infer_nsw_public_offer_details'](upload(text), text, text.splitlines())
+        self.assertEqual(details['language_school_name'], 'IEC Marrickville')
+        self.assertEqual(details['school_name'], 'Dulwich High School of Visual Arts and Design')
+        self.assertEqual(details['course_start_date'], '2027-02-03')
+
+    def test_nsw_document_name_survives_abbreviated_catalogue_match(self):
+        class Catalogue:
+            def all(self, query):
+                return [{'school_name': 'Dulwich High School'}]
+        from difflib import SequenceMatcher
+        with patch.dict(self.ns, db=Catalogue(), SequenceMatcher=SequenceMatcher):
+            name, score, status = self.ns['nsw_offer_school_name']([
+                {'type': 'main', 'school': 'Dulwich High School of Visual Arts and Design'}
+            ])
+        self.assertEqual(name, 'Dulwich High School of Visual Arts and Design')
+        self.assertEqual(status, 'Needs Review')
+
+    def test_nsw_same_line_address_does_not_become_part_of_school_name(self):
+        parse = self.ns['nsw_coe_cover_letter_school_name']
+        self.assertEqual(parse('Mosman High School Avenue Road Mosman NSW 2088'), 'Mosman High School')
+        self.assertEqual(parse('Dulwich High School of Visual Arts and Design'),
+                         'Dulwich High School of Visual Arts and Design')
+
+    def test_nsw_ocr_program_values_on_first_label_line(self):
+        text = ('NSW Department of Education\nCOURSE DETAILS\n'
+                'Program name High School Preparation Delivered through the High School Curriculum at IEC Marrickville\n'
+                'Northcote Street\nand location\nMarrickville NSW 2204\n'
+                'Start date 03-Feb-2027 Finish date 02-Jul-2027 Term(s) 2\n'
+                'Program name Dulwich High School of Visual Arts and Design - Year 8 to 10\n'
+                'and location Seaview St\nDulwich Hill NSW 2203\n'
+                'Start date 20-Jul-2027 Finish date 18-Dec-2029 Term(s) 10\n')
+        details = self.ns['infer_offer_details'](upload(text))
+        self.assertEqual(details['school_name'], 'Dulwich High School of Visual Arts and Design')
+        self.assertEqual(details['language_school_name'], 'IEC Marrickville')
+        self.assertEqual(details['course_start_date'], '2027-02-03')
 
     def test_victorian_offer_reads_course_dates_range(self):
         text = self.offer("Not applicable").replace(
@@ -275,6 +361,26 @@ Date: 11/03/2026'''
         self.assertTrue(meta['ocr_fallback_used'])
         self.assertEqual(meta['text_layer_pages'], 1)
         self.assertEqual(meta['unread_pages'], 0)
+
+    def test_mixed_signed_pdf_rejects_garbled_course_page_and_cid_fallback(self):
+        u = upload(b'%PDF fixture', 'signed-offer.pdf', 'application/pdf')
+        garbled = ('\x03&2856( \x03 ABcd \x04 XYzt ' * 80)
+        readable = 'Student signature Anyang Zhao Date 17/08/2026\nParent signature Date 17/08/2026'
+        recovered = 'COURSE DETAILS\nProgram name and location IEC Marrickville\nStart date 03-Feb-2027 Finish date 02-Jul-2027'
+        calls = []
+        def ocr(data, indexes, diagnostics=None):
+            calls.append(indexes)
+            return {0: recovered}
+        with patch.dict(self.ns,
+                        pdf_native_page_texts=lambda data: [garbled, readable],
+                        pdfplumber_page_texts=lambda *a: {0: '(cid:49)(cid:54)' * 100},
+                        ocr_pdf_page_texts=ocr):
+            text = self.ns['extract_uploaded_text'](u)
+        self.assertEqual(calls, [[0]])
+        self.assertIn(recovered, text)
+        self.assertIn(readable, text)
+        self.assertNotIn('(cid:', text)
+        self.assertEqual(self.ns['upload_text_extraction_meta'](u)['unread_pages'], 0)
 
     def test_text_only_pdf_never_runs_ocr(self):
         from reportlab.pdfgen import canvas

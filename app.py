@@ -386,6 +386,7 @@ from student_lifecycle.disposition_ui import (
 )
 from student_lifecycle.fact_binding import (
     bind_coe_oshc_to_current_cycle,
+    resolve_coe_application_cycle,
     record_current_payment_evidence,
 )
 from student_lifecycle.workbench import (
@@ -10796,10 +10797,11 @@ def student_detail_business_operations_html(
     operations = []
     student_id = quote(str(lifecycle_view.student_id))
     if can_edit_profile:
-        if lifecycle_view.current_school is None:
-            operations.append(
-                f'<a class="secondary button-link" href="/students/{student_id}/school-enrolments/current">确认当前学校</a>'
-            )
+        active_lifecycle = getattr(lifecycle_view, "current", None)
+        if lifecycle_view.current_school is None or (
+            active_lifecycle is not None
+            and active_lifecycle.lifecycle_type == "initial"
+        ):
             operations.append(
                 f'<a class="secondary button-link" href="/students/{student_id}/school-enrolments/current?local_admission=yes">确认入学（本地生）</a>'
             )
@@ -23658,12 +23660,15 @@ def pdf_text_layer_is_usable(text):
     sample = sample[:5000]
     words = re.findall(r"[A-Za-z]{3,}", sample)
     slash_code_tokens = re.findall(r"/i?\d+", sample)
+    cid_tokens = re.findall(r"\(cid:\d+\)", sample)
     control_chars = sum(
         1 for char in sample
         if (ord(char) < 32 and char not in "\n\r\t") or ord(char) in {0xFFFE, 0xFFFF}
     )
     if len(sample) < 80:
         return bool(words)
+    if len(cid_tokens) >= 12 and len(cid_tokens) * 2 > len(words):
+        return False
     if len(slash_code_tokens) >= 12 and len(slash_code_tokens) > len(words):
         return False
     if control_chars > max(8, len(sample) * 0.02):
@@ -23775,7 +23780,7 @@ def pdf_page_needs_ocr(text):
     sample = str(text or "").strip()
     if not sample:
         return True
-    return len(re.findall(r"[A-Za-z]{2,}", sample[:5000])) < 3
+    return not pdf_text_layer_is_usable(sample)
 
 
 def pdfplumber_page_texts(data, page_indexes):
@@ -23820,11 +23825,12 @@ def extract_pdf_upload_text(upload, diagnostics):
         pages = pdfplumber_all_page_texts(upload.data)
     if not pages:
         return "", []
-    if not any(pdf_text_layer_is_usable(page) for page in pages):
-        decoded = [decode_pdf_numeric_glyph_text(page) for page in pages]
-        if any(pdf_text_layer_is_usable(page) for page in decoded):
-            pages = decoded
-            diagnostics["text_layer"] = "numeric_glyph_decoded"
+    for index, page in enumerate(pages):
+        if not pdf_text_layer_is_usable(page):
+            decoded = decode_pdf_numeric_glyph_text(page)
+            if pdf_text_layer_is_usable(decoded):
+                pages[index] = decoded
+                diagnostics["text_layer"] = "numeric_glyph_decoded"
     missing = [index for index, page in enumerate(pages) if pdf_page_needs_ocr(page)]
     if missing:
         for index, text in pdfplumber_page_texts(upload.data, missing).items():
@@ -24243,7 +24249,10 @@ def nsw_offer_school_name(blocks):
                 main_schools.append(school)
     if len(main_schools) != 1:
         return "", 0.0, "Needs Review"
-    return nsw_offer_school_match(main_schools[0])
+    name, score, status = nsw_offer_school_match(main_schools[0])
+    # Keep the explicit document location for review if the school catalogue
+    # has only an abbreviated or otherwise unmatched version.
+    return name or main_schools[0], score, status
 
 
 def nsw_offer_page_texts(upload, text):
@@ -24426,6 +24435,41 @@ def offer_course_details_schools(text):
     return result
 
 
+def infer_acknowledge_hsp_offer_details(text):
+    """Read the explicit MLC HSP table, not DOB or tuition-only amounts."""
+    import unicodedata
+    normalized = unicodedata.normalize("NFKC", str(text or "")).replace("Ɵ", "ti").replace("Ʃ", "tt")
+    if not all(re.search(pattern, normalized, re.I) for pattern in (
+        r"Acknowledge\s+Education\s+Pty\s+Ltd", r"Melbourne\s+Language\s+Centre",
+        r"\b080627B\s+HSP\s+English\s+for\s+Secondary\s+Schools\b",
+    )):
+        return None
+    def unique(pattern, transform=str):
+        values = {transform(value) for value in re.findall(pattern, normalized, re.I)}
+        values.discard("")
+        return next(iter(values)) if len(values) == 1 else ""
+    offer_date = unique(r"\bDate\s+of\s+Issue\s*:\s*(\d{2}/\d{2}/\d{4})", normalize_offer_date)
+    course_dates = re.findall(
+        r"\b080627B\s+HSP\s+English\s+for\s+Secondary\s+Schools\s+[A-Z]\s+"
+        r"(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})", normalized, re.I,
+    )
+    date_pairs = {(normalize_offer_date(start), normalize_offer_date(end)) for start, end in course_dates}
+    start = ""
+    if len(date_pairs) == 1:
+        candidate_start, candidate_end = next(iter(date_pairs))
+        if candidate_start and candidate_end and candidate_start < candidate_end:
+            start = candidate_start
+    deposit = unique(r"\bDeposit\s+required\s+to\s+confirm\s+acceptance\s*\$\s*([\d,]+\.\d{2})",
+                     lambda value: value.replace(",", ""))
+    number = unique(r"\bOffer/Student\s+ID\s*:\s*(\d+)\b")
+    details = {"school_name": "Melbourne Language Centre", "language_school_name": "",
+               "offer_date": offer_date, "course_start_date": start, "offer_expiry_date": "",
+               "deposit_amount": deposit, "deposit_currency": "AUD", "school_student_number": number,
+               "document_type": "ACKNOWLEDGE_MLC_HSP_OFFER"}
+    details["_field_confidence"] = {key: "explicit" for key, value in details.items() if value}
+    return details
+
+
 def infer_offer_details(upload):
     text = extract_uploaded_text(upload)
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
@@ -24447,6 +24491,10 @@ def infer_offer_details(upload):
             details.setdefault("_field_confidence", {})["course_start_date"] = "explicit"
         details["extracted_text_found"] = bool(text.strip())
         return details
+    acknowledge = infer_acknowledge_hsp_offer_details(text)
+    if acknowledge is not None:
+        acknowledge["extracted_text_found"] = bool(text.strip())
+        return acknowledge
     sa_offer = is_sa_gov_offer_tax_invoice(text)
     sa_deposit_amount, sa_deposit_currency, sa_deposit_snippet = sa_gov_offer_total_deposit(text) if sa_offer else (None, "", "")
     deposit_amount, deposit_currency = infer_offer_deposit(lines)
@@ -24528,15 +24576,37 @@ def nsw_coe_cover_letter_course_section(text):
 
 
 def nsw_coe_cover_letter_school_name(program_text):
-    compact = compact_document_text(program_text)
-    compact = re.sub(r"\s+-\s+Year\s+\d{1,2}\s+(?:to|-|and)\s+\d{1,2}\b.*", "", compact, flags=re.I)
+    # This slot contains a location, followed by address lines. Generic school
+    # phrase matching truncates specialised names and mistakes the curriculum
+    # description for a school when the actual location is an IEC.
+    lines = [re.sub(r"\s+", " ", line).strip() for line in str(program_text or "").splitlines()]
+    name_lines = []
+    for line in lines:
+        if not line:
+            continue
+        if name_lines and re.search(
+            r"^\d|\b(?:Street|St|Road|Rd|Avenue|Ave|Parade|Pde|NSW)\b", line, re.I
+        ):
+            break
+        name_lines.append(line)
+    compact = compact_document_text(" ".join(name_lines))
+    location = re.search(
+        r"\bHigh\s+School\s+Preparation\s+Delivered\s+through\s+the\s+High\s+School\s+Curriculum\s+at\s+(.+)",
+        compact, flags=re.I,
+    )
+    if location:
+        compact = location.group(1).strip()
+    compact = re.sub(r"^[: ]*Year\s+\d{1,2}\s+(?:to|-|and)\s+\d{1,2}\s*-\s*", "", compact, flags=re.I)
+    compact = re.sub(r"\s+-\s+Year\s+\d{1,2}\b.*", "", compact, flags=re.I)
     compact = re.sub(r"\bYear\s+\d{1,2}\s+(?:to|-|and)\s+\d{1,2}\b.*", "", compact, flags=re.I)
-    candidates = school_name_phrase_candidates(compact_document_text(program_text))
-    if candidates:
-        return candidates[-1]
     candidates = school_name_phrase_candidates(compact)
     if candidates:
-        return candidates[-1]
+        school = candidates[-1]
+        tail = compact[compact.casefold().find(school.casefold()) + len(school):]
+        if re.match(r"\s+(?:\d|[A-Za-z'-]+\s+(?:Street|St|Road|Rd|Avenue|Ave|Parade|Pde)\b)", tail, re.I):
+            compact = school
+    if location or candidates:
+        return compact.strip(" -:;,.")[:160]
     return compact[:160] if compact else ""
 
 
@@ -24572,23 +24642,32 @@ def split_nsw_coe_cover_letter_program_blocks(section_text):
         if re.match(r"^Program\s+name\s+and\s+location\b", line, flags=re.I):
             remainder = re.sub(r"^Program\s+name\s+and\s+location\s*", "", line, flags=re.I).strip()
             index += 1
-        elif re.match(r"^Program\s+name\b", line, flags=re.I) and index + 1 < len(lines) and re.match(r"^and\s+location\b", lines[index + 1], flags=re.I):
-            remainder = ""
-            index += 2
+        elif re.match(r"^Program\s+name\b", line, flags=re.I):
+            # OCR can put the value beside the first half of the split label
+            # and the second half beside an address on a later line.
+            remainder = re.sub(r"^Program\s+name\s*:?\s*", "", line, flags=re.I).strip()
+            index += 1
         else:
             index += 1
             continue
         program_lines = [remainder] if remainder else []
+        # OCR reading order can place a tall language-course cell immediately
+        # above its short split label. Include only the explicit HSP description.
+        preceding = lines[index - 2] if index >= 2 else ""
+        if re.match(r"^High\s+School\s+Preparation\b.*\bCurriculum\s+at\s+", preceding, re.I):
+            program_lines.insert(0, preceding)
         while index < len(lines) and not re.match(r"^Start\s+date\b", lines[index], flags=re.I):
             if re.match(r"^(?:CRICOS\s+course|Program\s+name)\b", lines[index], flags=re.I):
                 break
-            program_lines.append(lines[index])
+            location_line = re.sub(r"^and\s+location\s*:?\s*", "", lines[index], flags=re.I)
+            if location_line:
+                program_lines.append(location_line)
             index += 1
         date_line = lines[index] if index < len(lines) and re.match(r"^Start\s+date\b", lines[index], flags=re.I) else ""
         start_match = re.search(r"\bStart\s+date\s+(.+?)\s+Finish\s+date\b", date_line, flags=re.I)
         finish_match = re.search(r"\bFinish\s+date\s+(.+?)(?:\s+Term\(s\)|\s+Tuition\s+fees|$)", date_line, flags=re.I)
         program_text = compact_document_text(" ".join(program_lines))
-        school_name = nsw_coe_cover_letter_school_name(program_text)
+        school_name = nsw_coe_cover_letter_school_name("\n".join(program_lines))
         year_range = nsw_coe_cover_letter_program_year_range(program_text, current_cricos)
         is_language = bool(re.search(r"\b(?:High\s+School\s+Preparation|Intensive\s+English|English\s+High\s+School)\b", program_text, flags=re.I))
         blocks.append({
@@ -41458,7 +41537,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                FROM schools s
                LEFT JOIN school_radius_market_summary srms ON srms.school_id=s.id AND srms.radius_km=5
                WHERE COALESCE(s.deleted_at,'')=''
-               ORDER BY s.state,s.school_name LIMIT 1000"""
+               ORDER BY s.state,s.school_name"""
         )
         school_picker_options = []
         school_picker_payload = []
@@ -59879,20 +59958,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     raise ValueError("transfer contract is unavailable")
             start_date = form_text_value(self.form, "start_date").strip()
             reason = form_text_value(self.form, "reason").strip()
-            if form_text_value(self.form, "local_admission") == "yes":
-                if transfer_contract_id is not None or form_text_value(self.form, "school_confirmed") != "yes":
-                    raise ValueError("缺少本地生入学确认。")
-                admission_date = date.fromisoformat(start_date)
-                if admission_date > datetime.now(ZoneInfo("Australia/Melbourne")).date():
-                    return self.flash_redirect(
-                        f"/students/{quote(str(student_id))}/school-enrolments/current?local_admission=yes",
-                        "入学日期尚未到，不能登记为当前在读。", "error",
-                    )
-                if not reason:
-                    raise ValueError("请填写学校确认依据。")
-                reason = f"本地生入学确认：{reason}"
+            local_admission = form_text_value(self.form, "local_admission") == "yes"
+            if local_admission and transfer_contract_id is not None:
+                raise ValueError("本地生初次入学不能用于转学合同。")
             school_id, school_name = self._student_enrolment_school()
-            SchoolEnrolmentService(db.path).confirm_current(
+            enrolment_service = SchoolEnrolmentService(db.path)
+            confirm = (
+                enrolment_service.confirm_local_admission
+                if local_admission else enrolment_service.confirm_current
+            )
+            confirmation_fields = (
+                {"school_confirmed": form_text_value(self.form, "school_confirmed") == "yes"}
+                if local_admission else {}
+            )
+            enrolment_result = confirm(
                 student_id=str(student_id),
                 school_id=school_id,
                 school_name_snapshot=school_name,
@@ -59905,6 +59984,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     form_text_value(self.form, "year_level_snapshot") or None
                 ),
                 start_date=start_date or None,
+                **confirmation_fields,
             )
         except (
             SchoolEnrolmentConflictError,
@@ -59913,9 +59993,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             sqlite3.Error,
         ):
             return self.flash_redirect(
-                f"/students/{quote(str(student_id))}/school-enrolments",
-                "Current Enrolment未保存；请检查现有关系和必填字段。",
+                f"/students/{quote(str(student_id))}/school-enrolments"
+                + ("/current?local_admission=yes" if form_text_value(self.form, "local_admission") == "yes" else ""),
+                "入读学校未保存；请检查学校确认、开始日期、现有学校关系及本次申请状态。",
                 "error",
+            )
+        if local_admission:
+            relationship = "待入读学校" if enrolment_result.role == "upcoming" else "当前学校"
+            return self.flash_redirect(
+                f"/students/{quote(str(student_id))}/school-enrolments",
+                f"本地生入学已确认，已登记为{relationship}；本次入学申请已完成。",
             )
         if transfer_contract_id is not None:
             return self.flash_redirect(
@@ -61082,7 +61169,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return render_school_plan_student_tab(student_id, plans, self.csrf)
         if tab == "offer":
             step_start = time.perf_counter()
-            offers = db.all("SELECT * FROM offers WHERE student_id=? ORDER BY COALESCE(NULLIF(offer_date,''),NULLIF(uploaded_at,''),created_at) DESC,created_at DESC,id DESC", (student_id,))
+            offers = db.all("SELECT * FROM offers WHERE student_id=? AND lower(trim(coalesce(offer_status,'')))<>'invalid_record' ORDER BY COALESCE(NULLIF(offer_date,''),NULLIF(uploaded_at,''),created_at) DESC,created_at DESC,id DESC", (student_id,))
             student_perf_log("tab_prepare", student_id, tab=tab, elapsed_ms=perf_ms(step_start), count=len(offers))
             lifecycle_connection = db.connect()
             try:
@@ -61511,6 +61598,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             else:
                 continue
             if not row["submitted_at"] and can_workflow_module_save(self.user, "Offer"):
+                panel += '<details class="final-school-requirements"><summary>调整签署、付款及回传要求</summary>'
                 for step, label in STEPS.items():
                     required = step in optional
                     action_label = f"{label}改为必需" if required else f"{label}不适用"
@@ -61523,6 +61611,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                       <label>{esc(action_label)}原因<input name="reason" required maxlength="500"></label>
                       <button class="secondary" type="submit">确认{esc(action_label)}</button>
                     </form>"""
+                panel += "</details>"
             panels.append(panel)
         return "".join(panels)
 
@@ -61917,6 +62006,37 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         except Exception:
             return record
 
+    def coe_cycle_selection_html(self, student_id, *, stored_form=None):
+        from coe_cycle_selection import render_coe_cycle_selection
+        form = stored_form or {}
+        if form.get("transfer_branch_id"):
+            return ""
+        connection = db.connect()
+        try:
+            return render_coe_cycle_selection(
+                connection, student_id, selected=form.get("coe_application_cycle_id"),
+            )
+        finally:
+            db._release_connection(connection)
+
+    def coe_selected_cycle(self, connection, student_id, submitted_form, *, course_document=False):
+        branch_id = self.transfer_v2_requested_branch_id(
+            connection, student_id, require_acceptance=course_document,
+            require_confirmed_payment=course_document,
+            submitted_branch_id=submitted_form.get("transfer_branch_id"),
+        ) if course_document or submitted_form.get("transfer_branch_id") else None
+        if branch_id is not None:
+            row = connection.execute(
+                "SELECT application_cycle_id FROM transfer_school_applications WHERE id=?",
+                (branch_id,),
+            ).fetchone()
+            if row is None or row[0] is None:
+                raise ValueError("所选 Transfer Branch 缺少正式申请周期")
+            return resolve_coe_application_cycle(connection, student_id, row[0])
+        return resolve_coe_application_cycle(
+            connection, student_id, submitted_form.get("coe_application_cycle_id"),
+        )
+
     def coe_panel(self, student_id, records):
         lifecycle_contexts = getattr(self, "_student_lifecycle_record_contexts", {})
         records = [self.backfill_coe_record(student_id, record) for record in records]
@@ -62018,6 +62138,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         transfer_branch_field = self.transfer_v2_business_branch_select_html(
             student_id, require_acceptance=True, require_confirmed_payment=True
         )
+        cycle_selection = self.coe_cycle_selection_html(student_id) if not transfer_branch_field else ""
         return f"""
         <section class="panel coe-panel">
           <div class="panel-head"><div><h2>COE + OSHC</h2><p>上传文件后进入 Review，确认文件类型后保存到对应分区。</p></div><button class="secondary" type="button" data-dialog-open="coe-dialog">手动新增</button></div>
@@ -62031,7 +62152,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         </section>
         <dialog id="coe-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/coe"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><div class="dialog-head"><h2>手动新增 COE / CAAW / OSHC / Letter of Confirmation</h2><button type="button" class="icon-button" data-dialog-close>×</button></div>
           <div class="dialog-grid">
-            {transfer_branch_field}
+            {transfer_branch_field}{cycle_selection}
             <label>文件类型<select name="document_kind" required><option value="COE">COE</option><option value="CAAW">CAAW</option><option value="OSHC">OSHC</option><option value="OSHCReceipt">OSHCReceipt</option><option value="COE_CAAW">COE_CAAW</option><option value="LetterOfConfirmation">Letter of Confirmation</option></select></label>
             <label>Provider<input name="coe_provider"></label>
             <label>Course<input name="coe_course"></label>
@@ -70938,11 +71059,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                   </section>
                 </article>"""
             )
+        cycle_selection = self.coe_cycle_selection_html(student_id, stored_form=metadata.get("form")) if module == "COE + OSHC" else ""
         body = f"""
         <section class="panel upload-review upload-review-page">
           <div class="panel-head upload-review-header"><div><h2>Upload Review</h2><p class="upload-review-summary">确认后才会写入学生目录；此页面只显示 {esc(module)} 相关 DocumentType。</p>{optional_note}</div></div>
           <form method="post" action="/students/{student_id}/upload-review/{esc(token)}/confirm" class="stack-form upload-review-file-list">
             <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+            {cycle_selection}
             {"".join(cards)}
             <div class="review-actions upload-review-actions">
               <button class="primary upload-review-confirm-action" type="submit">Confirm Selected / 确认选中文件</button>
@@ -71093,8 +71216,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         student = db.one("SELECT * FROM students WHERE student_id=?", (student_id,))
         if not student:
             return self.error_page("学生不存在", 404)
-        if student["nas_status"] != "ready":
-            student = ensure_student_storage(student)
         allowed_types = set(module_document_types(module))
         stored_form = metadata.get("form") or {}
         if module == "Offer":
@@ -71192,6 +71313,25 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
             finally:
                 db._release_connection(validation_connection)
+        coe_application_cycle_id = None
+        if module == "COE + OSHC":
+            validation_connection = db.connect()
+            try:
+                selected_form = dict(stored_form)
+                selected_form["coe_application_cycle_id"] = self.form.get("coe_application_cycle_id") or stored_form.get("coe_application_cycle_id")
+                coe_application_cycle_id = self.coe_selected_cycle(
+                    validation_connection, student_id, selected_form,
+                    course_document=requires_acceptance,
+                )
+            except (ValueError, TransferV2BusinessRecordError) as error:
+                return self.flash_redirect(
+                    f"/students/{student_id}/upload-review/{quote(token)}",
+                    f"请选择本批材料所属申请后再确认。{error}", "error",
+                )
+            finally:
+                db._release_connection(validation_connection)
+        if student["nas_status"] != "ready":
+            student = ensure_student_storage(student)
         picker_context = record_picker_and_uploader.upload_context_from_form(
             stored_form
         )
@@ -71222,35 +71362,22 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 "error",
             )
         from revenue.student_intake_tuition import (
-            accepted_offer_context, choose_coe, read_review_fields, review_source,
+            accepted_offer_context, choose_coe, coe_first_year_reason, read_review_fields, review_source,
             save_source, sync_tuition, validate_tuition_update,
         )
 
         intake_entries = {}
-        if module in {"Offer", "COE + OSHC"}:
-            connection = db.connect()
+        pending_coe_tuition = {}
+        if module == "Offer":
             try:
                 for item in selected_files:
                     index = str(item["index"])
                     kind = review_source(module, (self.form.get(f"document_type_{index}") or "").strip())
                     values = read_review_fields(self.form, index) if kind else None
-                    if values is None:
-                        continue
-                    if kind == "coe":
-                        provider = (extraction_form_value(self.form, "coe_provider", index)
-                                    or stored_form.get("coe_provider") or stored_form.get("school_name"))
-                        context = accepted_offer_context(connection, student_id)
-                        decision = choose_coe(context, provider, self.form.get(f"intake_acceptance_{index}"),
-                                              values, self.form.get(f"intake_choice_{index}", ""),
-                                              confirmed_school=self.form.get(f"intake_coe_school_{index}", ""))
-                        validate_tuition_update(connection, context, values if decision == "coe" else context["offer"]["values"])
-                        intake_entries[index] = (values, context["acceptance_id"], decision)
-                    else:
-                        intake_entries[index] = (values, None, None)
+                    if values is not None:
+                        intake_entries[index] = values
             except ValueError as error:
                 return self.error_page(str(error), HTTPStatus.BAD_REQUEST)
-            finally:
-                db._release_connection(connection)
         signed_forms_contract = None
         if module == "Forms" and any(
             (self.form.get(f"document_type_{item['index']}") or "").strip()
@@ -71314,7 +71441,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 from revenue.tuition_storage import TuitionEvidenceStorage
 
                 intake_upload = TuitionEvidenceStorage(Path(db.path).parent / "revenue_documents").stage(
-                    upload, OFFER_EXTENSIONS if module == "Offer" else OFFER_EXTENSIONS - {".txt"},
+                    upload, OFFER_EXTENSIONS,
                 )
             business_record_id = None
             if module == "Visa":
@@ -71418,7 +71545,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     )
                     if intake:
                         save_source(connection, "offer", business_record_id, student_id,
-                                    offer_classification.school_id, intake[0], intake_upload,
+                                    offer_classification.school_id, intake, intake_upload,
                                     int(self.user["id"]), source_school=school_name)
                 db.audit(
                     self.user, "extraction_review_confirmed", "offer", business_record_id, str(destination),
@@ -71510,32 +71637,64 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         bind_coe_oshc_to_current_cycle(
                             connection, student_id=student_id,
                             record_id=business_record_id,
+                            application_cycle_id=coe_application_cycle_id,
                         )
-                    process_revenue_coe_change(
-                        connection, business_record_id, int(self.user["id"]),
-                        lifecycle_stamp,
-                    )
-                    if intake:
-                        values, acceptance_id, prior_decision = intake
-                        context = accepted_offer_context(connection, student_id)
-                        bound = connection.execute(
-                            "SELECT application_cycle_id FROM coe_oshc WHERE id=? AND student_id=?",
-                            (business_record_id, student_id),
-                        ).fetchone()
-                        decision = choose_coe(context, coe_provider, acceptance_id, values,
-                                              self.form.get(f"intake_choice_{index}", ""),
-                                              confirmed_school=self.form.get(f"intake_coe_school_{index}", ""))
-                        if bound[0] != context["application_cycle_id"] or decision != prior_decision:
-                            raise ValueError("当前录取已更新，请重新打开 CoE 核对页。")
-                        source = save_source(
-                            connection, "coe", business_record_id, student_id, context["school_id"],
-                            values, intake_upload, int(self.user["id"]), acceptance_id=acceptance_id,
-                            decision=decision, source_school=coe_provider,
-                        )
-                        sync_tuition(
-                            connection, context, source if decision == "coe" else context["offer"],
-                            int(self.user["id"]), coe_id=business_record_id,
-                            keep_existing=decision == "offer" and not self.form.get(f"intake_choice_{index}"),
+                    if is_coe:
+                        if self.form.get(f"intake_defer_{index}") == "1":
+                            pending_coe_tuition[index] = "已选择稍后核对学费。"
+                        else:
+                            try:
+                                values = read_review_fields(self.form, index)
+                                if values is not None:
+                                    context = accepted_offer_context(connection, student_id)
+                                    choice = self.form.get(f"intake_choice_{index}", "")
+                                    decision = choose_coe(
+                                        context, coe_provider, self.form.get(f"intake_acceptance_{index}"),
+                                        values, choice,
+                                        confirmed_school=self.form.get(f"intake_coe_school_{index}", ""),
+                                    )
+                                    bound_cycle, = connection.execute(
+                                        "SELECT application_cycle_id FROM coe_oshc WHERE id=?",
+                                        (business_record_id,),
+                                    ).fetchone()
+                                    if bound_cycle != context["application_cycle_id"]:
+                                        raise ValueError("请核对 CoE 和已接受 Offer 所属的申请周期。")
+                                    validate_tuition_update(
+                                        connection, context,
+                                        values if decision == "coe" else context["offer"]["values"],
+                                    )
+                                    from revenue.first_year_tuition import OFFER_EXTENSIONS
+                                    from revenue.repository import RevenueRepository
+                                    from revenue.tuition_storage import TuitionEvidenceStorage
+
+                                    intake_upload = TuitionEvidenceStorage(
+                                        Path(db.path).parent / "revenue_documents",
+                                    ).stage(upload, OFFER_EXTENSIONS - {".txt"})
+                                    with RevenueRepository(connection).transaction():
+                                        source = save_source(
+                                            connection, "coe", business_record_id, student_id, context["school_id"],
+                                            values, intake_upload, int(self.user["id"]),
+                                            acceptance_id=context["acceptance_id"], decision=decision,
+                                            source_school=coe_provider,
+                                        )
+                                        tuition_result = sync_tuition(
+                                            connection, context, source if decision == "coe" else context["offer"],
+                                            int(self.user["id"]), coe_id=business_record_id,
+                                            keep_existing=decision == "offer" and not choice,
+                                        )
+                                        if tuition_result.get("reason"):
+                                            pending_coe_tuition[index] = tuition_result["reason"]
+                            except ValueError as error:
+                                pending_coe_tuition[index] = str(error)
+                        if index not in pending_coe_tuition:
+                            context = accepted_offer_context(connection, student_id)
+                            reason = coe_first_year_reason(connection, context, business_record_id) if context else ""
+                            if reason:
+                                pending_coe_tuition[index] = reason
+                    if index not in pending_coe_tuition:
+                        process_revenue_coe_change(
+                            connection, business_record_id, int(self.user["id"]),
+                            lifecycle_stamp,
                         )
                 db.audit(
                     self.user, "extraction_review_confirmed", "coe_oshc", business_record_id, str(destination),
@@ -71557,6 +71716,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         "oshc_expiry_date": oshc_expiry_date,
                         "receipt_amount": receipt_amount_value, "receipt_date": receipt_date_value,
                         "payment_reference": payment_reference_value,
+                        "intake_tuition_pending_reason": pending_coe_tuition.get(index),
                         "machine_inferred": inferred,
                     }, ensure_ascii=False),
                     student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
@@ -71740,11 +71900,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
             )
         if not visa_review_skipped:delete_upload_review(token)
+        tuition_notice = ""
+        if pending_coe_tuition:
+            reasons = " ".join(dict.fromkeys(pending_coe_tuition.values()))
+            tuition_notice = f"。{len(pending_coe_tuition)} 份 CoE 的首年学费待确认。{reasons}"
         return self.flash_redirect(
             return_target,
             (f"已确认、保存并关联 {len(saved)} 个文件"
             if picker_context is not None
-            else f"已确认并保存 {len(saved)} 个文件")+"; ".join(visa_review_skipped),
+            else f"已确认并保存 {len(saved)} 个文件")+tuition_notice+"; ".join(visa_review_skipped),
         )
 
     def application_upload(self, method, student_id):
@@ -72304,12 +72468,22 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         student = db.one("SELECT * FROM students WHERE student_id=?", (student_id,))
         if not student:
             return self.error_page("学生不存在", 404)
-        if student["nas_status"] != "ready":
-            student = ensure_student_storage(student)
         uploads = [item for item in self.files if item.field_name == "file" and item.filename]
         if uploads:
             token = create_upload_review(student_id, "COE + OSHC", uploads, self.user, self.form)
             return self.redirect(f"/students/{student_id}/upload-review/{quote(token)}")
+        validation_connection = db.connect()
+        try:
+            coe_application_cycle_id = self.coe_selected_cycle(
+                validation_connection, student_id, self.form,
+                course_document=(self.form.get("document_kind") or "COE") in {"COE", "COE_CAAW"},
+            )
+        except (ValueError, TransferV2BusinessRecordError) as error:
+            return self.flash_redirect(f"/students/{student_id}?tab=coe", str(error), "error")
+        finally:
+            db._release_connection(validation_connection)
+        if student["nas_status"] != "ready":
+            student = ensure_student_storage(student)
         inferred = {}
         path = ""
         lifecycle_stamp = now_iso()
@@ -72371,7 +72545,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
             else:
                 bind_coe_oshc_to_current_cycle(
-                    connection, student_id=student_id, record_id=record_id
+                    connection, student_id=student_id, record_id=record_id,
+                    application_cycle_id=coe_application_cycle_id,
                 )
             process_revenue_coe_change(
                 connection, record_id, int(self.user["id"]), lifecycle_stamp

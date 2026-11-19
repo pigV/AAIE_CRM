@@ -166,6 +166,42 @@ def validate_tuition_update(connection, context, values):
         raise ValueError("该学费已有减免或调整，请先核对再更改金额。")
 
 
+def coe_first_year_reason(connection, context, coe_id, values=None):
+    """Keep later course evidence separate from the confirmed first intake."""
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='final_school_coe_confirmations'",
+    ).fetchone():
+        from final_school_coe import eligibility_reason, evidence_snapshot, school_coe_rows
+
+        confirmed = [
+            row for row in school_coe_rows(connection, (context["application_cycle_id"],))
+            if row["acceptance_id"] == context["acceptance_id"]
+            and not eligibility_reason(row)
+            and row["evidence_snapshot"] == evidence_snapshot(row)
+        ]
+        first_start = min((row["coe_start_date"] for row in confirmed), default=None)
+        if confirmed and str(coe_id) not in {
+            str(row["coe_id"]) for row in confirmed if row["coe_start_date"] == first_start
+        }:
+            return "该 CoE 属于其他课程，首年学费须按已确认的首个主课 CoE 核对。"
+    rows = first_year_records(connection, context["component_id"])
+    years = [values["year"]] if values is not None else []
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(coe_oshc)")}
+    if "coe_start_date" in columns:
+        from dashboard_business_time import business_date_iso
+
+        coe = connection.execute(
+            "SELECT coe_start_date FROM coe_oshc WHERE id=? AND application_cycle_id=?",
+            (coe_id, context["application_cycle_id"]),
+        ).fetchone()
+        start = business_date_iso(coe[0]) if coe else None
+        if start:
+            years.append(int(start[:4]))
+    if len(rows) == 1 and rows[0]["intake_year"] and years and max(years) > int(rows[0]["intake_year"]):
+        return "该 CoE 的入学年份晚于已确认的首年学费年份，后续课程学费已单独保留。"
+    return ""
+
+
 def sync_tuition(connection, context, source, actor, *, keep_existing=False, coe_id=None):
     repository = RevenueRepository(connection)
     component_id = context["component_id"]
@@ -183,6 +219,14 @@ def sync_tuition(connection, context, source, actor, *, keep_existing=False, coe
 
     def save():
         prior_rows = first_year_records(connection, component_id)
+        source_coe_id = coe_id
+        if source_coe_id is None and source["kind"] == "coe":
+            source_coe_id = source["uid"]
+        if source_coe_id is not None:
+            reason = coe_first_year_reason(connection, context, source_coe_id, values)
+            if reason:
+                prior = prior_rows[0] if len(prior_rows) == 1 else {}
+                return {**prior, "preserved": True, "reason": reason}
         if len(prior_rows) > 1 or (prior_rows and prior_rows[0]["currency_code"] != "AUD"):
             if keep_existing:
                 return {**payload, "uid":prior_rows[0]["uid"], "preserved":True}
@@ -350,6 +394,12 @@ def render_review_fields(index, module, document_type, context=None):
     amount = f"{cents//100}.{cents%100:02d}" if cents is not None else ""
     offer_reference = ""
     school_confirmation = ""
+    defer_tuition = ""
+    if module == "COE + OSHC":
+        defer_tuition = (
+            f'<label><input type="checkbox" name="intake_defer_{index}" value="1">'
+            '先保存 CoE，稍后核对首年学费</label>'
+        )
     if module == "COE + OSHC" and context:
         school_name = escape(context["school_name"], quote=True)
         school_confirmation = (
@@ -366,7 +416,7 @@ def render_review_fields(index, module, document_type, context=None):
     elif context and module == "COE + OSHC":
         offer_reference = "<p>可在 CoE 阶段首次确认学费。请按 CoE 或学校收费单核对入学当年金额。</p>"
     elif module == "COE + OSHC":
-        offer_reference = "<p>请先在本次申请周期确认对应的 Offer，再填写入学学费。</p>"
+        offer_reference = "<p>可以先保存 CoE。确认本次申请周期的 Offer 后，再核对首年学费。</p>"
     elif module == "Offer":
         offer_reference = "<p>可留空，在 CoE 阶段确认首年学费。</p>"
     decision = ""
@@ -376,9 +426,10 @@ def render_review_fields(index, module, document_type, context=None):
             <option value="">请选择</option><option value="offer">保留 Offer</option><option value="coe">采用 CoE</option>
           </select></label>'''
     hidden = "" if kind else " hidden disabled"
+    legend = "首年学费" if module == "COE + OSHC" else "入学与学费"
     return f'''<fieldset data-student-intake-tuition data-module="{escape(module,quote=True)}"
       data-offer-year="{year}" data-offer-grade="{escape(grade,quote=True)}" data-offer-amount="{amount}"{hidden}>
-      <legend>入学与学费</legend>{offer_reference}{school_confirmation}
+      <legend>{legend}</legend>{offer_reference}{defer_tuition}{school_confirmation}
       <input type="hidden" name="intake_acceptance_{index}" value="{(context or {}).get('acceptance_id','')}">
       <label>入学年份<input name="intake_year_{index}" inputmode="numeric" maxlength="4" value="{year}" placeholder="2027"></label>
       <label>入学年级<input name="intake_grade_{index}" maxlength="24" value="{escape(grade,quote=True)}" placeholder="Year 9"></label>

@@ -9,6 +9,9 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import Callable
+from zoneinfo import ZoneInfo
+
+from application_cycle import close_cycle
 
 
 class SchoolEnrolmentError(Exception):
@@ -564,6 +567,154 @@ class SchoolEnrolmentService:
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
+
+    def confirm_local_admission(
+        self, *, student_id: str, school_id: int | None,
+        school_name_snapshot: str, actor_user_id: int, reason: str,
+        start_date: str, school_confirmed: bool,
+        course_name_snapshot: str | None = None,
+        year_level_snapshot: str | None = None,
+    ) -> EnrolmentResult:
+        """Record explicit local admission and finish its Initial Cycle atomically.
+
+        Initial admission has no previous school to transition away from. Future
+        starts therefore occupy the ordinary upcoming slot without creating a
+        transfer intent or a fictitious current school.
+        """
+        if school_confirmed is not True:
+            raise SchoolEnrolmentValidationError("school confirmation required")
+        school_name = _required(school_name_snapshot, "school_name_snapshot")
+        clean_reason = _required(reason, "reason")
+        try:
+            effective = date.fromisoformat(start_date)
+            if effective.isoformat() != start_date:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise SchoolEnrolmentValidationError("start_date") from None
+        occurred_at = self.clock()
+        today = datetime.fromisoformat(occurred_at).astimezone(
+            ZoneInfo("Australia/Melbourne")
+        ).date()
+        role = "upcoming" if effective > today else "current"
+        try:
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                cycles = connection.execute(
+                    """SELECT id,cycle_type FROM application_cycles
+                        WHERE student_id=? AND status='active'
+                          AND education_stream='school_education'""",
+                    (str(student_id),),
+                ).fetchall()
+                if cycles and (len(cycles) != 1 or cycles[0]["cycle_type"] != "initial"):
+                    raise SchoolEnrolmentConflictError("active cycle is not Initial")
+                relationships = connection.execute(
+                    """SELECT * FROM student_school_enrolments
+                        WHERE student_id=? AND status='active'
+                          AND enrolment_role IN ('current','upcoming')""",
+                    (str(student_id),),
+                ).fetchall()
+                if relationships:
+                    existing = relationships[0]
+                    same_school = (
+                        existing["school_id"] == school_id
+                        if existing["school_id"] is not None else
+                        " ".join(str(existing["school_name_snapshot"]).split()).casefold()
+                        == " ".join(school_name.split()).casefold()
+                    )
+                    # Existing current-school confirmations predate Cycle binding.
+                    # Complete only the exact same verified admission; never replace
+                    # an unrelated current school or turn current study into future.
+                    if (
+                        len(relationships) == 1 and same_school
+                        and existing["lifecycle_context"] == "initial"
+                        and existing["enrolment_role"] == role == "current"
+                        and existing["start_date"] == start_date
+                        and existing["application_cycle_id"] is None
+                        and len(cycles) == 1
+                    ):
+                        cycle_id = int(cycles[0]["id"])
+                        enrolment_id = int(existing["id"])
+                        connection.execute(
+                            """UPDATE student_school_enrolments
+                                SET application_cycle_id=?,school_id=COALESCE(school_id,?),
+                                    updated_by=?,updated_at=? WHERE id=?""",
+                            (cycle_id, school_id, actor_user_id, occurred_at, enrolment_id),
+                        )
+                        _event(
+                            connection, event_uid=f"local-admission-bound:{enrolment_id}",
+                            student_id=student_id, enrolment_id=enrolment_id,
+                            application_cycle_id=cycle_id, event_type="current_confirmed",
+                            reason=clean_reason, actor_user_id=actor_user_id,
+                            occurred_at=occurred_at,
+                            new_value={"local_admission": True, "application_outcome": "completed"},
+                        )
+                        close_cycle(connection, cycle_id, "completed", occurred_at, actor_user_id)
+                        connection.commit()
+                        return EnrolmentResult(enrolment_id, student_id, "current", "active")
+                    if len(relationships) != 1 or (
+                        existing["lifecycle_context"] != "initial"
+                        or not same_school
+                        or existing["start_date"] != start_date
+                        or existing["application_cycle_id"] is None
+                    ):
+                        raise SchoolEnrolmentConflictError("existing school relationship differs")
+                    completed = connection.execute(
+                        """SELECT 1 FROM application_cycles WHERE id=?
+                            AND student_id=? AND cycle_type='initial'
+                            AND status='closed' AND outcome='completed'""",
+                        (existing["application_cycle_id"], str(student_id)),
+                    ).fetchone()
+                    if cycles or completed is None:
+                        raise SchoolEnrolmentConflictError("Initial completion does not match")
+                    enrolment_id = int(existing["id"])
+                    if existing["enrolment_role"] == "upcoming" and role == "current":
+                        connection.execute(
+                            """UPDATE student_school_enrolments
+                                SET enrolment_role='current',updated_by=?,updated_at=?
+                                WHERE id=? AND enrolment_role='upcoming'""",
+                            (actor_user_id, occurred_at, enrolment_id),
+                        )
+                        _event(
+                            connection, event_uid=f"local-started:{enrolment_id}",
+                            student_id=student_id, enrolment_id=enrolment_id,
+                            application_cycle_id=existing["application_cycle_id"],
+                            event_type="current_confirmed", reason=clean_reason,
+                            actor_user_id=actor_user_id, occurred_at=occurred_at,
+                            old_value={"role": "upcoming"}, new_value={"role": "current"},
+                        )
+                    else:
+                        role = str(existing["enrolment_role"])
+                    connection.commit()
+                    return EnrolmentResult(enrolment_id, student_id, role, "active", idempotent=True)
+                if len(cycles) != 1:
+                    raise SchoolEnrolmentConflictError("one active Initial Cycle required")
+                cycle_id = int(cycles[0]["id"])
+                enrolment_id = int(connection.execute(
+                    """INSERT INTO student_school_enrolments(
+                        student_id,school_id,school_name_snapshot,enrolment_role,
+                        course_name_snapshot,year_level_snapshot,start_date,status,
+                        application_cycle_id,lifecycle_context,confirmation_reason,
+                        confirmed_by,confirmed_at,created_by,created_at,updated_by,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,'active',?,'initial',?,?,?,?,?,?,?)""",
+                    (str(student_id), school_id, school_name, role,
+                     course_name_snapshot, year_level_snapshot, start_date, cycle_id,
+                     clean_reason, actor_user_id, occurred_at, actor_user_id,
+                     occurred_at, actor_user_id, occurred_at),
+                ).lastrowid)
+                _event(
+                    connection, event_uid=f"local-admission:{enrolment_id}",
+                    student_id=student_id, enrolment_id=enrolment_id,
+                    application_cycle_id=cycle_id,
+                    event_type=f"{role}_confirmed", reason=clean_reason,
+                    actor_user_id=actor_user_id, occurred_at=occurred_at,
+                    new_value={"role": role, "start_date": start_date,
+                               "local_admission": True, "application_outcome": "completed"},
+                )
+                close_cycle(connection, cycle_id, "completed", occurred_at, actor_user_id)
+                connection.commit()
+                return EnrolmentResult(enrolment_id, student_id, role, "active")
+        except sqlite3.IntegrityError as error:
+            raise SchoolEnrolmentConflictError(str(error)) from None
 
     def confirm_current(
         self, *, student_id: str, school_id: int | None,

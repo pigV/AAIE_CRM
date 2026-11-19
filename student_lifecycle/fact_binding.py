@@ -33,10 +33,11 @@ def bind_coe_oshc_to_current_cycle(
     *,
     student_id: str,
     record_id: int,
+    application_cycle_id: int | None = None,
 ) -> int | None:
     """Bind one newly-created COE/OSHC record to the exact current Cycle."""
 
-    cycle_id = _current_cycle_id(connection, student_id)
+    cycle_id = resolve_coe_application_cycle(connection, student_id, application_cycle_id)
     if cycle_id is None:
         return None
     if "application_cycle_id" not in {
@@ -57,6 +58,23 @@ def bind_coe_oshc_to_current_cycle(
         (cycle_id, int(record_id), str(student_id)),
     )
     return cycle_id
+
+
+def resolve_coe_application_cycle(connection, student_id, application_cycle_id=None):
+    """Validate an explicit active owner; never infer a stream from the profile."""
+    if application_cycle_id in (None, ""):
+        return _current_cycle_id(connection, student_id)
+    try:
+        cycle_id = int(application_cycle_id)
+    except (TypeError, ValueError):
+        raise ValueError("请选择本批材料所属申请") from None
+    row = connection.execute(
+        "SELECT id FROM application_cycles WHERE id=? AND student_id=? AND status='active'",
+        (cycle_id, str(student_id)),
+    ).fetchone()
+    if row is None:
+        raise ValueError("所选申请不属于该学生或已结束，请重新选择本批材料所属申请")
+    return int(row[0])
 
 
 def record_current_payment_evidence(

@@ -178,6 +178,35 @@ class OfferSelectionTests(OfferAcceptanceFixture):
         ).fetchone()
         self.assertEqual(tuple(pointer), (102, "signed"))
 
+    def test_employee_can_accept_offer_after_original_expiry(self):
+        from offer_acceptance import set_accepted_offer
+
+        self._resolve_first()
+        self.connection.execute("ALTER TABLE offers ADD COLUMN offer_expiry_date TEXT")
+        self.connection.execute("UPDATE offers SET offer_expiry_date='2020-01-01' WHERE id=101")
+        result = set_accepted_offer(self.connection, "S001", 101, self.actor)
+        self.assertFalse(result.unchanged)
+        row = self.connection.execute(
+            "SELECT offer_status,offer_expiry_date FROM offers WHERE id=101"
+        ).fetchone()
+        self.assertEqual(("accepted", "2020-01-01"), tuple(row))
+
+    def test_expired_status_can_be_accepted_but_explicit_invalid_records_stay_blocked(self):
+        from offer_acceptance import OfferAcceptanceError, set_accepted_offer
+
+        self._resolve_first()
+        for status in ("voided", "cancelled", "rejected", "withdrawn", "superseded", "invalid_record"):
+            with self.subTest(status=status):
+                self.connection.execute("UPDATE offers SET offer_status=? WHERE id=101", (status,))
+                with self.assertRaises(OfferAcceptanceError):
+                    set_accepted_offer(self.connection, "S001", 101, self.actor)
+        self.connection.execute("UPDATE offers SET offer_status='expired' WHERE id=101")
+        result = set_accepted_offer(self.connection, "S001", 101, self.actor)
+        self.assertFalse(result.unchanged)
+        self.assertEqual("expired", self.connection.execute(
+            "SELECT status_before_acceptance FROM student_offer_acceptances WHERE student_id='S001'"
+        ).fetchone()[0])
+
     def test_explicit_withdraw_restores_offer_and_clears_only_current_projection(self):
         from offer_acceptance import set_accepted_offer, withdraw_accepted_offer
 

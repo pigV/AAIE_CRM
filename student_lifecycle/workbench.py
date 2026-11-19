@@ -196,7 +196,22 @@ def render_enrolment_workbench(
     student_id = context.student_id
     options = _school_options(school_choices)
     current_form = ""
-    if context.current is None:
+    initial_upcoming = (
+        context.upcoming if context.upcoming is not None
+        and context.upcoming.get("lifecycle_context") == "initial" else None
+    )
+    existing_initial = (
+        context.current if context.current is not None
+        and context.current.get("lifecycle_context") == "initial"
+        and context.lifecycle_context == "initial" else None
+    )
+    local_admission = local_admission or existing_initial is not None
+    if (context.current is None and initial_upcoming is None) or existing_initial is not None:
+        saved = existing_initial or {}
+        current_options = options.replace(
+            f'value="{_e(saved.get("school_id"))}"',
+            f'value="{_e(saved.get("school_id"))}" selected', 1,
+        ) if saved.get("school_id") is not None else options
         transfer_continuation = (
             f'<input type="hidden" name="transfer_contract_id" '
             f'value="{int(transfer_contract_id)}">'
@@ -211,16 +226,36 @@ def render_enrolment_workbench(
         )
         reason_label = "学校确认依据" if local_admission else "确认原因"
         date_required = " required" if local_admission else ""
-        current_form = f'''<section class="panel"><h2>{_e(current_submit_label)}</h2>
+        admission_help = (
+            '<p>学校明确确认录取后即可完成本次入学申请。开始日期在未来时登记为待入读学校；'
+            '已到开始日期时登记为当前学校。</p>' if local_admission else ""
+        )
+        current_form = f'''<section class="panel"><h2>{_e(current_submit_label)}</h2>{admission_help}
           <form method="post" action="/students/{_e(student_id)}/school-enrolments/current" class="stack-form">
             <input type="hidden" name="csrf" value="{_e(csrf)}">{transfer_continuation}{admission_confirmation}
-            <label>学校目录<select name="school_id">{options}</select></label>
-            <label>其他学校名称（目录留空时填写）<input name="school_name_snapshot"></label>
-            <label>课程<input name="course_name_snapshot"></label>
-            <label>年级<input name="year_level_snapshot"></label>
-            <label>开始日期<input type="date" name="start_date"{date_required}></label>
+            <label>学校目录<select name="school_id">{current_options}</select></label>
+            <label>其他学校名称（目录留空时填写）<input name="school_name_snapshot" value="{_e(saved.get('school_name_snapshot'))}"></label>
+            <label>课程<input name="course_name_snapshot" value="{_e(saved.get('course_name_snapshot'))}"></label>
+            <label>年级<input name="year_level_snapshot" value="{_e(saved.get('year_level_snapshot'))}"></label>
+            <label>开始日期<input type="date" name="start_date" value="{_e(saved.get('start_date'))}"{date_required}></label>
             <label>{_e(reason_label)}<textarea name="reason" required></textarea></label>
             <button class="primary">{_e(current_submit_label)}</button>
+          </form></section>'''
+    elif context.current is None and initial_upcoming is not None:
+        saved_fields = "".join(
+            f'<input type="hidden" name="{_e(name)}" value="{_e(initial_upcoming.get(name))}">'
+            for name in ("school_id", "school_name_snapshot", "course_name_snapshot",
+                         "year_level_snapshot", "start_date")
+        )
+        current_form = f'''<section class="panel"><h2>确认开始入读（本地生）</h2>
+          <p>本次入学申请已完成。待入读学校：{_e(initial_upcoming.get("school_name_snapshot"))}；
+          开始日期：{_e(initial_upcoming.get("start_date"))}。开始日期到达后，核实开始入读再确认为当前学校。</p>
+          <form method="post" action="/students/{_e(student_id)}/school-enrolments/current" class="stack-form">
+            <input type="hidden" name="csrf" value="{_e(csrf)}">
+            <input type="hidden" name="local_admission" value="yes">{saved_fields}
+            <label><input type="checkbox" name="school_confirmed" value="yes" required>已核实为本地生，且学校已确认开始入读</label>
+            <label>学校确认依据<textarea name="reason" required></textarea></label>
+            <button class="primary">核实开始入读</button>
           </form></section>'''
     upcoming_form = ""
     if (

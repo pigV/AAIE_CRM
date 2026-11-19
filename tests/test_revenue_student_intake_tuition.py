@@ -84,6 +84,90 @@ class StudentIntakeTuitionTests(unittest.TestCase):
             choose_coe(ctx, "Education Department", 125, values, "",
                        confirmed_school="Different School")
 
+    def test_later_coe_preserves_first_year_amount_and_commission_candidate(self):
+        student = "TEST-PENINSULA-SCHEDULE"
+        ctx = accepted_offer_context(self.db, student)
+        junior = read_review_fields(self.fields(2027, "Year 8", "18500"), 0)
+        senior = read_review_fields(self.fields(2030, "Year 11", "21000"), 0)
+        first = save_source(self.db, "coe", 281, student, 16, junior, self.proof("coe", 281), 1)
+        sync_tuition(self.db, ctx, first, 1, coe_id=281)
+        before = student_tuition_details(self.db, student)
+        later = save_source(self.db, "coe", 282, student, 16, senior, self.proof("coe", 282), 1)
+        result = sync_tuition(self.db, ctx, later, 1, coe_id=282)
+        self.assertTrue(result.get("preserved"))
+        self.assertEqual(before, student_tuition_details(self.db, student))
+        self.assertEqual(185000, self.candidate(125)["gross_cents"])
+        self.assertEqual(later, source_record(self.db, "coe", 282, student))
+        self.assertEqual(result, sync_tuition(self.db, ctx, later, 1, coe_id=282))
+
+    def test_confirmed_first_main_coe_excludes_other_courses_even_in_same_year(self):
+        from final_school_coe import confirm_school_coe
+
+        self.db.executescript("""
+            ALTER TABLE cycle_final_acceptances ADD COLUMN school_name_snapshot TEXT;
+            ALTER TABLE offer_received_events ADD COLUMN school_name_snapshot TEXT;
+            ALTER TABLE coe_oshc ADD COLUMN student_id TEXT;
+            ALTER TABLE coe_oshc ADD COLUMN document_kind TEXT;
+            ALTER TABLE coe_oshc ADD COLUMN coe_provider TEXT;
+            ALTER TABLE coe_oshc ADD COLUMN school_name TEXT;
+            ALTER TABLE coe_oshc ADD COLUMN coe_course TEXT;
+            ALTER TABLE coe_oshc ADD COLUMN coe_start_date TEXT;
+            ALTER TABLE coe_oshc ADD COLUMN coe_end_date TEXT;
+            ALTER TABLE coe_oshc ADD COLUMN file_path TEXT;
+            ALTER TABLE student_documents ADD COLUMN document_status TEXT DEFAULT 'active';
+            ALTER TABLE student_documents ADD COLUMN voided_at TEXT;
+            CREATE TABLE final_school_coe_confirmations(
+                final_acceptance_id INTEGER, coe_id INTEGER, evidence_snapshot TEXT,
+                confirmed_by INTEGER, confirmed_at TEXT,
+                PRIMARY KEY(final_acceptance_id,coe_id)
+            );
+            UPDATE cycle_final_acceptances SET school_name_snapshot=
+                (SELECT school_name FROM schools WHERE id=16) WHERE id=125;
+        """)
+        student = "TEST-PENINSULA-SCHEDULE"
+        ctx = accepted_offer_context(self.db, student)
+        for coeid, start in ((281, "2027-02-03"), (282, "2027-07-20")):
+            path = f"/isolated/coe-{coeid}.pdf"
+            self.db.execute(
+                """INSERT INTO coe_oshc VALUES(?,125,?,'COE',?,?,'Secondary',?,'2032-12-31',?)""",
+                (coeid, student, ctx["school_name"], ctx["school_name"], start, path),
+            )
+            self.db.execute(
+                """INSERT INTO student_documents(student_id,document_type,original_name,stored_name,
+                    file_path,uploaded_at) VALUES(?,'COE','coe.pdf','coe.pdf',?,'2026-11-19')""",
+                (student, path),
+            )
+            confirm_school_coe(self.db, student, 125, coeid, 1, "2026-11-19")
+        values = read_review_fields(self.fields(2027, "Year 9", "21000"), 0)
+        later = save_source(self.db, "coe", 282, student, 16, values, self.proof("coe", 282), 1)
+        self.assertTrue(sync_tuition(self.db, ctx, later, 1, coe_id=282).get("preserved"))
+        self.assertIsNone(student_tuition_details(self.db, student))
+        first = save_source(self.db, "coe", 281, student, 16,
+                            read_review_fields(self.fields(2027, "Year 8", "18500"), 0),
+                            self.proof("coe", 281), 1)
+        sync_tuition(self.db, ctx, first, 1, coe_id=281)
+        self.assertEqual(1850000, student_tuition_details(self.db, student)["record"]["tuition_cents"])
+        from revenue.student_intake_tuition import coe_first_year_reason
+
+        self.db.execute("UPDATE coe_oshc SET coe_course='Changed after confirmation'")
+        self.assertEqual("", coe_first_year_reason(self.db, ctx, 283, values))
+
+    def test_coe_start_year_is_checked_when_offer_is_retained_or_tuition_is_blank(self):
+        from revenue.student_intake_tuition import coe_first_year_reason
+
+        student = "TEST-PENINSULA-SCHEDULE"
+        values = read_review_fields(self.fields(2027, "Year 8", "18500"), 0)
+        offer = save_source(self.db, "offer", 22, student, 16, values, self.proof("offer", 22), 1)
+        ctx = accepted_offer_context(self.db, student)
+        sync_tuition(self.db, ctx, offer, 1)
+        self.db.execute("ALTER TABLE coe_oshc ADD COLUMN coe_start_date TEXT")
+        self.db.execute(
+            "INSERT INTO coe_oshc(id,application_cycle_id,coe_start_date) VALUES(282,125,'2030-02-01')"
+        )
+        self.assertTrue(coe_first_year_reason(self.db, ctx, 282))
+        self.assertTrue(sync_tuition(self.db, ctx, offer, 1, coe_id=282).get("preserved"))
+        self.assertEqual(2027, student_tuition_details(self.db, student)["record"]["intake_year"])
+
     def test_amount_correction_keeps_offer_original_and_issued_snapshot(self):
         student = "TEST-VIC-PRIVATE"
         values = read_review_fields(self.fields(2027,"Year 9","10000.25"),0)

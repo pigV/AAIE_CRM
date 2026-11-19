@@ -40562,6 +40562,47 @@ c.save()
             self.assertEqual(env["db"].one("SELECT current_stage FROM workflow_status WHERE student_id=?", (env["student_id"],))["current_stage"], "COE已出")
             self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM student_documents")["count"], len(types))
 
+    def test_coe_upload_saves_document_when_tuition_needs_review(self):
+        with isolated_upload_review_regression_environment("coe-tuition-pending") as env:
+            for grade, reason in (
+                ("English", "请填写入学年级"),
+                ("Year 9", "同一次入学的已接受 Offer"),
+            ):
+                with self.subTest(grade=grade):
+                    output = io.BytesIO()
+                    pdf = canvas.Canvas(output)
+                    pdf.drawString(72, 720, f"Confirmation of Enrolment - {grade}")
+                    pdf.save()
+                    original = output.getvalue()
+                    token = self._create_isolated_review(
+                        env, "COE + OSHC", [(f"Coe-{grade}.pdf", "application/pdf", original)]
+                    )
+                    with (
+                        mock.patch("revenue.student_intake_tuition.sync_tuition") as sync_tuition,
+                        mock.patch.object(app_module, "process_revenue_coe_change") as link_coe,
+                    ):
+                        handler = self._confirm_isolated_review(
+                            env, token, "COE + OSHC", ["COE"], {
+                                "extract_coe_provider_0": "Test Provider",
+                                "extract_coe_course_0": f"Test course {grade}",
+                                "extract_coe_start_date_0": "01/02/2027",
+                                "extract_coe_end_date_0": "01/12/2027",
+                                "intake_year_0": "2027",
+                                "intake_grade_0": grade,
+                                "intake_aud_0": "25000",
+                            },
+                        )
+                    sync_tuition.assert_not_called()
+                    link_coe.assert_not_called()
+                    row = env["db"].one(
+                        "SELECT * FROM coe_oshc WHERE student_id=? AND coe_course=?",
+                        (env["student_id"], f"Test course {grade}"),
+                    )
+                    self.assertIsNotNone(row)
+                    self.assertEqual(original, Path(row["file_path"]).read_bytes())
+                    self.assertIn("首年学费待确认", handler.redirect_message)
+                    self.assertIn(reason, handler.redirect_message)
+
     def test_generic_upload_review_behavior_group_6_payments_homestay_and_forms_confirm(self):
         with isolated_upload_review_regression_environment("group-6") as env:
             payment_token = self._create_isolated_review(

@@ -29,6 +29,72 @@ class StudentWorkflowProjection:
     transfer_precreation: bool = False
 
 
+def _visa_fact_fallbacks(connection, student_ids):
+    """Read student-owned Visa facts without assigning an unbound case to a cycle.
+
+    This is a profile fallback only; it never contributes unbound cases to the
+    cycle dashboard or changes case/cycle ownership. The newest active student
+    Visa case supersedes older cases, including when it is still preparing.
+    """
+    from dashboard_confirmed_stages import _visa_status
+    from dashboard_visa_metrics import is_student_visa_case
+    from visa_dashboard_retry import load_retries, retry_key
+
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(visa_cases)")}
+    if not student_ids or not {"id", "student_id", "application_cycle_id", "status"} <= columns:
+        return {}
+    marks = ",".join("?" for _ in student_ids)
+    current_columns = {row[1] for row in connection.execute("PRAGMA table_info(visa_result_status_current)")}
+    current = "effective_result" in current_columns
+    legacy_result = "visa.result_status" if "result_status" in columns else "NULL"
+    result_sql = f"coalesce(result.effective_result,{legacy_result})" if current else legacy_result
+    source_sql = "result.source_event_id" if "source_event_id" in current_columns else "NULL"
+    join = "LEFT JOIN visa_result_status_current result ON result.visa_case_id=visa.id" if current else ""
+    archived = "AND visa.archived_at IS NULL" if "archived_at" in columns else ""
+    cursor = connection.execute(f"""
+        SELECT visa.*, {result_sql} AS effective_result, {source_sql} AS source_event_id,
+               cycle.cycle_type AS owned_cycle_type, cycle.student_id AS cycle_student_id
+          FROM visa_cases visa
+          LEFT JOIN application_cycles cycle ON cycle.id=visa.application_cycle_id
+          {join}
+         WHERE visa.student_id IN ({marks}) {archived}
+         ORDER BY visa.id DESC
+    """, tuple(student_ids))
+    keys = tuple(item[0] for item in cursor.description)
+    rows = [dict(zip(keys, row)) for row in cursor]
+    retries = load_retries(connection, tuple({row["application_cycle_id"] for row in rows
+                                            if row["application_cycle_id"] is not None}))
+    seen, results = set(), {}
+    for row in rows:
+        student_id = str(row["student_id"])
+        if not is_student_visa_case(row) or student_id in seen:
+            continue
+        linked = row["application_cycle_id"] is not None
+        if linked and str(row["cycle_student_id"]) != student_id:
+            continue
+        seen.add(student_id)
+        status = _visa_status(row)
+        resumed = retry_key(row)
+        if status in {"refused", "withdrawn"} and resumed and retries.get((row["id"], student_id)) == resumed:
+            continue
+        if status not in {"lodged", "granted", "refused", "withdrawn"}:
+            continue
+        stage, label, order = {
+            "lodged": ("11_visa_result", "等待签证结果", STAGE_DETAILS["11_visa_result"][0]),
+            "granted": (VISA_GRANTED, "已下签", 0),
+            "refused": ("visa_refused", "已拒签", 0),
+            "withdrawn": ("visa_withdrawn", "签证申请已撤回", 0),
+        }[status]
+        results[student_id] = StudentWorkflowProjection(
+            student_id, "active" if status == "lodged" else "closed", stage, label, order,
+            cycle_id=row["application_cycle_id"], cycle_type=row["owned_cycle_type"],
+            outcome=None if status == "lodged" else status,
+            issue_codes=() if linked else ("VISA_CASE_CYCLE_UNASSIGNED",),
+            diagnostic=f"Visa Case #{row['id']}" + ("：申请周期待核对" if not linked else ""),
+        )
+    return results
+
+
 def load_student_workflow_projection_map(
     connection, student_ids: Iterable[str], *, read_context=None, cycle_id=None
 ) -> dict[str, StudentWorkflowProjection]:
@@ -182,6 +248,14 @@ def load_student_workflow_projection_map(
                 "尚未建立申请周期",
                 0,
             )
+    # A newly created, empty HE cycle must not erase a real lodged/granted case.
+    # Explicit cycle views stay exact-cycle; active work and held cycles retain
+    # their own stage rather than inheriting historical Visa outcomes.
+    fallback_ids = tuple(student_id for student_id, result in results.items()
+                         if result.stage_key in {"no_counted_stage", "no_cycle"}
+                         and result.cycle_id not in held)
+    if cycle_id is None and fallback_ids:
+        results.update(_visa_fact_fallbacks(connection, fallback_ids))
     transfer_states = load_student_transfer_state_map(connection, existing)
     for student_id, transfer in transfer_states.items():
         if transfer.cycle_id in confirmed and confirmed[transfer.cycle_id] is None:

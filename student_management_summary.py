@@ -85,6 +85,17 @@ def _management_stage(
         )
     if not has_cycle_schema and stage.excluded_reason == "尚未生成家长表单 Link":
         return "not_started", "尚未开始申请", 0, None
+    if state == "closed" and lifecycle_type == "initial" and str(
+        getattr(lifecycle_item, "outcome", None) or outcome
+    ) == "completed":
+        return "closed", "申请已结案", 100, "initial"
+    if state == "closed" and getattr(lifecycle_item, "stage_key", None) in {
+        "visa_granted", "visa_refused", "visa_withdrawn",
+    }:
+        return (
+            lifecycle_item.stage_key, lifecycle_item.stage_label,
+            lifecycle_item.stage_order, lifecycle_type,
+        )
     if state != "active":
         if state == "no_cycle":
             return (
