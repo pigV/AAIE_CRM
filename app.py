@@ -6,6 +6,7 @@ if STAGING is None and (SOURCE_DIR / "STAGING_DATA/staging.json").exists():
     raise RuntimeError("Staging must be started through tools/staging_control.py")
 from agent_reach_permissions import can_access_agent_reach
 from agent_reach_controller import handle_agent_reach
+from business_changes.contracts import BusinessPermissionError
 import argparse
 import base64
 import copy
@@ -337,6 +338,7 @@ from student_detail_summary_cards import (
     SchoolPlanCardSummary,
     StudentDetailCardSummary,
     load_student_detail_card_summary,
+    has_current_school_workflow,
 )
 from lifecycle_workspace_ui import WorkspaceStep, render_lifecycle_stepper
 from student_workflow_projection import load_student_workflow_projection_map
@@ -513,6 +515,14 @@ from mobile.permissions.policy import bottom_actions, plus_actions
 from mobile.shell import active_navigation_for_path, mobile_business_page, mobile_page
 
 
+def _student_summary_snapshot_options():
+    state = getattr(db, '_request_state', lambda: None)()
+    connection = state.get('connection') if state else None
+    if connection is not None and connection.in_transaction and connection.execute('PRAGMA query_only').fetchone()[0]:
+        return {'connection': connection}
+    return {}
+
+
 def build_student_transfer_summary(student_id, user):
     """Student Detail adapter retaining the compact two-argument contract."""
     flags = student_case_views.resolve_student_case_feature_flags(
@@ -523,6 +533,7 @@ def build_student_transfer_summary(student_id, user):
         user,
         database_path=db.path,
         flags=flags,
+        **_student_summary_snapshot_options(),
     )
 
 
@@ -536,6 +547,7 @@ def build_student_progression_summary(student_id, user):
         user,
         database_path=db.path,
         flags=flags,
+        **_student_summary_snapshot_options(),
     )
 
 APP_DIR = STAGING.root if STAGING else Path(__file__).resolve().parent
@@ -4238,6 +4250,9 @@ def submit_parent_reapplication(data, token_row, draft_revision):
             (stamp, token),
         )
         ParentFormRepository(db).delete_draft(conn, token)
+        from business_changes.student_records import publish_student_submission
+        publish_student_submission(conn, student_id=student_id, parent_form_token=token,
+            event_type='parent_form.submitted', occurred_at=stamp)
     return student_id
 
 
@@ -4376,6 +4391,11 @@ def create_student_from_form(data, token_row=None, consultant_id=None, source_to
                 parent_form_token=token_row["token"] if token_row else None,
                 education_stream=data.get("application_stream") or "school_education",
             )
+
+        from business_changes.student_records import publish_student_submission
+        publish_student_submission(conn, student_id=student_id,
+            parent_form_token=token_row['token'] if token_row else '',
+            event_type='parent_form.submitted' if token_row else 'student.created', occurred_at=created)
 
     folder = None
     try:
@@ -5241,6 +5261,10 @@ def replace_student_related_records(conn, student_id, data_for_storage, account_
     )
 
 
+from business_changes.student_records import synchronized_profile_write
+
+
+@synchronized_profile_write
 def write_student_profile(conn, student, data, user, changed_at):
     old_data = student_form_values(student, include_account_password=False)
     account_password = str(data.get("account_password") or "")
@@ -8407,19 +8431,19 @@ def apply_parent_signature_to_contract_signature_section(source_pdf, signature_i
     return target_pdf
 
 
-def apply_aaie_signature_and_stamp(source_pdf, target_pdf, company_signing_date=None):
+def apply_aaie_signature_and_stamp(source_pdf, target_pdf, company_signing_date=None, *, asset_paths=None, placement_snapshot=None):
     source_pdf = Path(source_pdf)
     target_pdf = Path(target_pdf)
     if source_pdf.suffix.lower() != ".pdf":
         raise ValueError("MVP 阶段只能对 PDF 签署版合同加盖 AAIE 签名和公章")
-    signature_path, stamp_path = active_contract_asset_paths()
+    signature_path, stamp_path = active_contract_asset_paths() if asset_paths is None else asset_paths
     if not signature_path.is_file() or not stamp_path.is_file():
         raise ValueError("AAIE signature/stamp assets are not configured.")
     reader = PdfReader(str(source_pdf))
     if not reader.pages:
         raise ValueError("签署版合同 PDF 没有页面")
     writer = PdfWriter()
-    placement = contract_stamp_placement()
+    placement = contract_stamp_placement() if placement_snapshot is None else placement_snapshot
     anchors = _contract_signature_anchors(source_pdf)
     master_layout_signature = any(
         "AAIE / 甲方（签字 / 盖章）" in (page.extract_text() or "")
@@ -8537,12 +8561,12 @@ def apply_aaie_signature_and_stamp(source_pdf, target_pdf, company_signing_date=
     return target_pdf
 
 
-def apply_manual_aaie_signature_and_stamp(source_pdf, target_pdf, placement, company_signing_date=None):
+def apply_manual_aaie_signature_and_stamp(source_pdf, target_pdf, placement, company_signing_date=None, *, asset_paths=None):
     source_pdf = Path(source_pdf)
     target_pdf = Path(target_pdf)
     if source_pdf.suffix.lower() != ".pdf":
         raise ValueError("MVP 阶段手动签名盖章只支持 PDF，请先将图片转换为 PDF 后再上传。")
-    signature_path, stamp_path = active_contract_asset_paths()
+    signature_path, stamp_path = asset_paths if asset_paths is not None else active_contract_asset_paths()
     if not signature_path.is_file() or not stamp_path.is_file():
         raise ValueError("AAIE signature/stamp assets are not configured.")
     reader = PdfReader(str(source_pdf))
@@ -10441,7 +10465,7 @@ def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None
             </a>"""
             for student in students
         ) or '<p class="dashboard-workflow-distribution-chart__empty">暂无学生</p>'
-        rows.append(f"""<details class="dashboard-workflow-distribution-chart__row{muted_class}">
+        rows.append(f"""<details class="dashboard-workflow-distribution-chart__row{muted_class}" data-business-sync-key="{esc(key)}">
           <summary aria-label="展开{esc(label)}明细，共 {stage_count} 个申请周期">
             <span class="dashboard-workflow-distribution-chart__label"><span class="dashboard-workflow-distribution-chart__index">{index + 1}</span><span class="dashboard-workflow-distribution-chart__name">{esc(label)}</span></span>
             <svg class="dashboard-workflow-distribution-chart__svg" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="{esc(label)}：{stage_count}">
@@ -10456,8 +10480,9 @@ def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None
     return f"""
       <link rel="stylesheet" href="/assets/student-lifecycle-phase6.css?v=4">
       <script defer src="/assets/student-lifecycle-phase6.js?v=2"></script>
-      <section id="dashboard-workflow-distribution-chart" class="dashboard-workflow-distribution-chart" aria-label="学生申请阶段分布横向条形图" data-lifecycle-stage-distribution>
+      <section id="dashboard-workflow-distribution-chart" class="dashboard-workflow-distribution-chart" aria-label="学生申请阶段分布横向条形图" data-lifecycle-stage-distribution data-business-sync-fragment="dashboard-workflow">
         <header class="dashboard-workflow-distribution-chart__header"><div><h2>学生申请阶段分布</h2><p>共 {total_count} 个在办周期 · 点击阶段查看对应流程和待办原因。</p></div>
+          <div hidden data-business-sync-controls><button type="button" class="secondary compact" data-business-sync-refresh>刷新</button> <small role="status" data-business-sync-status></small></div>
           <div class="lifecycle-stage-filters" role="group" aria-label="Lifecycle Type filter" hidden>{''.join(f'<button type="button" class="secondary compact{" active" if key == "all" else ""}" data-lifecycle-stage-filter="{key}" aria-pressed="{"true" if key == "all" else "false"}">{label}</button>' for key, label in (("all", "ALL"), ("initial", "INITIAL"), ("transfer", "TRANSFER"), ("progression", "PROGRESSION")))}</div>
         </header>
         <div class="dashboard-lifecycle-active-cards" aria-label="当前转学与升学业务" hidden>
@@ -22584,7 +22609,14 @@ def refresh_upload_session_counts(session_id):
     )
 
 
-def create_upload_review(student_id, module, uploads, user, form=None):
+def create_upload_review(student_id, module, uploads, user, form=None,*,permission_policy='upload'):
+    from business_changes.runtime import enabled
+    connection=db.connect()
+    try:shared=enabled(connection)
+    finally:db._release_connection(connection)
+    if shared:
+        from business_changes.upload_staging import create_pending_review
+        return create_pending_review(globals(),student_id,module,uploads,user,form,permission_policy=permission_policy)
     if module not in MODULE_REVIEW_CONFIG:
         raise ValueError("未知上传模块")
     token = new_token(18).replace("-", "_")
@@ -22672,7 +22704,20 @@ def load_upload_review(token):
     metadata_path = ensure_within(folder / "review.json", folder)
     if not metadata_path.exists():
         raise ValueError("Upload Review 已失效或不存在")
-    return folder, json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata=json.loads(metadata_path.read_text(encoding='utf-8'))
+    if not isinstance(metadata,dict) or not isinstance(metadata.get('files'),list):
+        raise ValueError('审核清单格式无效，请重新上传。')
+    if metadata.get('token')!=token or any(not isinstance(item,dict) for item in metadata['files']):
+        raise ValueError('审核清单与本次上传不匹配，请重新上传。')
+    from business_changes.upload_review import verify_review_manifest
+    prepared=[{'original_name':item.get('original_name'),
+        'staging_path':str(ensure_within(folder/item['blob'],folder)),
+        'content_type':item.get('content_type') or 'application/octet-stream',
+        'file_size':item.get('size'),'sha256':item.get('sha256')} for item in metadata['files']]
+    connection=db.connect()
+    try:verify_review_manifest(connection,metadata=metadata,prepared_files=prepared)
+    finally:db._release_connection(connection)
+    return folder,metadata
 
 
 def delete_upload_review(token):
@@ -22687,6 +22732,8 @@ def delete_upload_review(token):
 def upload_from_review(folder, file_meta):
     blob = ensure_within(folder / file_meta["blob"], folder)
     data = blob.read_bytes()
+    if file_meta.get('sha256') is not None and (len(data)!=file_meta.get('size') or hashlib.sha256(data).hexdigest()!=file_meta['sha256']):
+        raise ValueError('暂存文件内容已变化，请重新上传并核对。')
     return Upload("file", file_meta["original_name"], file_meta.get("content_type") or "application/octet-stream", data)
 
 
@@ -24976,8 +25023,9 @@ def visa_granted_sentence_date(text):
     return normalize_offer_date(match.group(1)) if match else ""
 
 
-def infer_visa_details(upload):
-    text = extract_uploaded_text(upload)
+def infer_visa_details(upload, *, text=None):
+    if text is None:
+        text = extract_uploaded_text(upload)
     lines = [normalize_visa_pdf_text_line(line) for line in text.splitlines()]
     lines = [line for line in lines if line]
     normalized_text = "\n".join(lines)
@@ -27586,6 +27634,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     lambda body: self.send_html(page("Agent Reach 工作台", body, self.user, self.csrf, "agent_reach", nas=nas.status())),
                 )
             if not self.user:
+                if self.parsed.path.startswith('/api/business-changes/'):
+                    return self.json_response({'ok':False,'code':'login_required'},HTTPStatus.UNAUTHORIZED)
                 if is_content_extraction_transcript_json_api(self.parsed.path):
                     return self.json_response(
                         {"ok": False, "error": "登录状态已过期，请刷新页面后重试。"},
@@ -27599,6 +27649,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             except OSError:
                 pass
             read_only_json_routes = [
+                (r"^/api/business-changes/versions$", self.business_change_versions),
+                (r"^/api/business-changes/snapshot$", self.business_change_snapshot),
                 (r"^/school-plan-reports/workspace-data$", self.school_plan_report_workspace_data),
             ]
             for pattern, callback in read_only_json_routes:
@@ -27869,6 +27921,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students$", self.students),
                 (r"^/students/withdrawn-applications$", self.withdrawn_applications),
                 (r"^/students/(\d+)/applications/(\d+)/withdraw$", self.student_application_withdraw),
+                (r"^/students/(\d+)/pending-transfer/(\d+)/withdraw$", self.student_pending_transfer_withdraw),
                 (r"^/students/external-transfer/new$", self.student_external_intake),
                 (r"^/students/external-progression/new$", self.student_external_intake),
                 (r"^/students/new$", self.student_new),
@@ -28120,6 +28173,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("页面不存在", HTTPStatus.NOT_FOUND)
         except MaintenanceError:
             raise
+        except BusinessPermissionError as exc:
+            if 'application/json' in str(self.headers.get('Accept') or '') or self.headers.get('X-Requested-With')=='fetch':
+                return self.json_response({'ok':False,'code':'forbidden','message':str(exc)},HTTPStatus.FORBIDDEN)
+            return self.error_page(str(exc),HTTPStatus.FORBIDDEN)
         except (NasSafetyError, ValueError) as exc:
             if is_content_extraction_transcript_json_api(getattr(getattr(self, "parsed", None), "path", "")):
                 return self.json_response(
@@ -31317,6 +31374,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         return self.error_page("该合同上传已删除。", HTTPStatus.NOT_FOUND)
                 owned = pilot and any(scope.owns_document(connection,document)
                                       for scope in list_school_pilot_scopes(connection,pilot))
+                if not owned and pilot and document["document_kind"] == "school_commission_invoice":
+                    from revenue.school_invoice_workspace import invoice_school_scope
+
+                    invoice = connection.execute(
+                        "SELECT revenue_entity_id FROM revenue_invoices WHERE document_id=?", (document["id"],),
+                    ).fetchone()
+                    scope = invoice_school_scope(connection, pilot, entity_id=invoice[0]) if invoice else None
+                    owned = scope and scope.owns_document(connection, document)
                 if not owned and document["document_kind"] == "school_commission_signed_contract":
                     setup = school_commission_authority(self.user, "setup")
                     owned = setup and setup.simulation and connection.execute(
@@ -31627,7 +31692,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         """
         return self.send_html(page(f"{period_label}{title}明细", body, self.user, self.csrf, "dashboard", nas.status()))
 
-    def _dashboard_read_snapshot(self, method, read_context):
+    def _dashboard_read_snapshot(self, method, read_context, *, fragment_only=False, stage_students=None):
         melbourne_today = datetime.now(ZoneInfo("Australia/Melbourne")).date()
         final_workflow_stage = WORKFLOW_STAGES[-1][0]
         kpi_connection = db.connect()
@@ -31652,9 +31717,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         stage_connection = db.connect()
         try:
-            application_stage_students = load_application_stage_distribution(
-                stage_connection, read_context=read_context, cycles_only=True
-            )
+            application_stage_students = (stage_students if stage_students is not None
+                else load_application_stage_distribution(
+                    stage_connection, read_context=read_context, cycles_only=True
+                ))
         finally:
             db._release_connection(stage_connection)
         stage_chart_html = dashboard_workflow_distribution_chart_html(
@@ -31708,6 +31774,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         dashboard_workflow_chart_css = '<link rel="stylesheet" href="/assets/dashboard-workflow-distribution-chart-v1.css?v=11">'
         dashboard_signed_institution_css = '<link rel="stylesheet" href="/assets/dashboard-signed-institution-structure-chart-v1.css?v=5">'
         body = f"""
+        <div style="display:contents" data-business-sync-fragment="dashboard-overview" data-business-sync-endpoint="/api/business-changes/snapshot?surface=dashboard_overview">
         {dashboard_workflow_chart_css}
         {dashboard_signed_institution_css}
         <section class="dashboard-hero panel">
@@ -31715,12 +31782,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <div class="dashboard-actions"><a class="primary button-link" href="/students/new">新建学生</a><a class="parent-link-action button-link" href="/parent-links">生成家长表单</a></div>
         </section>
         {kpi_cards_html}
+        {self.business_change_visa_consistency_html()}
         {signed_institution_structure_html}
         <div class="dashboard-chart-grid">
           <section class="panel dashboard-recent-panel"><div class="panel-head"><div><h2>最近学生</h2><p>按建档时间显示</p></div><a class="secondary button-link" href="/students">查看全部</a></div>
           <div class="table-wrap"><table class="dashboard-recent-table"><thead><tr><th>Student ID</th><th>学生</th><th>申请阶段</th><th>最终确认学校</th><th>申请年级</th><th>创建日期</th></tr></thead><tbody>{rows}</tbody></table></div></section>
           {stage_chart_html}
-        </div>"""
+        </div></div>"""
+        if fragment_only:
+            return body
         message, kind = self.message()
         self.send_html(page("工作概览", body, self.user, self.csrf, "dashboard", nas.status(), message, kind))
 
@@ -41631,7 +41701,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         message, kind = self.message()
         self.send_html(page("创建学校方案报告", body, self.user, self.csrf, "school_plan_reports", nas.status(), message, kind))
 
-    def higher_education_workspace(self, method):
+    def higher_education_workspace(self, method, *, fragment_only=False):
         if method != "GET":
             return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
         providers = db.all("SELECT * FROM higher_education_providers ORDER BY provider_type,provider_name")
@@ -41649,8 +41719,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         cycles = db.all("SELECT id,student_id FROM application_cycles WHERE education_stream='higher_education' AND status='active' ORDER BY id DESC")
         plan_items = db.all(
-            """SELECT i.*,u.provider_name,pc.display_name pathway_name
+            """SELECT i.*,u.provider_name,pc.display_name pathway_name,
+                 (SELECT a.status FROM higher_education_applications a
+                  WHERE a.source_plan_item_id=i.id AND a.application_cycle_id=owner.application_cycle_id
+                    AND a.is_current=1 ORDER BY a.id DESC LIMIT 1) current_application_status
                FROM higher_education_plan_items i
+               JOIN higher_education_plans owner ON owner.id=i.plan_id
                JOIN higher_education_providers u ON u.id=i.provider_id
                LEFT JOIN higher_education_pathway_combinations pc ON pc.id=i.pathway_combination_id
                ORDER BY i.plan_id,i.item_order"""
@@ -41670,13 +41744,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         can_review = is_admin and not legacy_closed
         body = render_higher_education_workspace(
             providers=providers, relationships=relationships, plans=plans,
-            applications=applications, csrf=self.csrf, can_manage=True, cycles=cycles, plan_items=plan_items,
+            applications=applications, csrf=self.csrf, can_manage=self.user.get('role_name')!='View Only', cycles=cycles, plan_items=plan_items,
             offers=offers, temporary_shares=temporary_shares, can_review=can_review,
             pathways=pathways, courses=courses, can_view_legacy_commission=is_admin,
             legacy_commission_writes_closed=legacy_closed,
+            command_fields=self.business_change_higher_education_hidden_fields,
         )
+        if fragment_only:return body
         message, kind = self.message()
-        self.send_html(page("高等教育申请", body, self.user, self.csrf, "higher_education", nas.status(), message, kind))
+        return self.send_html(page("高等教育申请", body, self.user, self.csrf, "higher_education", nas.status(), message, kind))
 
     def higher_education_provider_create(self, method):
         if method != "POST":
@@ -41772,7 +41848,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if method != "POST":
             return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
         with db.transaction() as conn:
-            HigherEducationRepository(conn).remove_draft_plan_item(int(item_id))
+            HigherEducationRepository(conn).remove_draft_plan_item(int(item_id),actor_user_id=self.user['id'],occurred_at=now_iso())
         db.audit(self.user, "higher_education_plan_item_removed", "higher_education", str(item_id))
         return self.flash_redirect("/higher-education", "草稿大学申请已移除。")
 
@@ -42046,19 +42122,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         active_status = str(self.form.get("active_status") or "")
         if not provider_name or active_status not in {"Active", "Inactive"}:
             raise HigherEducationValidationError("valid university name and status are required")
-        normalized_name = " ".join(provider_name.casefold().split())
         with db.transaction() as conn:
-            changed = conn.execute(
-                """UPDATE higher_education_providers
-                   SET provider_name=?,normalized_name=?,short_name=?,state=?,city=?,active_status=?,source_url=?,
-                       updated_by_user_id=?,updated_at=?
-                   WHERE id=? AND provider_type='University'""",
-                (provider_name, normalized_name, self.form.get("short_name"), self.form.get("state"),
-                 self.form.get("city"), active_status, self.form.get("source_url"), self.user["id"],
-                 now_iso(), int(university_id)),
-            ).rowcount
-            if changed != 1:
-                raise HigherEducationValidationError("university does not exist")
+            HigherEducationRepository(conn).update_university(
+                int(university_id),provider_name,active_status,self.user['id'],now_iso(),
+                short_name=self.form.get('short_name'),state=self.form.get('state'),city=self.form.get('city'),
+                source_url=self.form.get('source_url'))
         db.audit(self.user, "higher_education_university_updated", "school_library", str(university_id))
         return self.flash_redirect(self.university_detail_return_url(university_id), "University 已更新。")
 
@@ -55042,6 +55110,47 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         </div>"""
         self.send_html(page("提醒规则设置", body, self.user, self.csrf, "reminders", nas.status()))
 
+    def student_pending_transfer_withdraw(self, method, student_id, contract_id):
+        from student_lifecycle.pending_transfer_withdrawal import (
+            PendingTransferWithdrawalConflict, pending_transfer_contract, withdraw_pending_transfer,
+        )
+
+        if method not in {"GET", "POST"}:
+            return self.error_page("操作方式无效。", HTTPStatus.METHOD_NOT_ALLOWED)
+        student = self.student_detail_row(student_id)
+        if not student or not can_manage_application_withdrawal(self.user, student) or not can_manage_transfer_contract(self.user):
+            return self.error_page("你没有终止待签转学申请的权限。", HTTPStatus.FORBIDDEN)
+        contract_id = int(contract_id)
+        href = f"/students/{quote(student_id)}"
+        try:
+            if method == "POST":
+                with db.transaction() as connection:
+                    withdraw_pending_transfer(
+                        connection, student_id, contract_id, form_text_value(self.form, "reason"),
+                        actor=self.user, timestamp=now_iso(),
+                        keep_signature=form_text_value(self.form, "keep_signature") == "1",
+                    )
+                return self.flash_redirect(href, "待签转学申请已终止。")
+            with db.read_snapshot() as connection:
+                contract = pending_transfer_contract(connection, student_id, contract_id)
+        except PendingTransferWithdrawalConflict as error:
+            return self.error_page(str(error), HTTPStatus.CONFLICT)
+        signed = contract["has_signature"]
+        notice = ("已有家长签名。确认后将停止这轮转学办理，保留原合同和签名。"
+                  if signed else "确认后撤销该合同的签署链接，并保留合同和历史记录。")
+        body = f"""<section class="panel">
+          <h2>终止待签转学申请</h2>
+          <p>{esc(student_display_name(student))} · {esc(contract["contract_title"] or "转学合同")}</p>
+          <p>{esc(notice)}</p>
+          <form method="post">
+            <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+            <input type="hidden" name="keep_signature" value="{int(signed)}">
+            <label>终止原因<textarea name="reason" maxlength="1000" required></textarea></label>
+            <div class="row-actions"><button class="danger" type="submit">确认终止</button>
+              <a class="secondary button-link" href="{esc(href)}">返回学生档案</a></div>
+          </form></section>"""
+        return self.send_html(page("终止待签转学申请", body, self.user, self.csrf, "students", nas.status()))
+
     def student_application_withdraw(self, method, student_id, cycle_id):
         if method not in {"GET", "POST"}:
             return self.error_page("操作方式无效。", HTTPStatus.METHOD_NOT_ALLOWED)
@@ -55162,7 +55271,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <tbody>{rows_html}</tbody></table></div></section>"""
         return self.send_html(page("已终止申请", body, self.user, self.csrf, "students", nas.status()))
 
-    def students(self, method):
+    def students(self, method, *, fragment_only=False):
         if not self.require("students.view"):
             return
         q = (self.query.get("q") or [""])[0].strip()
@@ -55301,10 +55410,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                    ON latest.id=r.id"""
             )
         }
-        latest_tokens = {}
-        for token_row in db.all("SELECT * FROM parent_form_tokens WHERE student_id IS NOT NULL AND student_id<>'' ORDER BY created_at DESC"):
-            if token_row["student_id"] not in latest_tokens:
-                latest_tokens[token_row["student_id"]] = token_row
         if sort == "stage":
             rows_data = sorted(
                 rows_data,
@@ -55359,6 +55464,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
                 known_management_stages.add(summary.stage_key)
         management_stages += tuple(observed_management_stages)
+        if stage_filter and stage_filter not in known_management_stages:
+            # An empty result must retain the filter that made it empty.
+            # Observed stages change as students move; the selection does not.
+            from dashboard_confirmed_stages import STAGE_DETAILS
+            from student_lifecycle.transfer_v2_projection import STAGES as transfer_stage_details
+            stage_labels = {**dict(APPLICATION_STAGE_DEFINITIONS), **dict(CANONICAL_APPLICATION_STAGE_DEFINITIONS),
+                **{key: value[1] for key, value in STAGE_DETAILS.items()},
+                **{key: value[1] for key, value in transfer_stage_details.items()},
+                'contract_preparation': '准备签署', 'visa_refused': '已拒签', 'visa_withdrawn': '签证申请已撤回'}
+            management_stages += ((stage_filter, stage_labels.get(stage_filter, '当前选定阶段（无匹配）')),)
         stage_options = '<option value="">全部阶段</option>' + "".join(
             f'<option value="{esc(stage)}" {"selected" if stage_filter == stage else ""}>{esc(label)}</option>'
             for stage, label in management_stages
@@ -55403,13 +55518,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <thead><tr><th><input type="checkbox" aria-label="Select all"></th><th>学生号</th><th>学生名</th><th>申请阶段</th><th>最终确认学校</th><th>申请年级</th><th>建档时间</th><th>Offer开学时间</th><th>下签时间</th><th class="student-actions-heading">操作</th></tr></thead>
               <tbody>{rows_html}</tbody>
             </table></div>"""
-        summary_cards = f"""
-        <div class="student-management-summary">
-          <div><strong>{len(rows_data)}</strong><span>当前结果</span></div>
-          <div><strong>{sum(1 for row in rows_data if any(a.get("level") == "waiting" for a in row_alerts[row["student_id"]]))}</strong><span>等待家长</span></div>
-          <div><strong>{sum(1 for row in rows_data if any(a.get("level") == "risk" for a in row_alerts[row["student_id"]]))}</strong><span>风险提醒</span></div>
-          <div><strong>{sum(1 for row in rows_data if latest_tokens.get(row["student_id"]) and parent_token_status(latest_tokens[row["student_id"]]) == "Pending")}</strong><span>表单待提交</span></div>
-        </div>"""
         body = f"""
         <link rel="stylesheet" href="/assets/student-management-application-summary-v1.css?v=2">
         <div data-student-management-application-summary>
@@ -55426,9 +55534,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <button class="secondary" type="submit">上传模板并建档</button>
             </form>
           </div>
-          {summary_cards}
         </section>
-        <section class="panel student-workflow-list-panel student-management-mobile-safe"><div class="panel-head"><div><h2>学生工作台</h2><p>表格视图用于日常管理、筛选、批量操作和进入学生流程。</p></div></div>
+        <section class="panel student-workflow-list-panel student-management-mobile-safe">
+          <div class="panel-head"><div><h2>学生工作台</h2><p>共 {len(rows_data)} 名学生</p></div></div>
           <form class="workflow-filter-bar student-management-filters" method="get">
             <input type="hidden" name="view" value="table">
             <div class="filter-search-row">
@@ -55456,7 +55564,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               </fieldset>
             </div>
           </form>
-          <form class="student-bulk-delete-form" method="post" action="/students/bulk-delete">
+          <form class="student-bulk-delete-form" data-business-sync-selection="1" method="post" action="/students/bulk-delete">
           <input type="hidden" name="csrf" value="{esc(self.csrf)}">
           <div class="bulk-action-bar">
             <span>批量操作</span>
@@ -55470,6 +55578,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           {content_html}
           </form>
         </section></div>"""
+        if fragment_only:
+            return body
         message, kind = self.message()
         self.send_html(page("学生管理", body, self.user, self.csrf, "students", nas.status(), message, kind))
 
@@ -60227,13 +60337,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     action = "progression_school_return_confirmed"
                 else:
                     raise ValueError("申请类型与确认事项不匹配")
-                connection.execute(
-                    """INSERT INTO audit_logs(user_id,username,action_type,module_name,module_key,
-                                              record_id,student_id,new_value,status,created_at)
-                       VALUES (?,?,?,'application_cycles','application_cycles',?,?,?,'success',?)""",
-                    (self.user["id"], self.user["username"], action, cycle_id, student_id,
-                     json.dumps(payload, ensure_ascii=False), now_iso()),
-                )
+                from business_changes.stage_evidence import record_stage_evidence
+                record_stage_evidence(connection, student_id=student_id, cycle_id=cycle_id,
+                    actor_id=self.user["id"], actor_name=self.user["username"],
+                    action=action, payload=payload, stamp=now_iso())
         except ValueError as exc:
             return self.flash_redirect(location, str(exc), "error")
         return self.flash_redirect(location, "已保存当前周期的确认记录")
@@ -60260,7 +60367,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             kind, title, action = "return", "升学 Offer 回传", "progression_school_return_confirmed"
             options = (("required", "待回传"), ("returned", "已回传"), ("optional", "学校不要求回传"))
             date_field = '<label>实际回传日期<input type="date" name="returned_on"></label>'
-        with db.read_snapshot() as connection:
+        from business_changes.snapshots import read_scope
+        with read_scope(db) as connection:
             current = stage_decisions(connection, action, (workflow.cycle_id,)).get(workflow.cycle_id, {})
             if kind == "return":
                 key = pathway_offer_key(connection, workflow.cycle_id)
@@ -60285,7 +60393,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             </form>
           </details>"""
 
-    def student_detail(self, method, student_id):
+    def student_detail(self, method, student_id, *, fragment_only=False):
         if not self.require("students.view"):
             return
         route_start = time.perf_counter()
@@ -60425,14 +60533,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             (student_id,),
         )
         student_perf_log("student_info_document_query", student_id, elapsed_ms=perf_ms(step_start), count=1 if student_info_document else 0)
-        if student_info_document and not SAFE_PRODUCTION_ACTIVE:
+        if student_info_document and not SAFE_PRODUCTION_ACTIVE and not fragment_only and not getattr(self,'business_changes_enabled',lambda:False)():
             try:
                 ensure_student_info_document_filename(student, student_info_document)
             except Exception as exc:
                 append_service_log("admin", "student_info_filename_sync_failed", repr(exc), student_id=student_id)
 
         data = json.loads(student["form_data_json"])
-        visa_only = requested_cycle is None and student_application_service(data) == "visa_only"
+        visa_only = (
+            requested_cycle is None
+            and student_application_service(data) == "visa_only"
+            and not has_current_school_workflow(
+                (workflow_projection_map or {}).get(str(student_id)), card_summary.schools
+            )
+        )
         alerts = []
         if data.get("has_medical_or_psychological_history") == "有":
             alerts.append("健康状况提醒")
@@ -60655,6 +60769,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                       <input type="hidden" name="intake_type" value="ordinary_new_application">
                       <button class="secondary" type="submit">重新生成家长表单</button>
                     </form>"""
+        if (not withdrawal_button and requested_cycle is None and can_manage_withdrawal
+                and can_manage_transfer_contract(self.user) and withdrawal_projection is not None
+                and withdrawal_projection.state == "contract_pending"):
+            from student_lifecycle.pending_transfer_withdrawal import (
+                PendingTransferWithdrawalConflict, pending_transfer_contract,
+            )
+            from student_lifecycle.transfer_state import load_student_transfer_state_map
+
+            with db.read_snapshot() as connection:
+                transfer_intake = load_student_transfer_state_map(connection, (str(student_id),)).get(str(student_id))
+                if transfer_intake and transfer_intake.contract_id:
+                    try:
+                        pending_transfer_contract(connection, str(student_id), transfer_intake.contract_id, verify_current=False)
+                    except PendingTransferWithdrawalConflict as error:
+                        withdrawal_button = f'<p class="muted">{esc(str(error))}</p>'
+                    else:
+                        href = f"/students/{quote(str(student_id))}/pending-transfer/{transfer_intake.contract_id}/withdraw"
+                        withdrawal_button = f'<a class="danger button-link" href="{esc(href)}">终止待签转学申请</a>'
         school_names_html = ""
         if card_summary.schools.is_final:
             final_school_name = card_summary.schools.final_school_name or (
@@ -60726,7 +60858,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         quick_add_html = ""
         if can_reminder_action(self.user, "create"):
             quick_add_html = f'''
-            <details class="student-detail-quick-add">
+            <details class="student-detail-quick-add" data-business-sync-preserve="followup-{esc(student_id)}">
               <summary>快速添加</summary>
               <form method="post" action="/students/{quote(str(student_id))}/followup-notes" data-student-followup-quick-add>
                 <input type="hidden" name="csrf" value="{esc(self.csrf)}">
@@ -60789,11 +60921,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "unavailable": "暂不可用",
             "error": "需要检查",
         }.get(str(student["nas_status"] or "").strip().lower(), "待确认")
-        body = f"""
-        <link rel="stylesheet" href="/assets/student-followup-notes-v1.css?v=1">
-        <link rel="stylesheet" href="/assets/student-detail-summary-cards-v1.css?v=1">
-        <link rel="stylesheet" href="/assets/student-lifecycle-phase6.css?v=3">
-        <script defer src="/assets/student-lifecycle-phase6.js?v=3"></script>
+        summary_html = f"""
         <section class="student-summary-card panel">
           <div class="student-summary-main">
             <a class="back-link" href="/students">← 学生列表</a>
@@ -60806,9 +60934,30 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             {status_card_html}
             {school_card_html}
             {followup_card_html}
+            {self.business_change_pending_reviews_html(student_id) if getattr(self, 'business_changes_enabled', lambda: False)() else ''}
             <div data-student-summary-fact><span>文件存储状态</span><strong>{esc(file_storage_status_text)}</strong></div>
           </div>
         </section>
+        """
+        if getattr(self, 'business_changes_enabled', lambda: False)():
+            summary_query = {'surface': 'student_summary', 'student_id': str(student_id)}
+            if requested_cycle is not None:
+                summary_query['application_cycle_id'] = str(requested_cycle)
+            summary_endpoint = '/api/business-changes/snapshot?' + urlencode(summary_query)
+            summary_html = (
+                f'<div data-business-sync-fragment="student-summary" data-business-sync-endpoint="{esc(summary_endpoint)}">'
+                '<div class="business-sync-toolbar"><button type="button" class="secondary compact" data-business-sync-refresh>刷新状态</button>'
+                '<small data-business-sync-status aria-live="polite">正在核对最新状态</small></div>'
+                + summary_html + '</div>'
+            )
+        if fragment_only:
+            return summary_html
+        body = f"""
+        <link rel="stylesheet" href="/assets/student-followup-notes-v1.css?v=1">
+        <link rel="stylesheet" href="/assets/student-detail-summary-cards-v1.css?v=1">
+        <link rel="stylesheet" href="/assets/student-lifecycle-phase6.css?v=3">
+        <script defer src="/assets/student-lifecycle-phase6.js?v=3"></script>
+        {summary_html}
         {parent_link_auto_copy_notice}
         {contract_auto_copy_notice}
         <div class="tabs" data-tabs>
@@ -61009,7 +61158,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         return self.student_followup_redirect(student_id, message)
 
-    def student_detail_tab(self, method, student_id, tab):
+    def student_detail_tab(self, method, student_id, tab, *, fragment_only=False):
+        if fragment_only and (method!='GET' or not allowed(self.user,'students.view')):
+            raise PermissionError('student_tab_forbidden')
         if method != "GET" or not self.require("students.view"):
             return
         student_case_flags = student_case_views.resolve_student_case_feature_flags(
@@ -61019,6 +61170,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         student_case_tab = tab in {"transfer_cases", "progression_cases"}
         student = self.student_detail_row(student_id)
         if not student:
+            if fragment_only:raise LookupError('student_not_found')
             return self.error_page("学生不存在", 404)
         transfer_case_access = student_capabilities.can_view_transfer_cases(
             self.user, student, flags=student_case_flags
@@ -61031,6 +61183,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             else progression_case_access
         )
         if student_case_tab and not student_case_access:
+            if fragment_only:raise PermissionError('student_case_tab_forbidden')
             return self.deny_module_access("students")
         access = {
             "transfer_cases": transfer_case_access,
@@ -61048,10 +61201,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "revenue": can_access_revenue(self.user),
         }
         if not access.get(tab):
+            if fragment_only:raise PermissionError('student_tab_forbidden')
             return self.deny_module_access("students")
         start = time.perf_counter()
         content = self.student_detail_tab_content(student, tab)
         student_perf_log("tab_total", student_id, tab=tab, elapsed_ms=perf_ms(start))
+        if tab in getattr(self,'BUSINESS_SYNC_STUDENT_TABS',()) and self.business_changes_enabled():
+            content=content.replace('data-dialog-close>取消','data-dialog-close data-business-sync-discard>取消')
+            endpoint='/api/business-changes/snapshot?'+urlencode({'surface':'student_tab','student_id':str(student_id),'tab':tab})
+            content=(f'<div data-business-sync-fragment="student-tab-{esc(tab)}" data-business-sync-endpoint="{esc(endpoint)}">'
+                '<div class="business-sync-toolbar"><button type="button" class="secondary compact" data-business-sync-refresh>刷新数据</button>'
+                '<small data-business-sync-status aria-live="polite"></small></div>'+content+'</div>')
+        if fragment_only:return content
         self.send_html(content, headers=[("Cache-Control", "no-store")])
 
     def student_detail_tab_content(self, student, tab):
@@ -61074,6 +61235,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 staff_users=self.transfer_case_staff_users(),
                 school_choices=self.transfer_case_school_choices(),
                 city_choices=self.transfer_case_city_choices(),
+                **_student_summary_snapshot_options(),
             )
         if tab == "progression_cases":
             return progression_case_views.render_progression_case_tab(
@@ -61081,6 +61243,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 csrf=self.csrf,
                 staff_users=self.progression_case_staff_users(),
                 school_choices=self.progression_case_school_choices(),
+                **_student_summary_snapshot_options(),
             )
         if tab == "applications":
             step_start = time.perf_counter()
@@ -61093,7 +61256,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             student_perf_log("file_query", student_id, tab=tab, elapsed_ms=perf_ms(step_start), count=len(docs))
             normalized_docs = []
             for document in docs:
-                if SAFE_PRODUCTION_ACTIVE:
+                if SAFE_PRODUCTION_ACTIVE or getattr(self,'business_changes_enabled',lambda:False)():
                     normalized_docs.append(document)
                     continue
                 try:
@@ -61567,7 +61730,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                   AND c.status='active' AND c.cycle_type='initial'
                   AND c.education_stream='school_education'""", (student_id,)
         )
-        with db.read_snapshot() as connection:
+        from business_changes.snapshots import read_scope
+        with read_scope(db) as connection:
             decisions = load_optional_steps(connection, tuple(row["id"] for row in rows))
         panels = []
         for row in rows:
@@ -61617,8 +61781,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def final_school_coe_panel_rows(self, student_id):
         from final_school_coe import historical_school_coe_rows, school_coe_rows
-
-        with db.read_snapshot() as conn:
+        from business_changes.snapshots import read_scope
+        with read_scope(db) as conn:
             if not is_workflow_v2_active(conn) or not conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='final_school_coe_confirmations'"
             ).fetchone():
@@ -61870,6 +62034,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 f'<small>{esc(display_datetime(uploaded_value))}</small></div>'
                 f'<form id="{form_id}" class="offer-inline-form offer-card-fields" data-ajax-offer method="post" action="/students/{student_id}/offer/{offer["id"]}/update">'
                 f'<input type="hidden" name="csrf" value="{esc(self.csrf)}">'
+                f'{getattr(self,"business_change_record_hidden_fields",lambda *args:"")("Offer",student_id,int(offer["id"]))}'
                 f'{school_field}'
                 f'<label>发 Offer 时间{crm_display_date_input("offer_date", offer["offer_date"], form_id)}</label>'
                 f'<label>语言学校<input name="language_school_name" value="{esc(offer_record_value(offer, "language_school_name"))}" placeholder="待确认"></label>'
@@ -61929,7 +62094,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <div class="offer-acceptance-live" data-offer-acceptance-live aria-live="polite"></div>
           <p class="offer-coe-warning-copy" hidden>已有 COE：更换已接受 Offer 可能影响现有 COE，请确认风险后继续。</p>
         </section>
-        <dialog id="offer-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/offer"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><div class="dialog-head"><h2>手动新增 Offer</h2><button type="button" class="icon-button" data-dialog-close>×</button></div>
+        <dialog id="offer-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/offer"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{getattr(self,"business_change_record_hidden_fields",lambda *args:"")("Offer",student_id)}<div class="dialog-head"><h2>手动新增 Offer</h2><button type="button" class="icon-button" data-dialog-close>×</button></div>
           <div class="dialog-grid">
             {transfer_branch_field}
             <label>学校名称<input name="school_name" required></label>
@@ -61947,6 +62112,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         """
 
     def backfill_coe_record(self, student_id, record):
+        if getattr(self,'business_changes_enabled',lambda:False)():
+            return record
         if not record["file_path"]:
             return record
         kind = coe_kind_from_review(record["document_kind"])
@@ -62063,6 +62230,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 form_id = f"coe-edit-{record['id']}-{re.sub(r'[^a-z0-9]+', '-', title.lower())}"
                 controls = [
                     f'<input type="hidden" name="csrf" value="{esc(self.csrf)}">',
+                    getattr(self,'business_change_record_hidden_fields',lambda *args:'')('COE + OSHC',student_id,int(record['id'])),
                     f'<input type="hidden" name="document_kind" value="{esc(record["document_kind"])}">',
                 ]
                 for label, name, kind, fallback in fields:
@@ -62150,7 +62318,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           </form>
           <div class="coe-sections">{coe_section}{caaw_section}{oshc_section}{letter_section}</div>
         </section>
-        <dialog id="coe-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/coe"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><div class="dialog-head"><h2>手动新增 COE / CAAW / OSHC / Letter of Confirmation</h2><button type="button" class="icon-button" data-dialog-close>×</button></div>
+        <dialog id="coe-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/coe"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{getattr(self,"business_change_record_hidden_fields",lambda *args:"")("COE + OSHC",student_id)}<div class="dialog-head"><h2>手动新增 COE / CAAW / OSHC / Letter of Confirmation</h2><button type="button" class="icon-button" data-dialog-close>×</button></div>
           <div class="dialog-grid">
             {transfer_branch_field}{cycle_selection}
             <label>文件类型<select name="document_kind" required><option value="COE">COE</option><option value="CAAW">CAAW</option><option value="OSHC">OSHC</option><option value="OSHCReceipt">OSHCReceipt</option><option value="COE_CAAW">COE_CAAW</option><option value="LetterOfConfirmation">Letter of Confirmation</option></select></label>
@@ -62402,14 +62570,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         self.visa_lodgement_update_case_result(case["id"], file_type_value, filename)
         return f"已关联到 VISA Management Case #{case['id']}。"
 
-    def visa_lodgement_sync_material_upload_to_visa_tab(self, case, item, document_id, filename):
+    def visa_lodgement_sync_material_upload_to_visa_tab(self, case, item, document_id, filename, *, connection=None):
+        read_one = db.one if connection is None else lambda sql, params=(): connection.execute(sql, params).fetchone()
+        execute = db.execute if connection is None else connection.execute
         file_type_value = self.visa_lodgement_file_type_from_material_item(item, filename)
         if file_type_value == "other" and self.visa_material_item_title(item).lower() not in {"other"}:
             return
-        document = db.one("SELECT * FROM student_documents WHERE id=?", (document_id,))
+        document = read_one("SELECT * FROM student_documents WHERE id=?", (document_id,))
         if not document:
             return
-        existing = db.one(
+        existing = read_one(
             "SELECT * FROM visas WHERE student_id=? AND file_path=? LIMIT 1",
             (case["student_id"], document["file_path"]),
         )
@@ -62418,7 +62588,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if existing:
             pass  # Preserve existing confirmed Visa state during document upload.
         else:
-            db.execute(
+            execute(
                 """INSERT INTO visas(student_id,file_path,visa_type,visa_sector,visa_grant_date,visa_start_date,visa_expiry_date,
                    visa_conditions,visa_status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (
@@ -62465,7 +62635,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 '<option value="granted" selected>已获签</option>'
                 '<option value="active">当前有效</option>'
             )
-            existing_dialog = f"""<dialog id="existing-visa-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/visa"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="visa_record_purpose" value="existing_evidence"><div class="dialog-head"><h2>上传已有签证</h2><button type="button" class="icon-button" data-dialog-close>×</button></div><div class="dialog-grid">
+            existing_dialog = f"""<dialog id="existing-visa-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/visa"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{getattr(self,"business_change_record_hidden_fields",lambda *args:"")("Visa",student_id)}<input type="hidden" name="visa_record_purpose" value="existing_evidence"><input type="hidden" name="existing_visa_cycle_id" value="{int(existing_cycle['id'])}"><div class="dialog-head"><h2>上传已有签证</h2><button type="button" class="icon-button" data-dialog-close>×</button></div><div class="dialog-grid">
               <label>签证类型<input name="visa_type" placeholder="例如 Student Visa Subclass 500" required></label>
               <label>Sector<select name="visa_sector"><option value="">请选择</option>{sector_select}</select></label>
               <label>文件类型{self.visa_lodgement_file_type_select_html('grant_letter')}</label>
@@ -62479,7 +62649,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             </div><div class="dialog-actions"><button type="button" class="ghost" data-dialog-close>取消</button><button class="primary">保存已有签证</button></div></form></dialog>"""
         return f"""<section class="panel"><div class="panel-head"><div><h2>VISA 管理</h2><p>MVP 基础记录与文件归档；递交、S56、结果文件会同步到 VISA Management。</p></div><div class="row-actions">{existing_action}<button class="secondary" type="button" data-dialog-open="visa-dialog">新增本轮签证记录</button></div></div>
         <div class="student-file-list">{rows}</div></section>
-        <dialog id="visa-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/visa"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="visa_record_purpose" value="current_application"><div class="dialog-head"><h2>新增本轮 VISA 管理</h2><button type="button" class="icon-button" data-dialog-close>×</button></div><div class="dialog-grid">{"".join(controls)}</div><div class="dialog-actions"><button type="button" class="ghost" data-dialog-close>取消</button><button class="primary">保存</button></div></form></dialog>{existing_dialog}{extra_html}"""
+        <dialog id="visa-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/visa"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{getattr(self,"business_change_record_hidden_fields",lambda *args:"")("Visa",student_id)}<input type="hidden" name="visa_record_purpose" value="current_application"><div class="dialog-head"><h2>新增本轮 VISA 管理</h2><button type="button" class="icon-button" data-dialog-close>×</button></div><div class="dialog-grid">{"".join(controls)}</div><div class="dialog-actions"><button type="button" class="ghost" data-dialog-close>取消</button><button class="primary">保存</button></div></form></dialog>{existing_dialog}{extra_html}"""
 
     def visa_table_rows(self, student_id, visas):
         can_edit = can_save_visa_record(self.user)
@@ -62545,7 +62715,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if not can_edit or confirmed_source:
                 continue
             dialogs.append(
-                f"""<dialog id="visa-edit-{visa_id}"><form method="post" enctype="multipart/form-data" data-ajax-student-tab-form data-refresh-tab="visa" data-visa-document-type-form data-visa-document-type-has-file="{str(bool(file_path)).lower()}" action="/students/{student_id}/visa/{visa_id}/update"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="visa_record_purpose" value="{'existing_evidence' if existing_evidence_cycle else 'current_application'}"><div class="dialog-head"><h2>修改 VISA 记录</h2><button type="button" class="icon-button" data-dialog-close>×</button></div>
+                f"""<dialog id="visa-edit-{visa_id}"><form method="post" enctype="multipart/form-data" data-ajax-student-tab-form data-refresh-tab="visa" data-visa-document-type-form data-visa-document-type-has-file="{str(bool(file_path)).lower()}" action="/students/{student_id}/visa/{visa_id}/update"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="visa_record_purpose" value="{'existing_evidence' if existing_evidence_cycle else 'current_application'}">{self.business_change_record_hidden_fields('Visa',student_id,int(visa_id)) if getattr(self,'business_changes_enabled',lambda:False)() else ''}<div class="dialog-head"><h2>修改 VISA 记录</h2><button type="button" class="icon-button" data-dialog-close>×</button></div>
                   <div class="dialog-grid">
                     <label>类型<input name="visa_type" value="{esc(visa["visa_type"] or "")}" required></label>
                     <label>Sector<select name="visa_sector"><option value="">请选择</option>{select_options(sector_options, visa["visa_sector"] if "visa_sector" in visa.keys() else "")}</select></label>
@@ -62622,7 +62792,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <div class="panel-head compact-head"><div><h3>付款记录</h3><p>手动录入的付款金额、日期和方式。</p></div></div>
           <div class="table-wrap"><table><thead><tr><th>类别</th><th>金额</th><th>币种</th><th>日期</th><th>方式</th><th>转学确认</th></tr></thead><tbody>{rows}</tbody></table></div>
         </section>
-        <dialog id="payment-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/payment"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><div class="dialog-head"><h2>新增付款记录</h2><button type="button" class="icon-button" data-dialog-close>×</button></div><div class="dialog-grid">{transfer_branch_field}{"".join(controls)}<label>付款凭证（转学付款需提供）<input type="file" name="files" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png"{disabled}></label></div><div class="dialog-actions"><button type="button" class="ghost" data-dialog-close>取消</button><button class="primary">保存</button></div></form></dialog>"""
+        <dialog id="payment-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/payment"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{getattr(self,"business_change_record_hidden_fields",lambda *args:"")("Payments",student_id)}<div class="dialog-head"><h2>新增付款记录</h2><button type="button" class="icon-button" data-dialog-close>×</button></div><div class="dialog-grid">{transfer_branch_field}{"".join(controls)}<label>付款凭证（转学付款需提供）<input type="file" name="files" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png"{disabled}></label></div><div class="dialog-actions"><button type="button" class="ghost" data-dialog-close>取消</button><button class="primary">保存</button></div></form></dialog>"""
 
     def homestay_airport_panel(self, student_id, document_rows):
         disabled = " disabled" if not nas.status()["ready"] or not can_payment_action(self.user, "upload") else ""
@@ -68108,7 +68278,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
     ):
         existing_count_row = db.one("SELECT COUNT(*) total FROM visa_checklist_items WHERE visa_case_id=?", (case["id"],))
         existing_count = int(existing_count_row["total"] if existing_count_row else 0)
-        if existing_count:
+        if existing_count and not getattr(self, 'business_changes_enabled', lambda: False)():
             self.visa_material_initialize_checklist(case)
         rows = self.visa_material_checklist_rows(case)
         excluded_categories = set(exclude_categories or ())
@@ -68315,8 +68485,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def visa_case_cycle_field(self, student_id, selected="", *, explicit=False):
         from visa_cycle_assignment import active_visa_cycles
+        from business_changes.snapshots import read_scope
 
-        with db.read_snapshot() as connection:
+        with read_scope(db) as connection:
             cycles = active_visa_cycles(connection, student_id)
         if not cycles:
             return ""
@@ -68784,6 +68955,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         reason = str(self.form.get("reason") or "").strip()
         if not 0 < len(reason) <= 500:
             return self.flash_redirect(location, "请填写恢复办理原因", "error")
+        if getattr(self,'business_changes_enabled',lambda:False)():
+            from business_changes.visa import resume_preparation
+            try:
+                with db.transaction() as connection:
+                    resume_preparation(connection,student_id=student_id,case_id=int(case_id),actor=self.user,reason=reason,stamp=now_iso())
+            except ValueError as exc:
+                return self.flash_redirect(location,str(exc),'error')
+            return self.flash_redirect(location,'已确认恢复签证准备，原签证结果已保留')
         with db.transaction() as connection:
             case = connection.execute(
                 """SELECT visa.*,result.effective_result,result.source_event_id FROM visa_cases visa
@@ -68820,6 +68999,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("Visa Case 不存在。", HTTPStatus.NOT_FOUND)
         if "lodgement_recorded_at" not in case.keys():
             return self.flash_redirect(return_path, "数据库迁移尚未完成，暂时不能记录正式签证递交。", "error")
+        if (form_text_value(self.form,'action') not in {'link-recorded-visa-grant','correct-lodgement-date'}
+                and getattr(self,'business_changes_enabled',lambda:False)()):
+            return self.business_change_visa_lodgement(student_id,case_id,return_path)
         if form_text_value(self.form, "action") == "link-recorded-visa-grant":
             if not can_workflow_module_save(self.user, "Visa"):
                 return self.deny_module_access("visa")
@@ -68918,7 +69100,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if (dict(case).get("application_cycle_id") is not None
                 and can_workflow_module_save(self.user, "Visa") and is_student_visa_case(dict(case))
                 and db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'")):
-            with db.read_snapshot() as connection:
+            from business_changes.snapshots import read_scope
+            with read_scope(db) as connection:
                 result = connection.execute(
                     """SELECT cycle.id,result.effective_result,result.source_event_id
                           FROM application_cycles cycle LEFT JOIN visa_result_status_current result
@@ -68991,13 +69174,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <div class="panel-head"><div><h2>VISA Application Submitted</h2><p>确认已经正式递交移民局后操作；完成后学生进入“等待签证结果”。</p></div></div>
           <form class="visa-lodgement-form" method="post" action="/students/{quote(str(student_id))}/visa-cases/{int(case['id'])}/lodgement-submit">
             <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+            {getattr(self,'business_change_visa_hidden_fields',lambda case_id:'')(case['id'])}
             <label>实际递交日期<input type="date" name="actual_lodgement_date" value="{esc(acknowledge_date)}" required></label>
             {self.visa_case_cycle_field(student_id, explicit=True) if "application_cycle_id" in case.keys() and case["application_cycle_id"] is None else ""}
             <button class="primary" type="submit">确认 VISA Application Submitted</button>
           </form>
         </section>"""
 
-    def student_visa_case_detail(self, method, student_id, case_id):
+    def student_visa_case_detail(self, method, student_id, case_id, *, fragment_only=False):
         if method != "GET":
             return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
         if not can_access_module(self.user, "visa"):
@@ -69067,7 +69251,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             overview_fields = f'<details class="visa-material-case-details"><summary>展开案件详情与更多操作</summary>{overview_fields}</details>'
         processing_entry = (f'<a class="visa-material-case-details" href="{esc(self.visa_case_return_path(student_id, case["id"], "visa_result", "visa-result-dates"))}">查看签证日期与处理信息</a>' if active_tab == "material_checklist" else "")
         hero_title = f'{student_name} · {student_id}' if material_mode else "Visa Case 基础信息"
-        hero_description = (f'{case["visa_type"] or ""} · {case["case_owner"] or "未分配负责人"} · {case["status"]}' if material_mode
+        display_case=(self._visa_display_case(case) if getattr(self,"business_changes_enabled",lambda:False)() else dict(case))
+        hero_status='签证材料需核实' if display_case.get('_business_needs_review') else display_case['status']
+        hero_description = (f'{case["visa_type"] or ""} · {case["case_owner"] or "未分配负责人"} · {hero_status}' if material_mode
                             else f'{student_name} · {student_id}。本页按工作区分为 Info Collection、Material Checklist、Visa Result 和 Evidence / AI Review。')
         body = f"""
         <div class="visa-management-page{' visa-material-case-page' if material_mode else ''}">
@@ -69093,6 +69279,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         {preview_dialog_html()}"""
         message=(self.query.get('message') or [''])[0]
         if message:body='<p class="notice" role="status">'+esc(message)+'</p>'+body
+        if fragment_only:return body
         self.send_html(page("Visa Case 基础信息", body, self.user, self.csrf, "visa_management", nas.status()))
 
     def student_visa_case_material_checklist_init(self, method, student_id, case_id):
@@ -69103,7 +69290,26 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         case = self.visa_material_case_or_404(student_id, case_id)
         if not case:
             return
-        count = self.visa_material_initialize_checklist(case)
+        if getattr(self, 'business_changes_enabled', lambda: False)():
+            if not can_workflow_module_save(self.user, 'Visa'):
+                return self.deny_module_access('visa')
+            from business_changes.materials import initialize_checklist
+            def authorize_initialize(view):
+                from business_changes.authorization import current_staff
+                actor = current_staff(view,self.user['id'])
+                if not actor or not can_access_module(actor, 'visa') or not can_workflow_module_save(actor, 'Visa'):
+                    raise PermissionError('材料清单更新权限已变化，请重新登录。')
+            try:
+                with db.transaction() as connection:
+                    count = initialize_checklist(connection, case_id=int(case_id), student_id=student_id,
+                        actor_user_id=self.user['id'], authorize=authorize_initialize,
+                        initialize=lambda view, current: self.visa_material_initialize_checklist(current, connection=view))
+            except PermissionError as exc:
+                return self.error_page(str(exc), HTTPStatus.FORBIDDEN)
+            except ValueError as exc:
+                return self.error_page(str(exc), HTTPStatus.CONFLICT)
+        else:
+            count = self.visa_material_initialize_checklist(case)
         if not count:
             return self.flash_redirect(
                 self.visa_case_return_path(student_id, case_id, "material_checklist", "material-checklist"),
@@ -69130,6 +69336,25 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         allowed_statuses = set(self.visa_material_document_status_options())
         rows = db.all("SELECT id FROM visa_checklist_items WHERE visa_case_id=?", (case_id,))
         stamp = now_iso()
+        if getattr(self,'business_changes_enabled',lambda:False)():
+            if not can_workflow_module_save(self.user,'Visa'):
+                return self.deny_module_access('visa')
+            updates = [(row['id'],form_text_value(form,f"document_status_{row['id']}"),form_text_value(form,f"notes_{row['id']}"))
+                for row in rows if form_text_value(form,f"document_status_{row['id']}") in allowed_statuses]
+            wants_json = 'application/json' in (self.headers.get('Accept') or '') or self.headers.get('X-Requested-With') == 'fetch'
+            try:
+                result = self.business_change_save_checklist(student_id,case_id,updates,stamp)
+            except PermissionError as exc:
+                if wants_json:return self.json_response({'ok':False,'message':str(exc)},403)
+                return self.error_page(str(exc),HTTPStatus.FORBIDDEN)
+            except ValueError as exc:
+                from business_changes.commands import VersionConflict,CommandConflict
+                message = ('此案件已在另一处更新。当前输入已保留，请先核对最新数据，再重新编辑保存。'
+                    if isinstance(exc,(VersionConflict,CommandConflict)) else str(exc))
+                if wants_json:return self.json_response({'ok':False,'message':message},409)
+                return self.error_page(message,HTTPStatus.CONFLICT)
+            if wants_json:return self.json_response(result)
+            return self.flash_redirect(self.visa_case_return_path(student_id,case_id,source_tab,return_anchor,material_filter),'Material Checklist 已保存。')
         for row in rows:
             item_id = row["id"]
             status = form_text_value(form, f"document_status_{item_id}")
@@ -69730,6 +69955,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         uploaded_by = (self.user or {}).get("id")
         saved_count = 0
         skipped = []
+        sync_enabled = getattr(self,'business_changes_enabled',lambda:False)()
         for upload in uploads:
             try:
                 if not self.visa_material_file_allowed(upload):raise ValueError('Unsupported file type')
@@ -69737,6 +69963,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 self._visa_check_upload(dict(case),upload.data,visa_file_type)
             except (ValueError,OSError) as exc:
                 skipped.append(upload.filename+': '+str(exc));continue
+            if sync_enabled:
+                try:
+                    self.business_change_store_visa_material(case,item,upload,folder,visa_file_type)
+                    saved_count += 1
+                except (ValueError,OSError,sqlite3.Error,RuntimeError) as exc:
+                    skipped.append(upload.filename+': '+str(exc))
+                continue
             destination, version = next_version_path(folder, upload.filename)
             destination.write_bytes(upload.data)
             item_category = self.visa_material_record_value(item, "category")
@@ -69770,7 +70003,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if is_lodgement_result_item:
                 self.visa_lodgement_sync_material_upload_to_visa_tab(case, item, document_id, upload.filename)
             saved_count += 1
-        if saved_count:db.execute("UPDATE visa_checklist_items SET status='uploaded',updated_at=? WHERE id=? AND visa_case_id=?", (stamp, item_id, case_id))
+        if saved_count and not sync_enabled:db.execute("UPDATE visa_checklist_items SET status='uploaded',updated_at=? WHERE id=? AND visa_case_id=?", (stamp, item_id, case_id))
         try:
             db.audit(self.user, "visa_material_file_uploaded", "visa_management", item_id, file_path=str(folder), new_value=f"{saved_count} file(s)", student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"))
         except Exception:
@@ -70205,10 +70438,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 "notes": str(notes or "").strip(),
             },
             "validation": validation or [],
-            "warnings": [
+            "warnings": ([
+                "关联后，相关页面将按当前有效材料更新。",
+                "不会修改原文件；正式递交和结果确认仍按原流程处理。",
+            ] if getattr(self,"business_changes_enabled",lambda:False)() else [
                 "本次 confirm 只新增 visa_case_document_links 记录。",
                 "不会修改 student_documents、文件路径、NAS、Google Drive、workflow 或 reminders。",
-            ],
+            ]),
         }
 
     def visa_document_linking_confirm(self, method, case_id):
@@ -70252,20 +70488,23 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.json_response(payload, status)
         stamp = now_iso()
         try:
-            link_id = db.execute(
-                """INSERT INTO visa_case_document_links
-                   (visa_case_id,student_document_id,document_role,status,notes,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (
-                    result["case"]["id"],
-                    result["document"]["id"],
-                    result["document_role"],
-                    "Linked",
-                    result["notes"],
-                    stamp,
-                    stamp,
-                ),
-            )
+            if getattr(self,"business_changes_enabled",lambda:False)():
+                link_id=self.business_change_link_existing_visa_document(result,stamp)
+            else:
+                link_id = db.execute(
+                    """INSERT INTO visa_case_document_links
+                       (visa_case_id,student_document_id,document_role,status,notes,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        result["case"]["id"],
+                        result["document"]["id"],
+                        result["document_role"],
+                        "Linked",
+                        result["notes"],
+                        stamp,
+                        stamp,
+                    ),
+                )
         except sqlite3.IntegrityError:
             result["validation"].append({"check": "duplicate_link", "ok": False})
             status, payload = self.visa_document_linking_confirm_payload(
@@ -70279,6 +70518,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 validation=result["validation"],
             )
             return self.json_response(payload, status)
+        except (PermissionError,ValueError) as error:
+            status,payload=self.visa_document_linking_confirm_payload(ok=False,message=str(error),
+                status=403 if isinstance(error,PermissionError) else 409,case=result["case"],
+                document=result["document"],document_role=result["document_role"],notes=result["notes"],validation=result["validation"])
+            return self.json_response(payload,status)
         link = {
             "id": link_id,
             "visa_case_id": result["case"]["id"],
@@ -70336,11 +70580,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "not_started": "未开始",
         }.get(normalized, value or "—")
 
-    def visa_management(self, method):
+    def visa_management(self, method, *, fragment_only=False):
         if method != "GET":
             return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
         if not can_access_module(self.user, "visa"):
             return self.error_page("你没有访问 Visa Management 的权限。", HTTPStatus.FORBIDDEN)
+        if not fragment_only and getattr(self,'business_changes_enabled',lambda:False)():
+            return self.business_change_visa_overview_page()
         cases = self.visa_management_case_rows()
         kpi_cards = "".join(
             f"""<article class="visa-management-card visa-management-kpi">
@@ -70405,11 +70651,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <p class="visa-management-readonly-note">筛选只读取 URL 参数，不会创建、更新或关联 Visa 数据。</p>
           </section>
           <section class="visa-management-kpi-grid">{kpi_cards}</section>
+          {self.business_change_visa_consistency_html()}
           <section class="panel visa-management-list-panel">
             <div class="panel-head"><div><h2>Visa Cases</h2><p>最多显示最近 200 条未归档 case。</p></div></div>
             {case_table}
           </section>
         </div>"""
+        from urllib.parse import urlencode
+        filters={key:(self.query.get(key) or [''])[0] for key in ('status','subclass','case_type','q')}
+        endpoint='/api/business-changes/snapshot?'+urlencode({'surface':'visa_overview',**filters})
+        body=body.replace('<div class="visa-management-page">',
+            f'<div class="visa-management-page" data-business-sync-fragment="visa-overview" data-business-sync-endpoint="{esc(endpoint)}">',1)
+        body=body.replace('<h2>Visa Cases</h2>',
+            '<h2>Visa Cases</h2><span data-business-sync-controls hidden><button type="button" data-business-sync-refresh>刷新数据</button><span role="status" data-business-sync-status></span></span>',1)
+        if fragment_only:return body
         self.send_html(page("Visa Management", body, self.user, self.csrf, "visa_management", nas.status()))
 
     def visa_management_case_detail(self, method, case_id):
@@ -70781,7 +71036,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if transfer_management_allowed and normalized_status == "Draft" and (edit_is_published or not revision_button):
                 edit_button = f'<button class="secondary" type="button" data-dialog-open="contract-edit-{contract["id"]}">编辑并重新生成</button>'
             if transfer_management_allowed and can_apply_aaie_stamp(self.user) and normalized_status == "ParentSigned" and signed_doc:
-                stamp_form = f'<form method="post" action="/students/{student_id}/contracts/{contract["id"]}/apply-aaie-stamp"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><button class="primary">加盖 AAIE 签名和公章</button></form>'
+                stamp_form = f'<form method="post" action="/students/{student_id}/contracts/{contract["id"]}/apply-aaie-stamp"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{self.business_change_record_hidden_fields("Contracts",student_id,int(contract["id"]))}<button class="primary">加盖 AAIE 签名和公章</button></form>'
                 stamp_form += f'<a class="secondary button-link" href="/students/{student_id}/contracts/{contract["id"]}/manual-placement">手动签名盖章</a>'
             delete_form = ""
             if transfer_management_allowed and can_generate:
@@ -70842,7 +71097,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             status_form = ""
             if transfer_management_allowed:
                 management_upload = f'<form class="row-actions" method="post" enctype="multipart/form-data" action="/students/{student_id}/contracts/upload"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="contract_id" value="{contract["id"]}"><input type="file" name="files" accept=".pdf,.docx,.jpg,.jpeg,.png" required><button class="secondary">上传并进入 Review</button></form>'
-                status_form = f'<form method="post" action="/students/{student_id}/contracts/{contract["id"]}/status"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><select name="contract_status">{status_options}</select><button class="ghost">更新状态</button></form>'
+                status_form = f'<form method="post" action="/students/{student_id}/contracts/{contract["id"]}/status"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{self.business_change_record_hidden_fields("Contracts",student_id,int(contract["id"]))}<select name="contract_status">{status_options}</select><button class="ghost">更新状态</button></form>'
             signing_block = f'<div class="row-actions">{signing_actions}</div>{signing_summary}'
             contract_rows.append(
                 f'<tr data-contract-row data-contract-id="{contract["id"]}"><td data-label="合同"><div class="contract-history-value">{esc(contract["contract_title"])}{void_note}{lifecycle_context_badge_html(lifecycle_contexts.get(int(contract["id"])))}</div></td><td data-label="状态"><div class="contract-history-value">{status_badge}{flow_summary}<div>{signature_preview}</div></div></td><td data-label="生成时间"><div class="contract-history-value">{esc(display_datetime(contract["generated_at"]))}</div></td><td data-label="草稿"><div class="contract-history-value">{download}</div></td><td data-label="家长签署版"><div class="contract-history-value">{signed_download}</div></td><td data-label="最终合同"><div class="contract-history-value">{final_download}</div></td>'
@@ -71005,6 +71260,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         cards = []
         for file_meta in metadata["files"]:
             index = file_meta["index"]
+            review_issue=''
+            if file_meta.get('item_id'):
+                item_state=db.one('SELECT error_message FROM upload_review_items WHERE id=? AND student_id=? AND module_key=?',
+                    (file_meta['item_id'],student_id,module))
+                if item_state and item_state['error_message']:
+                    review_issue=f'<p class="upload-review-warning" role="alert">{esc(item_state["error_message"])}</p>'
             preview_src = f"/students/{student_id}/upload-review/{quote(token)}/{index}/preview"
             content_type = file_meta.get("content_type") or "application/octet-stream"
             file_size = file_size_label(file_meta.get("size") or 0)
@@ -71047,6 +71308,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                   <section class="review-fields review-fields-workspace upload-review-file-meta upload-review-classification upload-review-human-input" data-review-fields-pane>
                     <div class="review-meta-line"><span>当前模块</span><strong>{esc(module)}</strong></div>
                     <div class="review-meta-line"><span>当前文件</span><strong>{esc(file_meta["original_name"])}</strong></div>
+                    {review_issue}
                     <div class="review-meta-line compact"><span>File size</span><strong>{esc(file_size)}</strong></div>
                     <div class="review-meta-line compact"><span>File type</span><strong>{esc(content_type)}</strong></div>
                     <label class="choice wide"><input type="checkbox" name="confirm_item_{index}" value="1" checked><span>确认保存此文件</span></label>
@@ -71210,11 +71472,17 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("Method not allowed", 405)
         if not can_review_module_action(self.user, module, "confirm"):
             return self.deny_module_access(REVIEW_MODULE_KEYS.get(module, "students"))
+        if str(student_id)!=str(metadata['student_id']):
+            return self.error_page('Upload Review 与学生不匹配',400)
         now = now_iso()
         session_id = metadata.get("session_id")
+        atomic_review=getattr(self,'business_changes_enabled',lambda:False)()
+        if atomic_review:
+            self.business_change_update_review_state(student_id,module,
+                [item.get('item_id') for item in metadata.get('files',[])],'cancelled')
         for file_meta in metadata.get("files", []):
             item_id = file_meta.get("item_id")
-            if item_id:
+            if item_id and not atomic_review:
                 db.execute(
                     "UPDATE upload_review_items SET status='Cancelled',cancelled_by=?,cancelled_at=? WHERE id=?",
                     (self.user["id"], now, item_id),
@@ -71224,7 +71492,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     old_value=file_meta.get("original_name"), new_value="Cancelled",
                     student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
                 )
-        if session_id:
+        if session_id and not atomic_review:
             refresh_upload_session_counts(session_id)
         stored_form = metadata.get("form") or {}
         picker_context = record_picker_and_uploader.upload_context_from_form(
@@ -71241,6 +71509,414 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return_target = f"/students/{student_id}?tab={config['tab']}"
         delete_upload_review(token)
         return self.flash_redirect(return_target, "上传已取消")
+
+    def _persist_reviewed_upload_business(self, *, student_id, module, doc_type, upload,
+            destination, document_id, index, stored_form, target_name, transfer_branch_snapshot,
+            intake, intake_upload, pending_coe_tuition, coe_application_cycle_id=None,
+            visa_review_case=None, prepared_inferred=None, tuition_prepared=False, tuition_preparation_error=None,
+            strict_contract_owner=False, owned_connection=None, prepared_visa_bytes=None, prepared_visa_text=None):
+        """Retained per-file business rules; caller controls persistence ownership.
+
+        New atomic callers supply already extracted proposals. Legacy callers
+        preserve the same inference, financial gates and review behavior.
+        """
+        from revenue.student_intake_tuition import (
+            accepted_offer_context, choose_coe, coe_first_year_reason, read_review_fields,
+            save_source, sync_tuition, validate_tuition_update,
+        )
+        from visa_document_metadata import LEGACY
+        business_record_id = None
+        if module == "Homestay + Airport Pickup":
+            refresh_workflow_completion_metrics(student_id, source="homestay_itinerary_uploaded")
+        if module == "Offer":
+            inferred = prepared_inferred if prepared_inferred is not None else infer_offer_details(upload)
+            school_name = (
+                target_name or extraction_form_value(self.form, "school_name", index)
+                or stored_form.get("school_name") or ""
+            ).strip() or "待确认学校"
+            if transfer_branch_snapshot:
+                school_name = transfer_branch_snapshot
+            language_key = f"extract_language_school_name_{index}"
+            language_school_name = (self.form[language_key] if language_key in self.form else stored_form.get("language_school_name") or "").strip()
+            offer_date_value = extraction_form_value(self.form, "offer_date", index) or stored_form.get("offer_date")
+            course_start_value = extraction_form_value(self.form, "course_start_date", index) or stored_form.get("course_start_date")
+            offer_expiry_value = extraction_form_value(self.form, "offer_expiry_date", index) or stored_form.get("offer_expiry_date")
+            deposit_amount = extraction_money_value(extraction_form_value(self.form, "deposit_amount", index) or stored_form.get("deposit_amount"))
+            deposit_currency = extraction_form_value(self.form, "deposit_currency", index) or stored_form.get("deposit_currency") or "AUD"
+            offer_status = {"SignedOffer": "signed", "OfferAcceptance": "signed_received"}.get(doc_type, stored_form.get("offer_status") or "received")
+            if offer_status == "accepted":
+                offer_status = "received"
+            signed_offer_path = str(destination) if doc_type in {"SignedOffer", "OfferAcceptance"} else ""
+            accepted_date = ""
+            lifecycle_stamp = now_iso()
+            with db.transaction() as connection:
+                transfer_branch_id = self.transfer_v2_requested_branch_id(
+                    connection,student_id,require_acceptance=False,
+                    submitted_branch_id=stored_form.get("transfer_branch_id"),
+                )
+                if offer_course_start_date_available(connection):
+                    business_record_id = int(connection.execute(
+                    """INSERT INTO offers(student_id,school_name,document_type,offer_date,course_start_date,offer_expiry_date,offer_status,offer_file_path,
+                       signed_offer_file_path,accepted_date,accepted_by,deposit_amount,deposit_currency,original_filename,uploaded_at,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        student_id, school_name, doc_type, offer_date_value, course_start_value,
+                        offer_expiry_value, offer_status, str(destination), signed_offer_path, accepted_date,
+                        self.user["id"] if accepted_date else None, deposit_amount,
+                        deposit_currency, upload.filename, lifecycle_stamp, lifecycle_stamp,
+                    ),
+                    ).lastrowid)
+                else:
+                    business_record_id = int(connection.execute(
+                    """INSERT INTO offers(student_id,school_name,document_type,offer_date,offer_expiry_date,offer_status,offer_file_path,
+                       signed_offer_file_path,accepted_date,accepted_by,deposit_amount,deposit_currency,original_filename,uploaded_at,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        student_id, school_name, doc_type, offer_date_value, offer_expiry_value,
+                        offer_status, str(destination), signed_offer_path, accepted_date,
+                        self.user["id"] if accepted_date else None, deposit_amount,
+                        deposit_currency, upload.filename, lifecycle_stamp, lifecycle_stamp,
+                    ),
+                    ).lastrowid)
+                if transfer_branch_id is not None:
+                    bind_authoritative_offer(
+                        connection,student_id=student_id,branch_id=transfer_branch_id,
+                        offer_id=business_record_id,document_id=int(document_id),
+                        actor_user_id=int(self.user["id"]),occurred_at=lifecycle_stamp,
+                    )
+                save_offer_language_school(connection, business_record_id, student_id, language_school_name)
+                offer_classification = apply_offer_classification(
+                    connection,business_record_id,school_name
+                )
+                if intake:
+                    save_source(connection, "offer", business_record_id, student_id,
+                                offer_classification.school_id, intake, intake_upload,
+                                int(self.user["id"]), source_school=school_name)
+            db.audit(
+                self.user, "extraction_review_confirmed", "offer", business_record_id, str(destination),
+                new_value=json.dumps({
+                    "document_type": doc_type, "school_name": school_name,
+                    "language_school_name": language_school_name,
+                    "offer_date": offer_date_value, "course_start_date": course_start_value,
+                    "offer_expiry_date": offer_expiry_value,
+                    "deposit_amount": deposit_amount, "deposit_currency": deposit_currency,
+                    "machine_inferred": inferred,
+                    "classification_status": offer_classification.status,
+                }, ensure_ascii=False),
+                student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
+            )
+            db.audit(self.user, "create", "offers", business_record_id, str(destination), new_value=json.dumps(inferred, ensure_ascii=False))
+            if doc_type in {"SignedOffer", "OfferAcceptance"}:
+                resolve_completed_auto_reminders()
+            advance_workflow_stage_to(student_id, "下offer")
+        elif module == "COE + OSHC":
+            kind = coe_kind_from_review(doc_type)
+            inferred = prepared_inferred if prepared_inferred is not None else infer_coe_oshc_details(upload, kind)
+            is_coe = kind in {"COE", "COE_CAAW"}
+            is_caaw = kind in {"CAAW", "COE_CAAW"}
+            is_provider_document = kind in {"COE", "CAAW", "COE_CAAW"}
+            is_course_document = kind in {"COE", "COE_CAAW"}
+            is_oshc = kind == "OSHC"
+            is_receipt = kind == "OSHCReceipt"
+            is_letter = kind == "LetterOfConfirmation"
+            coe_provider = (extraction_form_value(self.form, "coe_provider", index) or stored_form.get("coe_provider") or stored_form.get("school_name")) if is_provider_document else ""
+            coe_course = (extraction_form_value(self.form, "coe_course", index) or stored_form.get("coe_course")) if is_coe else ""
+            coe_course_level = ""
+            letter_language_course = (extraction_form_value(self.form, "letter_language_course_name", index) or stored_form.get("letter_language_course_name")) if is_letter else ""
+            letter_language_start = (extraction_form_value(self.form, "letter_language_start_date", index) or stored_form.get("letter_language_start_date")) if is_letter else ""
+            letter_language_end = (extraction_form_value(self.form, "letter_language_end_date", index) or stored_form.get("letter_language_end_date")) if is_letter else ""
+            letter_main_course = (extraction_form_value(self.form, "letter_main_course_name", index) or stored_form.get("letter_main_course_name")) if is_letter else ""
+            letter_main_start = (extraction_form_value(self.form, "letter_main_start_date", index) or stored_form.get("letter_main_start_date")) if is_letter else ""
+            letter_main_end = (extraction_form_value(self.form, "letter_main_end_date", index) or stored_form.get("letter_main_end_date")) if is_letter else ""
+            letter_year_level = (extraction_form_value(self.form, "letter_year_level", index) or stored_form.get("letter_year_level")) if is_letter else ""
+            coe_start_date = (extraction_form_value(self.form, "coe_start_date", index) or stored_form.get("coe_start_date")) if is_course_document else ""
+            coe_end_date = (extraction_form_value(self.form, "coe_end_date", index) or stored_form.get("coe_end_date")) if is_course_document else ""
+            caaw_start = (extraction_form_value(self.form, "caaw_welfare_start_date", index) or stored_form.get("caaw_welfare_start_date")) if is_caaw else ""
+            caaw_end = (extraction_form_value(self.form, "caaw_welfare_end_date", index) or stored_form.get("caaw_welfare_end_date")) if is_caaw else ""
+            oshc_company = (extraction_form_value(self.form, "oshc_company_name", index) or stored_form.get("oshc_company_name") or stored_form.get("oshc_provider")) if is_oshc else ""
+            oshc_policy_number = (extraction_form_value(self.form, "oshc_policy_number", index) or stored_form.get("oshc_policy_number")) if is_oshc else ""
+            oshc_policy_issue_date = (extraction_form_value(self.form, "oshc_policy_issue_date", index) or stored_form.get("oshc_policy_issue_date")) if is_oshc else ""
+            oshc_commencement_date = (extraction_form_value(self.form, "oshc_commencement_date", index) or stored_form.get("oshc_commencement_date") or stored_form.get("oshc_start_date")) if is_oshc else ""
+            oshc_expiry_date = (extraction_form_value(self.form, "oshc_expiry_date", index) or stored_form.get("oshc_expiry_date") or stored_form.get("oshc_end_date")) if is_oshc else ""
+            receipt_amount_value = (extraction_form_value(self.form, "receipt_amount", index) or stored_form.get("receipt_amount")) if is_receipt else ""
+            receipt_date_value = (extraction_form_value(self.form, "receipt_date", index) or stored_form.get("receipt_date")) if is_receipt else ""
+            payment_reference_value = (extraction_form_value(self.form, "payment_reference", index) or stored_form.get("payment_reference")) if is_receipt else ""
+            lifecycle_stamp = now_iso()
+            with db.transaction() as connection:
+                business_record_id = int(connection.execute(
+                    """INSERT INTO coe_oshc(student_id,document_kind,file_path,school_name,coe_start_date,coe_end_date,
+                   oshc_provider,oshc_start_date,oshc_end_date,coe_provider,coe_course,coe_course_level,
+                   letter_language_course_name,letter_language_start_date,letter_language_end_date,
+                   letter_main_course_name,letter_main_start_date,letter_main_end_date,letter_year_level,
+                   caaw_welfare_start_date,caaw_welfare_end_date,oshc_company_name,oshc_policy_number,
+                   oshc_policy_issue_date,oshc_commencement_date,oshc_expiry_date,receipt_amount,receipt_date,
+                   payment_reference,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        student_id, kind, str(destination),
+                        coe_provider or letter_main_course or letter_language_course, coe_start_date, coe_end_date,
+                        oshc_company, oshc_commencement_date, oshc_expiry_date,
+                        coe_provider, coe_course, coe_course_level,
+                        letter_language_course, letter_language_start, letter_language_end,
+                        letter_main_course, letter_main_start, letter_main_end, letter_year_level,
+                        caaw_start, caaw_end, oshc_company, oshc_policy_number,
+                        oshc_policy_issue_date, oshc_commencement_date, oshc_expiry_date,
+                        receipt_amount_value, receipt_date_value, payment_reference_value,
+                        lifecycle_stamp,
+                    ),
+                ).lastrowid)
+                transfer_branch_id = (
+                    self.transfer_v2_requested_branch_id(
+                        connection,student_id,require_acceptance=True,
+                        require_confirmed_payment=True,
+                        submitted_branch_id=stored_form.get("transfer_branch_id"),
+                    )
+                    if kind in {"COE","COE_CAAW"} else None
+                )
+                if transfer_branch_id is not None and kind in {"COE","COE_CAAW"}:
+                    bind_authoritative_coe(
+                        connection,student_id=student_id,branch_id=transfer_branch_id,
+                        coe_oshc_id=business_record_id,document_id=int(document_id),
+                        actor_user_id=int(self.user["id"]),occurred_at=lifecycle_stamp,
+                    )
+                else:
+                    bind_coe_oshc_to_current_cycle(
+                        connection, student_id=student_id,
+                        record_id=business_record_id,
+                        application_cycle_id=coe_application_cycle_id,
+                    )
+                if is_coe:
+                    if self.form.get(f"intake_defer_{index}") == "1":
+                        pending_coe_tuition[index] = "已选择稍后核对学费。"
+                    else:
+                        try:
+                            if tuition_preparation_error is not None:
+                                raise ValueError(tuition_preparation_error)
+                            values = read_review_fields(self.form, index)
+                            if values is not None:
+                                context = accepted_offer_context(connection, student_id)
+                                choice = self.form.get(f"intake_choice_{index}", "")
+                                decision = choose_coe(
+                                    context, coe_provider, self.form.get(f"intake_acceptance_{index}"),
+                                    values, choice,
+                                    confirmed_school=self.form.get(f"intake_coe_school_{index}", ""),
+                                )
+                                bound_cycle, = connection.execute(
+                                    "SELECT application_cycle_id FROM coe_oshc WHERE id=?",
+                                    (business_record_id,),
+                                ).fetchone()
+                                if bound_cycle != context["application_cycle_id"]:
+                                    raise ValueError("请核对 CoE 和已接受 Offer 所属的申请周期。")
+                                validate_tuition_update(
+                                    connection, context,
+                                    values if decision == "coe" else context["offer"]["values"],
+                                )
+                                from revenue.first_year_tuition import OFFER_EXTENSIONS
+                                from revenue.repository import RevenueRepository
+                                from revenue.tuition_storage import TuitionEvidenceStorage
+
+                                if tuition_prepared:
+                                    if intake_upload is None:
+                                        raise ValueError('入学学费附件尚未完成预存储，请稍后核对。')
+                                else:
+                                    intake_upload = TuitionEvidenceStorage(
+                                        Path(db.path).parent / "revenue_documents",
+                                    ).stage(upload, OFFER_EXTENSIONS - {".txt"})
+                                with RevenueRepository(connection).transaction():
+                                    source = save_source(
+                                        connection, "coe", business_record_id, student_id, context["school_id"],
+                                        values, intake_upload, int(self.user["id"]),
+                                        acceptance_id=context["acceptance_id"], decision=decision,
+                                        source_school=coe_provider,
+                                    )
+                                    tuition_result = sync_tuition(
+                                        connection, context, source if decision == "coe" else context["offer"],
+                                        int(self.user["id"]), coe_id=business_record_id,
+                                        keep_existing=decision == "offer" and not choice,
+                                    )
+                                    if tuition_result.get("reason"):
+                                        pending_coe_tuition[index] = tuition_result["reason"]
+                        except ValueError as error:
+                            pending_coe_tuition[index] = str(error)
+                    if index not in pending_coe_tuition:
+                        context = accepted_offer_context(connection, student_id)
+                        reason = coe_first_year_reason(connection, context, business_record_id) if context else ""
+                        if reason:
+                            pending_coe_tuition[index] = reason
+                if index not in pending_coe_tuition:
+                    process_revenue_coe_change(
+                        connection, business_record_id, int(self.user["id"]),
+                        lifecycle_stamp,
+                    )
+            db.audit(
+                self.user, "extraction_review_confirmed", "coe_oshc", business_record_id, str(destination),
+                new_value=json.dumps({
+                    "document_type": doc_type, "document_kind": kind,
+                    "coe_provider": coe_provider, "coe_course": coe_course, "coe_course_level": coe_course_level,
+                    "letter_language_course_name": letter_language_course,
+                    "letter_language_start_date": letter_language_start,
+                    "letter_language_end_date": letter_language_end,
+                    "letter_main_course_name": letter_main_course,
+                    "letter_main_start_date": letter_main_start,
+                    "letter_main_end_date": letter_main_end,
+                    "letter_year_level": letter_year_level,
+                    "coe_start_date": coe_start_date, "coe_end_date": coe_end_date,
+                    "caaw_welfare_start_date": caaw_start, "caaw_welfare_end_date": caaw_end,
+                    "oshc_company_name": oshc_company, "oshc_policy_number": oshc_policy_number,
+                    "oshc_policy_issue_date": oshc_policy_issue_date,
+                    "oshc_commencement_date": oshc_commencement_date,
+                    "oshc_expiry_date": oshc_expiry_date,
+                    "receipt_amount": receipt_amount_value, "receipt_date": receipt_date_value,
+                    "payment_reference": payment_reference_value,
+                    "intake_tuition_pending_reason": pending_coe_tuition.get(index),
+                    "machine_inferred": inferred,
+                }, ensure_ascii=False),
+                student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
+            )
+            db.audit(self.user, "create", "coe_oshc", business_record_id, str(destination), new_value=json.dumps(inferred, ensure_ascii=False))
+            if kind not in {"LetterOfConfirmation", "Other", ""}:
+                advance_workflow_stage_to(student_id, "COE已出")
+        elif module == "Payments":
+            amount = stored_form.get("amount") or None
+            lifecycle_stamp = now_iso()
+            with db.transaction() as connection:
+                business_record_id = int(connection.execute(
+                    """INSERT INTO payments(student_id,payment_category,amount,currency,payment_method,paid_date,
+                       payer_name,receiver_name,receipt_file_path,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        student_id, stored_form.get("payment_category") or payment_category_from_review(doc_type),
+                        float(amount) if amount else None, stored_form.get("currency"), stored_form.get("payment_method"),
+                        stored_form.get("paid_date"), stored_form.get("payer_name"), stored_form.get("receiver_name"),
+                        str(destination), lifecycle_stamp,
+                    ),
+                ).lastrowid)
+                transfer_branch_id = self.transfer_v2_requested_branch_id(
+                    connection,student_id,require_acceptance=True,
+                    submitted_branch_id=stored_form.get("transfer_branch_id"),
+                )
+                if transfer_branch_id is not None:
+                    binding = bind_authoritative_payment(
+                        connection,student_id=student_id,branch_id=transfer_branch_id,
+                        payment_id=business_record_id,document_id=int(document_id),
+                        actor_user_id=int(self.user["id"]),occurred_at=lifecycle_stamp,
+                    )
+                    confirm_authoritative_payment(
+                        connection,payment_link_id=binding.link_id,
+                        actor_user_id=int(self.user["id"]),occurred_at=lifecycle_stamp,
+                    )
+                else:
+                    record_current_payment_evidence(
+                        connection,
+                        student_id=student_id,
+                        payment_record_id=business_record_id,
+                        occurred_at=lifecycle_stamp,
+                        actor_user_id=self.user["id"],
+                        actor_name=(
+                            self.user["display_name"]
+                            if "display_name" in self.user.keys() else None
+                        ),
+                    )
+            db.audit(self.user, "create", "payments", business_record_id, str(destination))
+            advance_workflow_stage_to(student_id, "接受OFFER+缴费")
+        elif module == "Visa":
+            existing_visa_cycle=None
+            if owned_connection is not None and stored_form.get('visa_record_purpose')=='existing_evidence':
+                from business_changes.visa_review_context import validate_context
+                existing_visa_cycle=validate_context(owned_connection,student_id,stored_form)
+                if visa_review_case:raise ValueError('已有签证证明不能关联本次 Visa Case。')
+            if owned_connection is not None and not visa_review_case and str(stored_form.get('visa_case_id') or '').strip():
+                raise ValueError('指定 Visa Case 已不可用，请刷新后重新确认。')
+            if owned_connection is not None and visa_review_case:
+                fresh=owned_connection.execute('SELECT * FROM visa_cases WHERE id=? AND student_id=? AND archived_at IS NULL',
+                    (visa_review_case['id'],student_id)).fetchone()
+                if fresh is None or fresh['application_cycle_id']!=visa_review_case['application_cycle_id']:
+                    raise ValueError('Visa Case 或申请周期已变化，请刷新后重新确认。')
+                visa_review_case=dict(fresh)
+            if visa_review_case:
+                self.visa_lodgement_link_document_to_case(student_id,visa_review_case,document_id,LEGACY.get(doc_type,'other'),
+                    upload.filename,connection=owned_connection,prepared_bytes=prepared_visa_bytes,prepared_text=prepared_visa_text)
+            inferred = prepared_inferred if prepared_inferred is not None else infer_visa_details(upload)
+            business_record_id = db.execute(
+                """INSERT INTO visas(
+                       student_id,file_path,visa_type,visa_sector,
+                       visa_grant_date,visa_start_date,visa_expiry_date,
+                       visa_conditions,visa_status,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    student_id,
+                    str(destination),
+                    stored_form.get("visa_type") or "",
+                    stored_form.get("visa_sector")
+                    or inferred.get("visa_sector") or "",
+                    stored_form.get("visa_grant_date")
+                    or inferred.get("visa_grant_date") or None,
+                    stored_form.get("visa_start_date")
+                    or inferred.get("visa_start_date") or None,
+                    stored_form.get("visa_expiry_date")
+                    or inferred.get("visa_expiry_date") or None,
+                    stored_form.get("visa_conditions")
+                    or inferred.get("visa_conditions") or "",
+                    stored_form.get("visa_status")
+                    or inferred.get("visa_status") or "",
+                    now_iso(),
+                ),
+            )
+            if existing_visa_cycle:
+                record_module_disposition(
+                    owned_connection,event_uid=f"existing-visa-evidence:{existing_visa_cycle['id']}:{business_record_id}",
+                    application_cycle_id=existing_visa_cycle['id'],module_key='visa',disposition='existing',
+                    reason='系统登记 Existing Visa：'+str(stored_form.get('visa_type') or 'Existing Visa'),
+                    source_record_type='visa',source_record_id=int(business_record_id),
+                    actor_user_id=int(self.user['id']),occurred_at=now_iso())
+            db.audit(
+                self.user,
+                "extraction_review_confirmed",
+                "visa",
+                business_record_id,
+                str(destination),
+                new_value=json.dumps(inferred, ensure_ascii=False),
+                student_id=student_id,
+            )
+        elif module == "Forms":
+            contract_id = (stored_form.get("contract_id") or "").strip()
+            signed_form = doc_type in {'SignedStudyAbroadContract','FinalSignedStudyAbroadContract'}
+            if strict_contract_owner and signed_form and not contract_id:
+                raise ValueError('签署文件必须指定对应合同，请从该合同的上传入口进入审核。')
+            if contract_id:
+                latest_contract = db.one(
+                    "SELECT * FROM contracts WHERE id=? AND student_id=?",
+                    (contract_id, student_id),
+                )
+            else:
+                latest_contract = db.one(
+                    "SELECT * FROM contracts WHERE student_id=? ORDER BY generated_at DESC,id DESC LIMIT 1",
+                    (student_id,),
+                )
+            if strict_contract_owner and signed_form:
+                if latest_contract is None:
+                    raise ValueError('签署文件对应的合同不存在或不属于当前学生。')
+                require_transfer_contract_signable(latest_contract)
+                if normalize_contract_status(latest_contract['contract_status']) in {'Deleted','Voided','Revoked','Superseded'} or latest_contract['deleted_at'] or latest_contract['voided_at']:
+                    raise ValueError('对应合同已失效，不能通过上传文件恢复签署状态。')
+            if latest_contract and signed_form:
+                business_record_id = int(latest_contract['id'])
+            if latest_contract and doc_type == "SignedStudyAbroadContract":
+                stamp = now_iso()
+                db.execute(
+                    "UPDATE contracts SET signed_file_path=?,contract_status='ParentSigned',signed_at=?,updated_at=? WHERE id=?",
+                    (str(destination), stamp, stamp, latest_contract["id"]),
+                )
+                notify_recorded_contract_signature(latest_contract, stamp)
+                db.audit(self.user, "parent_signed_contract_uploaded", "contracts", latest_contract["id"], file_path=str(destination), new_value=destination.name, student_id=student_id)
+            elif latest_contract and doc_type == "FinalSignedStudyAbroadContract":
+                db.execute(
+                    "UPDATE contracts SET final_signed_file_path=?,contract_status='FullyExecuted',fully_executed_at=?,updated_at=? WHERE id=?",
+                    (str(destination), now_iso(), now_iso(), latest_contract["id"]),
+                )
+                stamp = now_iso()
+                notify_recorded_contract_signature(latest_contract, stamp)
+                record_contract_completion_fact(latest_contract["id"], stamp, self.user["id"])
+                db.audit(self.user, "final_contract_uploaded", "contracts", latest_contract["id"], file_path=str(destination), new_value=destination.name, student_id=student_id)
+        return business_record_id
 
     def upload_review_confirm(self, method, student_id, token):
         folder, metadata = load_upload_review(token)
@@ -71462,10 +72138,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             item_id = file_meta.get("item_id")
             if file_meta not in selected_files:
                 if item_id:
-                    db.execute(
-                        "UPDATE upload_review_items SET status='Cancelled',cancelled_by=?,cancelled_at=? WHERE id=?",
-                        (self.user["id"], now_iso(), item_id),
-                    )
+                    if getattr(self,'business_changes_enabled',lambda:False)():
+                        self.business_change_update_review_state(student_id,module,[item_id],'cancelled')
+                    else:
+                        db.execute(
+                            "UPDATE upload_review_items SET status='Cancelled',cancelled_by=?,cancelled_at=? WHERE id=?",
+                            (self.user["id"], now_iso(), item_id),
+                        )
                 continue
             doc_type = (self.form.get(f"document_type_{index}") or "").strip()
             if doc_type not in allowed_types:
@@ -71473,6 +72152,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             target_name = (self.form.get(f"target_name_{index}") or "").strip()
             notes = (self.form.get(f"notes_{index}") or "").strip()
             upload = upload_from_review(folder, file_meta)
+            if module == 'Applications' and getattr(self, 'business_changes_enabled', lambda: False)():
+                try:
+                    document_id, destination, version = self.business_change_confirm_application_upload(
+                        student, upload, item_id, doc_type, target_name, notes, stored_form)
+                except (ValueError,OSError,RuntimeError,sqlite3.DatabaseError) as error:
+                    return self.business_change_review_failure(student_id,module,token,error)
+                saved.append(document_id)
+                continue
             intake = intake_entries.get(index)
             intake_upload = None
             if intake:
@@ -71484,7 +72171,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
             business_record_id = None
             if module == "Visa":
-                visa_review_case,case_error=self.visa_lodgement_resolve_target_case(student_id,stored_form.get('visa_case_id'),True)
+                if stored_form.get('visa_record_purpose')=='existing_evidence' and getattr(self,'business_changes_enabled',lambda:False)():
+                    from business_changes.visa_review_context import validate_context
+                    from business_changes.snapshots import read_scope
+                    try:
+                        with read_scope(db) as connection:validate_context(connection,student_id,stored_form)
+                    except ValueError as error:
+                        return self.business_change_review_failure(student_id,module,token,error)
+                    visa_review_case,case_error=None,''
+                else:
+                    visa_review_case,case_error=self.visa_lodgement_resolve_target_case(student_id,stored_form.get('visa_case_id'),True)
                 if case_error:
                     visa_review_skipped.append(file_meta['original_name']+': '+case_error);continue
                 from visa_document_metadata import LEGACY
@@ -71492,6 +72188,36 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     if visa_review_case:self._visa_check_upload(dict(visa_review_case),upload.data,LEGACY.get(doc_type,'other'))
                 except (ValueError,OSError) as exc:
                     visa_review_skipped.append(file_meta['original_name']+': '+str(exc));continue
+            if module in {'Offer', 'COE + OSHC', 'Payments', 'Homestay + Airport Pickup', 'Forms', 'Visa'} and getattr(self, 'business_changes_enabled', lambda: False)():
+                prepared = self.business_change_prepare_upload_review(module, doc_type, upload, index)
+                if module == 'COE + OSHC':
+                    intake_upload = prepared['tuition_upload']
+                def persist_business(view, document_id, destination):
+                    return self._persist_reviewed_upload_business(
+                        student_id=student_id, module=module, doc_type=doc_type, upload=upload,
+                        destination=destination, document_id=document_id, index=index, stored_form=stored_form,
+                        target_name=target_name, transfer_branch_snapshot=transfer_branch_snapshot,
+                        intake=intake, intake_upload=intake_upload, pending_coe_tuition=pending_coe_tuition,
+                        coe_application_cycle_id=coe_application_cycle_id, prepared_inferred=prepared['inferred'],
+                        tuition_prepared=prepared['tuition_prepared'], tuition_preparation_error=prepared['tuition_error'],
+                        strict_contract_owner=True,
+                        visa_review_case=visa_review_case if module=='Visa' else None, owned_connection=view,
+                        prepared_visa_bytes=prepared.get('visa_bytes'),prepared_visa_text=prepared.get('visa_text'),
+                    )
+                reviewed_fields = {key: value for key, value in self.form.items() if key.endswith('_' + index)}
+                try:
+                    document_id, destination, version = self.business_change_confirm_upload_review(
+                        student, upload, item_id, doc_type, target_name, notes, stored_form,
+                        module_key=module, business_after=persist_business,
+                        request_context={'source': stored_form, 'confirmed_fields': reviewed_fields,
+                                         'coe_application_cycle_id': coe_application_cycle_id,
+                                         **({'visa_case_id':visa_review_case['id'] if visa_review_case else None,
+                                             'visa_cycle_id':visa_review_case['application_cycle_id'] if visa_review_case else None} if module=='Visa' else {})},
+                    )
+                except (ValueError,OSError,RuntimeError,sqlite3.DatabaseError) as error:
+                    return self.business_change_review_failure(student_id,module,token,error)
+                saved.append(document_id)
+                continue
             db.audit(
                 self.user, "document_type_selected", "upload_review", item_id,
                 old_value=file_meta["original_name"], new_value=doc_type,
@@ -71520,357 +72246,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 file_path=str(destination), old_value=file_meta["original_name"], new_value=destination.name,
                 student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
             )
-            if module == "Homestay + Airport Pickup":
-                refresh_workflow_completion_metrics(student_id, source="homestay_itinerary_uploaded")
-            if module == "Offer":
-                inferred = infer_offer_details(upload)
-                school_name = (
-                    target_name or extraction_form_value(self.form, "school_name", index)
-                    or stored_form.get("school_name") or ""
-                ).strip() or "待确认学校"
-                if transfer_branch_snapshot:
-                    school_name = transfer_branch_snapshot
-                language_key = f"extract_language_school_name_{index}"
-                language_school_name = (self.form[language_key] if language_key in self.form else stored_form.get("language_school_name") or "").strip()
-                offer_date_value = extraction_form_value(self.form, "offer_date", index) or stored_form.get("offer_date")
-                course_start_value = extraction_form_value(self.form, "course_start_date", index) or stored_form.get("course_start_date")
-                offer_expiry_value = extraction_form_value(self.form, "offer_expiry_date", index) or stored_form.get("offer_expiry_date")
-                deposit_amount = extraction_money_value(extraction_form_value(self.form, "deposit_amount", index) or stored_form.get("deposit_amount"))
-                deposit_currency = extraction_form_value(self.form, "deposit_currency", index) or stored_form.get("deposit_currency") or "AUD"
-                offer_status = {"SignedOffer": "signed", "OfferAcceptance": "signed_received"}.get(doc_type, stored_form.get("offer_status") or "received")
-                if offer_status == "accepted":
-                    offer_status = "received"
-                signed_offer_path = str(destination) if doc_type in {"SignedOffer", "OfferAcceptance"} else ""
-                accepted_date = ""
-                lifecycle_stamp = now_iso()
-                with db.transaction() as connection:
-                    transfer_branch_id = self.transfer_v2_requested_branch_id(
-                        connection,student_id,require_acceptance=False,
-                        submitted_branch_id=stored_form.get("transfer_branch_id"),
-                    )
-                    if offer_course_start_date_available(connection):
-                        business_record_id = int(connection.execute(
-                        """INSERT INTO offers(student_id,school_name,document_type,offer_date,course_start_date,offer_expiry_date,offer_status,offer_file_path,
-                           signed_offer_file_path,accepted_date,accepted_by,deposit_amount,deposit_currency,original_filename,uploaded_at,created_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (
-                            student_id, school_name, doc_type, offer_date_value, course_start_value,
-                            offer_expiry_value, offer_status, str(destination), signed_offer_path, accepted_date,
-                            self.user["id"] if accepted_date else None, deposit_amount,
-                            deposit_currency, upload.filename, lifecycle_stamp, lifecycle_stamp,
-                        ),
-                        ).lastrowid)
-                    else:
-                        business_record_id = int(connection.execute(
-                        """INSERT INTO offers(student_id,school_name,document_type,offer_date,offer_expiry_date,offer_status,offer_file_path,
-                           signed_offer_file_path,accepted_date,accepted_by,deposit_amount,deposit_currency,original_filename,uploaded_at,created_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (
-                            student_id, school_name, doc_type, offer_date_value, offer_expiry_value,
-                            offer_status, str(destination), signed_offer_path, accepted_date,
-                            self.user["id"] if accepted_date else None, deposit_amount,
-                            deposit_currency, upload.filename, lifecycle_stamp, lifecycle_stamp,
-                        ),
-                        ).lastrowid)
-                    if transfer_branch_id is not None:
-                        bind_authoritative_offer(
-                            connection,student_id=student_id,branch_id=transfer_branch_id,
-                            offer_id=business_record_id,document_id=int(document_id),
-                            actor_user_id=int(self.user["id"]),occurred_at=lifecycle_stamp,
-                        )
-                    save_offer_language_school(connection, business_record_id, student_id, language_school_name)
-                    offer_classification = apply_offer_classification(
-                        connection,business_record_id,school_name
-                    )
-                    if intake:
-                        save_source(connection, "offer", business_record_id, student_id,
-                                    offer_classification.school_id, intake, intake_upload,
-                                    int(self.user["id"]), source_school=school_name)
-                db.audit(
-                    self.user, "extraction_review_confirmed", "offer", business_record_id, str(destination),
-                    new_value=json.dumps({
-                        "document_type": doc_type, "school_name": school_name,
-                        "language_school_name": language_school_name,
-                        "offer_date": offer_date_value, "course_start_date": course_start_value,
-                        "offer_expiry_date": offer_expiry_value,
-                        "deposit_amount": deposit_amount, "deposit_currency": deposit_currency,
-                        "machine_inferred": inferred,
-                        "classification_status": offer_classification.status,
-                    }, ensure_ascii=False),
-                    student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
-                )
-                db.audit(self.user, "create", "offers", business_record_id, str(destination), new_value=json.dumps(inferred, ensure_ascii=False))
-                if doc_type in {"SignedOffer", "OfferAcceptance"}:
-                    resolve_completed_auto_reminders()
-                advance_workflow_stage_to(student_id, "下offer")
-            elif module == "COE + OSHC":
-                kind = coe_kind_from_review(doc_type)
-                inferred = infer_coe_oshc_details(upload, kind)
-                is_coe = kind in {"COE", "COE_CAAW"}
-                is_caaw = kind in {"CAAW", "COE_CAAW"}
-                is_provider_document = kind in {"COE", "CAAW", "COE_CAAW"}
-                is_course_document = kind in {"COE", "COE_CAAW"}
-                is_oshc = kind == "OSHC"
-                is_receipt = kind == "OSHCReceipt"
-                is_letter = kind == "LetterOfConfirmation"
-                coe_provider = (extraction_form_value(self.form, "coe_provider", index) or stored_form.get("coe_provider") or stored_form.get("school_name")) if is_provider_document else ""
-                coe_course = (extraction_form_value(self.form, "coe_course", index) or stored_form.get("coe_course")) if is_coe else ""
-                coe_course_level = ""
-                letter_language_course = (extraction_form_value(self.form, "letter_language_course_name", index) or stored_form.get("letter_language_course_name")) if is_letter else ""
-                letter_language_start = (extraction_form_value(self.form, "letter_language_start_date", index) or stored_form.get("letter_language_start_date")) if is_letter else ""
-                letter_language_end = (extraction_form_value(self.form, "letter_language_end_date", index) or stored_form.get("letter_language_end_date")) if is_letter else ""
-                letter_main_course = (extraction_form_value(self.form, "letter_main_course_name", index) or stored_form.get("letter_main_course_name")) if is_letter else ""
-                letter_main_start = (extraction_form_value(self.form, "letter_main_start_date", index) or stored_form.get("letter_main_start_date")) if is_letter else ""
-                letter_main_end = (extraction_form_value(self.form, "letter_main_end_date", index) or stored_form.get("letter_main_end_date")) if is_letter else ""
-                letter_year_level = (extraction_form_value(self.form, "letter_year_level", index) or stored_form.get("letter_year_level")) if is_letter else ""
-                coe_start_date = (extraction_form_value(self.form, "coe_start_date", index) or stored_form.get("coe_start_date")) if is_course_document else ""
-                coe_end_date = (extraction_form_value(self.form, "coe_end_date", index) or stored_form.get("coe_end_date")) if is_course_document else ""
-                caaw_start = (extraction_form_value(self.form, "caaw_welfare_start_date", index) or stored_form.get("caaw_welfare_start_date")) if is_caaw else ""
-                caaw_end = (extraction_form_value(self.form, "caaw_welfare_end_date", index) or stored_form.get("caaw_welfare_end_date")) if is_caaw else ""
-                oshc_company = (extraction_form_value(self.form, "oshc_company_name", index) or stored_form.get("oshc_company_name") or stored_form.get("oshc_provider")) if is_oshc else ""
-                oshc_policy_number = (extraction_form_value(self.form, "oshc_policy_number", index) or stored_form.get("oshc_policy_number")) if is_oshc else ""
-                oshc_policy_issue_date = (extraction_form_value(self.form, "oshc_policy_issue_date", index) or stored_form.get("oshc_policy_issue_date")) if is_oshc else ""
-                oshc_commencement_date = (extraction_form_value(self.form, "oshc_commencement_date", index) or stored_form.get("oshc_commencement_date") or stored_form.get("oshc_start_date")) if is_oshc else ""
-                oshc_expiry_date = (extraction_form_value(self.form, "oshc_expiry_date", index) or stored_form.get("oshc_expiry_date") or stored_form.get("oshc_end_date")) if is_oshc else ""
-                receipt_amount_value = (extraction_form_value(self.form, "receipt_amount", index) or stored_form.get("receipt_amount")) if is_receipt else ""
-                receipt_date_value = (extraction_form_value(self.form, "receipt_date", index) or stored_form.get("receipt_date")) if is_receipt else ""
-                payment_reference_value = (extraction_form_value(self.form, "payment_reference", index) or stored_form.get("payment_reference")) if is_receipt else ""
-                lifecycle_stamp = now_iso()
-                with db.transaction() as connection:
-                    business_record_id = int(connection.execute(
-                        """INSERT INTO coe_oshc(student_id,document_kind,file_path,school_name,coe_start_date,coe_end_date,
-                       oshc_provider,oshc_start_date,oshc_end_date,coe_provider,coe_course,coe_course_level,
-                       letter_language_course_name,letter_language_start_date,letter_language_end_date,
-                       letter_main_course_name,letter_main_start_date,letter_main_end_date,letter_year_level,
-                       caaw_welfare_start_date,caaw_welfare_end_date,oshc_company_name,oshc_policy_number,
-                       oshc_policy_issue_date,oshc_commencement_date,oshc_expiry_date,receipt_amount,receipt_date,
-                       payment_reference,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (
-                            student_id, kind, str(destination),
-                            coe_provider or letter_main_course or letter_language_course, coe_start_date, coe_end_date,
-                            oshc_company, oshc_commencement_date, oshc_expiry_date,
-                            coe_provider, coe_course, coe_course_level,
-                            letter_language_course, letter_language_start, letter_language_end,
-                            letter_main_course, letter_main_start, letter_main_end, letter_year_level,
-                            caaw_start, caaw_end, oshc_company, oshc_policy_number,
-                            oshc_policy_issue_date, oshc_commencement_date, oshc_expiry_date,
-                            receipt_amount_value, receipt_date_value, payment_reference_value,
-                            lifecycle_stamp,
-                        ),
-                    ).lastrowid)
-                    transfer_branch_id = (
-                        self.transfer_v2_requested_branch_id(
-                            connection,student_id,require_acceptance=True,
-                            require_confirmed_payment=True,
-                            submitted_branch_id=stored_form.get("transfer_branch_id"),
-                        )
-                        if kind in {"COE","COE_CAAW"} else None
-                    )
-                    if transfer_branch_id is not None and kind in {"COE","COE_CAAW"}:
-                        bind_authoritative_coe(
-                            connection,student_id=student_id,branch_id=transfer_branch_id,
-                            coe_oshc_id=business_record_id,document_id=int(document_id),
-                            actor_user_id=int(self.user["id"]),occurred_at=lifecycle_stamp,
-                        )
-                    else:
-                        bind_coe_oshc_to_current_cycle(
-                            connection, student_id=student_id,
-                            record_id=business_record_id,
-                            application_cycle_id=coe_application_cycle_id,
-                        )
-                    if is_coe:
-                        if self.form.get(f"intake_defer_{index}") == "1":
-                            pending_coe_tuition[index] = "已选择稍后核对学费。"
-                        else:
-                            try:
-                                values = read_review_fields(self.form, index)
-                                if values is not None:
-                                    context = accepted_offer_context(connection, student_id)
-                                    choice = self.form.get(f"intake_choice_{index}", "")
-                                    decision = choose_coe(
-                                        context, coe_provider, self.form.get(f"intake_acceptance_{index}"),
-                                        values, choice,
-                                        confirmed_school=self.form.get(f"intake_coe_school_{index}", ""),
-                                    )
-                                    bound_cycle, = connection.execute(
-                                        "SELECT application_cycle_id FROM coe_oshc WHERE id=?",
-                                        (business_record_id,),
-                                    ).fetchone()
-                                    if bound_cycle != context["application_cycle_id"]:
-                                        raise ValueError("请核对 CoE 和已接受 Offer 所属的申请周期。")
-                                    validate_tuition_update(
-                                        connection, context,
-                                        values if decision == "coe" else context["offer"]["values"],
-                                    )
-                                    from revenue.first_year_tuition import OFFER_EXTENSIONS
-                                    from revenue.repository import RevenueRepository
-                                    from revenue.tuition_storage import TuitionEvidenceStorage
-
-                                    intake_upload = TuitionEvidenceStorage(
-                                        Path(db.path).parent / "revenue_documents",
-                                    ).stage(upload, OFFER_EXTENSIONS - {".txt"})
-                                    with RevenueRepository(connection).transaction():
-                                        source = save_source(
-                                            connection, "coe", business_record_id, student_id, context["school_id"],
-                                            values, intake_upload, int(self.user["id"]),
-                                            acceptance_id=context["acceptance_id"], decision=decision,
-                                            source_school=coe_provider,
-                                        )
-                                        tuition_result = sync_tuition(
-                                            connection, context, source if decision == "coe" else context["offer"],
-                                            int(self.user["id"]), coe_id=business_record_id,
-                                            keep_existing=decision == "offer" and not choice,
-                                        )
-                                        if tuition_result.get("reason"):
-                                            pending_coe_tuition[index] = tuition_result["reason"]
-                            except ValueError as error:
-                                pending_coe_tuition[index] = str(error)
-                        if index not in pending_coe_tuition:
-                            context = accepted_offer_context(connection, student_id)
-                            reason = coe_first_year_reason(connection, context, business_record_id) if context else ""
-                            if reason:
-                                pending_coe_tuition[index] = reason
-                    if index not in pending_coe_tuition:
-                        process_revenue_coe_change(
-                            connection, business_record_id, int(self.user["id"]),
-                            lifecycle_stamp,
-                        )
-                db.audit(
-                    self.user, "extraction_review_confirmed", "coe_oshc", business_record_id, str(destination),
-                    new_value=json.dumps({
-                        "document_type": doc_type, "document_kind": kind,
-                        "coe_provider": coe_provider, "coe_course": coe_course, "coe_course_level": coe_course_level,
-                        "letter_language_course_name": letter_language_course,
-                        "letter_language_start_date": letter_language_start,
-                        "letter_language_end_date": letter_language_end,
-                        "letter_main_course_name": letter_main_course,
-                        "letter_main_start_date": letter_main_start,
-                        "letter_main_end_date": letter_main_end,
-                        "letter_year_level": letter_year_level,
-                        "coe_start_date": coe_start_date, "coe_end_date": coe_end_date,
-                        "caaw_welfare_start_date": caaw_start, "caaw_welfare_end_date": caaw_end,
-                        "oshc_company_name": oshc_company, "oshc_policy_number": oshc_policy_number,
-                        "oshc_policy_issue_date": oshc_policy_issue_date,
-                        "oshc_commencement_date": oshc_commencement_date,
-                        "oshc_expiry_date": oshc_expiry_date,
-                        "receipt_amount": receipt_amount_value, "receipt_date": receipt_date_value,
-                        "payment_reference": payment_reference_value,
-                        "intake_tuition_pending_reason": pending_coe_tuition.get(index),
-                        "machine_inferred": inferred,
-                    }, ensure_ascii=False),
-                    student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
-                )
-                db.audit(self.user, "create", "coe_oshc", business_record_id, str(destination), new_value=json.dumps(inferred, ensure_ascii=False))
-                if kind not in {"LetterOfConfirmation", "Other", ""}:
-                    advance_workflow_stage_to(student_id, "COE已出")
-            elif module == "Payments":
-                amount = stored_form.get("amount") or None
-                lifecycle_stamp = now_iso()
-                with db.transaction() as connection:
-                    business_record_id = int(connection.execute(
-                        """INSERT INTO payments(student_id,payment_category,amount,currency,payment_method,paid_date,
-                           payer_name,receiver_name,receipt_file_path,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                        (
-                            student_id, stored_form.get("payment_category") or payment_category_from_review(doc_type),
-                            float(amount) if amount else None, stored_form.get("currency"), stored_form.get("payment_method"),
-                            stored_form.get("paid_date"), stored_form.get("payer_name"), stored_form.get("receiver_name"),
-                            str(destination), lifecycle_stamp,
-                        ),
-                    ).lastrowid)
-                    transfer_branch_id = self.transfer_v2_requested_branch_id(
-                        connection,student_id,require_acceptance=True,
-                        submitted_branch_id=stored_form.get("transfer_branch_id"),
-                    )
-                    if transfer_branch_id is not None:
-                        binding = bind_authoritative_payment(
-                            connection,student_id=student_id,branch_id=transfer_branch_id,
-                            payment_id=business_record_id,document_id=int(document_id),
-                            actor_user_id=int(self.user["id"]),occurred_at=lifecycle_stamp,
-                        )
-                        confirm_authoritative_payment(
-                            connection,payment_link_id=binding.link_id,
-                            actor_user_id=int(self.user["id"]),occurred_at=lifecycle_stamp,
-                        )
-                    else:
-                        record_current_payment_evidence(
-                            connection,
-                            student_id=student_id,
-                            payment_record_id=business_record_id,
-                            occurred_at=lifecycle_stamp,
-                            actor_user_id=self.user["id"],
-                            actor_name=(
-                                self.user["display_name"]
-                                if "display_name" in self.user.keys() else None
-                            ),
-                        )
-                db.audit(self.user, "create", "payments", business_record_id, str(destination))
-                advance_workflow_stage_to(student_id, "接受OFFER+缴费")
-            elif module == "Visa":
-                if visa_review_case:self.visa_lodgement_link_document_to_case(student_id,visa_review_case,document_id,LEGACY.get(doc_type,'other'),upload.filename)
-                inferred = infer_visa_details(upload)
-                business_record_id = db.execute(
-                    """INSERT INTO visas(
-                           student_id,file_path,visa_type,visa_sector,
-                           visa_grant_date,visa_start_date,visa_expiry_date,
-                           visa_conditions,visa_status,created_at
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        student_id,
-                        str(destination),
-                        stored_form.get("visa_type") or "",
-                        stored_form.get("visa_sector")
-                        or inferred.get("visa_sector") or "",
-                        stored_form.get("visa_grant_date")
-                        or inferred.get("visa_grant_date") or None,
-                        stored_form.get("visa_start_date")
-                        or inferred.get("visa_start_date") or None,
-                        stored_form.get("visa_expiry_date")
-                        or inferred.get("visa_expiry_date") or None,
-                        stored_form.get("visa_conditions")
-                        or inferred.get("visa_conditions") or "",
-                        stored_form.get("visa_status")
-                        or inferred.get("visa_status") or "",
-                        now_iso(),
-                    ),
-                )
-                db.audit(
-                    self.user,
-                    "extraction_review_confirmed",
-                    "visa",
-                    business_record_id,
-                    str(destination),
-                    new_value=json.dumps(inferred, ensure_ascii=False),
-                    student_id=student_id,
-                )
-            elif module == "Forms":
-                contract_id = (stored_form.get("contract_id") or "").strip()
-                if contract_id:
-                    latest_contract = db.one(
-                        "SELECT * FROM contracts WHERE id=? AND student_id=?",
-                        (contract_id, student_id),
-                    )
-                else:
-                    latest_contract = db.one(
-                        "SELECT * FROM contracts WHERE student_id=? ORDER BY generated_at DESC,id DESC LIMIT 1",
-                        (student_id,),
-                    )
-                if latest_contract and doc_type == "SignedStudyAbroadContract":
-                    stamp = now_iso()
-                    db.execute(
-                        "UPDATE contracts SET signed_file_path=?,contract_status='ParentSigned',signed_at=?,updated_at=? WHERE id=?",
-                        (str(destination), stamp, stamp, latest_contract["id"]),
-                    )
-                    notify_recorded_contract_signature(latest_contract, stamp)
-                    db.audit(self.user, "parent_signed_contract_uploaded", "contracts", latest_contract["id"], file_path=str(destination), new_value=destination.name, student_id=student_id)
-                elif latest_contract and doc_type == "FinalSignedStudyAbroadContract":
-                    db.execute(
-                        "UPDATE contracts SET final_signed_file_path=?,contract_status='FullyExecuted',fully_executed_at=?,updated_at=? WHERE id=?",
-                        (str(destination), now_iso(), now_iso(), latest_contract["id"]),
-                    )
-                    stamp = now_iso()
-                    notify_recorded_contract_signature(latest_contract, stamp)
-                    record_contract_completion_fact(latest_contract["id"], stamp, self.user["id"])
-                    db.audit(self.user, "final_contract_uploaded", "contracts", latest_contract["id"], file_path=str(destination), new_value=destination.name, student_id=student_id)
+            business_record_id = self._persist_reviewed_upload_business(
+                student_id=student_id, module=module, doc_type=doc_type, upload=upload,
+                destination=destination, document_id=document_id, index=index, stored_form=stored_form,
+                target_name=target_name, transfer_branch_snapshot=transfer_branch_snapshot,
+                intake=intake, intake_upload=intake_upload, pending_coe_tuition=pending_coe_tuition,
+                coe_application_cycle_id=coe_application_cycle_id,
+                visa_review_case=visa_review_case if module == "Visa" else None,
+            )
             try:
                 upload_review_confirmation_coordinator.coordinate_confirmed_upload(
                     db.path,
@@ -71932,7 +72315,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     "error",
                 )
         if session_id:
-            refresh_upload_session_counts(session_id)
+            if not getattr(self,'business_changes_enabled',lambda:False)():
+                refresh_upload_session_counts(session_id)
             db.audit(
                 self.user, "upload_review_confirmed", "upload_review", session_id,
                 new_value=json.dumps({"saved": len(saved), "module": module}, ensure_ascii=False),
@@ -72024,7 +72408,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             student = ensure_student_storage(student)
         upload = self.uploaded_for()
         if upload:
-            token = create_upload_review(student_id, "Offer", [upload], self.user, self.form)
+            token = create_upload_review(student_id, "Offer", [upload], self.user, self.form,permission_policy='workflow_save')
             return self.redirect(f"/students/{student_id}/upload-review/{quote(token)}")
         inferred = infer_offer_details(upload) if upload else {}
         path = ""
@@ -72051,7 +72435,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         offer_status_value = (self.form.get("offer_status") or "received") if (self.form.get("offer_status") or "received") != "accepted" else "received"
         lifecycle_stamp = now_iso()
-        with db.transaction() as connection:
+        def persist_record(connection):
+            nonlocal school_name
             transfer_branch_id = self.transfer_v2_requested_branch_id(
                 connection, student_id, require_acceptance=False
             )
@@ -72089,14 +72474,33 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             offer_classification = apply_offer_classification(
                 connection,record_id,school_name
             )
-        db.audit(self.user, "create", "offers", record_id, path, new_value=json.dumps(inferred, ensure_ascii=False))
-        db.audit(
-            self.user, "offer_school_auto_classified", "offers", record_id, student_id=student_id,
-            new_value=json.dumps({"classification_status": offer_classification.status, "school_id": offer_classification.school_id}, ensure_ascii=False),
-            ip=(getattr(self, "client_address", ("",))[0] or ""),
-            device=getattr(self, "headers", {}).get("User-Agent"),
-        )
-        advance_workflow_stage_to(student_id, "下offer")
+            return record_id, offer_classification
+        def audit_record(record_id, offer_classification):
+            db.audit(self.user, "create", "offers", record_id, path, new_value=json.dumps(inferred, ensure_ascii=False))
+            db.audit(
+                self.user, "offer_school_auto_classified", "offers", record_id, student_id=student_id,
+                new_value=json.dumps({"classification_status": offer_classification.status, "school_id": offer_classification.school_id}, ensure_ascii=False),
+                ip=(getattr(self, "client_address", ("",))[0] or ""),
+                device=getattr(self, "headers", {}).get("User-Agent"),
+            )
+            advance_workflow_stage_to(student_id, "下offer")
+        atomic_result = None
+        if getattr(self,'business_changes_enabled',lambda:False)():
+            def operation(view):
+                rid, classification = persist_record(view)
+                audit_record(rid, classification)
+                return rid
+            try:
+                atomic_result = self.business_change_save_manual_record('Offer',student_id,None,operation)
+            except PermissionError:
+                return self.deny_module_access("offer")
+            except ValueError as error:
+                return self.flash_redirect(f"/students/{student_id}?tab=offer",str(error),"error")
+            record_id = atomic_result.result["record_id"]
+        else:
+            with db.transaction() as connection:
+                record_id, offer_classification = persist_record(connection)
+            audit_record(record_id, offer_classification)
         return self.flash_redirect(f"/students/{student_id}?tab=offer", "Offer 已保存，已自动识别可编辑字段")
 
     def offer_update(self, method, student_id, offer_id):
@@ -72161,7 +72565,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if wants_json:
                 return self.json_response({"ok": False, "error": message}, HTTPStatus.BAD_REQUEST)
             raise ValueError(message)
-        with db.transaction() as connection:
+        def persist_record(connection):
             if offer_course_start_date_available(connection):
                 connection.execute(
                     """UPDATE offers SET school_name=?,offer_date=?,course_start_date=?,offer_expiry_date=?,offer_status=?,
@@ -72183,12 +72587,35 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if "language_school_name" in self.form:
                 save_offer_language_school(connection, offer_id, student_id, self.form["language_school_name"])
             offer_classification = apply_offer_classification(connection, int(offer_id), school_name)
-        db.audit(self.user, "update", "offers", offer_id, new_value="offer_fields_updated")
+            return int(offer_id), offer_classification
+        def audit_record(record_id, offer_classification):
+            db.audit(self.user, "update", "offers", offer_id, new_value="offer_fields_updated")
+        atomic_result = None
+        if getattr(self,'business_changes_enabled',lambda:False)():
+            def operation(view):
+                rid, classification = persist_record(view)
+                audit_record(rid, classification)
+                return rid
+            try:
+                atomic_result = self.business_change_save_manual_record('Offer',student_id,int(offer_id),operation)
+            except PermissionError:
+                return self.deny_module_access("offer")
+            except ValueError as error:
+                if wants_json:return self.json_response({"ok":False,"error":str(error)},409)
+                return self.flash_redirect(f"/students/{student_id}?tab=offer",str(error),"error")
+            record_id = atomic_result.result["record_id"]
+        else:
+            with db.transaction() as connection:
+                record_id, offer_classification = persist_record(connection)
+            audit_record(record_id, offer_classification)
+        classification_status = db.one("SELECT classification_status FROM offers WHERE id=? AND student_id=?",(offer_id,student_id))[0]
         if wants_json:
             return self.json_response({
                 "ok": True,
                 "message": "Offer 已保存",
                 "offer_id": offer_id,
+                **({'business_receipt':self.business_change_record_form_values('Offer',student_id,int(offer_id),
+                    version=atomic_result.result['version'])} if atomic_result is not None else {}),
                 "saved": {
                     "school_name": school_name,
                     "language_school_name": str(self.form.get("language_school_name", offer_record_value(offer, "language_school_name")) or "").strip(),
@@ -72198,7 +72625,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     "offer_status": offer_status,
                     "deposit_amount": deposit_amount or "",
                     "deposit_currency": deposit_currency,
-                    "classification_status": offer_classification.status,
+                    "classification_status": classification_status,
                 },
             })
         return self.flash_redirect(f"/students/{student_id}?tab=offer", "Offer 已更新")
@@ -72509,7 +72936,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("学生不存在", 404)
         uploads = [item for item in self.files if item.field_name == "file" and item.filename]
         if uploads:
-            token = create_upload_review(student_id, "COE + OSHC", uploads, self.user, self.form)
+            token = create_upload_review(student_id, "COE + OSHC", uploads, self.user, self.form,permission_policy='workflow_save')
             return self.redirect(f"/students/{student_id}/upload-review/{quote(token)}")
         validation_connection = db.connect()
         try:
@@ -72526,7 +72953,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         inferred = {}
         path = ""
         lifecycle_stamp = now_iso()
-        with db.transaction() as connection:
+        def persist_record(connection):
             document_kind = self.form.get("document_kind") or inferred.get("document_kind") or "COE"
             transfer_branch_id = (
                 self.transfer_v2_requested_branch_id(
@@ -72590,9 +73017,23 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             process_revenue_coe_change(
                 connection, record_id, int(self.user["id"]), lifecycle_stamp
             )
-        db.audit(self.user, "create", "coe_oshc", record_id, path, new_value=json.dumps(inferred, ensure_ascii=False))
-        if document_kind not in {"LetterOfConfirmation", "Other", ""}:
-            advance_workflow_stage_to(student_id, "COE已出")
+            return record_id, document_kind
+        def audit_record(record_id, document_kind):
+            db.audit(self.user, "create", "coe_oshc", record_id, path, new_value=json.dumps(inferred, ensure_ascii=False))
+            if document_kind not in {"LetterOfConfirmation", "Other", ""}:
+                advance_workflow_stage_to(student_id, "COE已出")
+        if getattr(self,'business_changes_enabled',lambda:False)():
+            def operation(view):
+                rid, metadata = persist_record(view)
+                audit_record(rid, metadata)
+                return rid
+            try:self.business_change_save_manual_record('COE + OSHC',student_id,None,operation)
+            except PermissionError:return self.deny_module_access('coe_oshc')
+            except ValueError as error:return self.flash_redirect(f"/students/{student_id}?tab=coe",str(error),"error")
+        else:
+            with db.transaction() as connection:
+                record_id, metadata = persist_record(connection)
+            audit_record(record_id, metadata)
         return self.flash_redirect(f"/students/{student_id}?tab=coe", "COE / CAAW / OSHC 已保存，已自动识别可编辑字段")
 
     def coe_update(self, method, student_id, record_id):
@@ -72623,46 +73064,58 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         oshc_company = fv("oshc_company_name", "oshc_company_name") or fv("oshc_provider", "oshc_provider")
         oshc_commencement = fv("oshc_commencement_date", "oshc_commencement_date") or fv("oshc_start_date", "oshc_start_date")
         oshc_expiry = fv("oshc_expiry_date", "oshc_expiry_date") or fv("oshc_end_date", "oshc_end_date")
-        db.execute(
-            """UPDATE coe_oshc SET document_kind=?,school_name=?,coe_start_date=?,coe_end_date=?,
-               oshc_provider=?,oshc_start_date=?,oshc_end_date=?,coe_provider=?,coe_course=?,coe_course_level=?,
-               letter_language_course_name=?,letter_language_start_date=?,letter_language_end_date=?,
-               letter_main_course_name=?,letter_main_start_date=?,letter_main_end_date=?,letter_year_level=?,
-               caaw_welfare_start_date=?,caaw_welfare_end_date=?,oshc_company_name=?,oshc_policy_number=?,
-               oshc_policy_issue_date=?,oshc_commencement_date=?,oshc_expiry_date=?,receipt_amount=?,
-               receipt_date=?,payment_reference=? WHERE id=? AND student_id=?""",
-            (
-                fv("document_kind", "document_kind") or "COE",
-                coe_provider,
-                fv("coe_start_date", "coe_start_date"),
-                fv("coe_end_date", "coe_end_date"),
-                oshc_company,
-                oshc_commencement,
-                oshc_expiry,
-                coe_provider,
-                fv("coe_course", "coe_course"),
-                fv("coe_course_level", "coe_course_level"),
-                fv("letter_language_course_name", "letter_language_course_name"),
-                fv("letter_language_start_date", "letter_language_start_date"),
-                fv("letter_language_end_date", "letter_language_end_date"),
-                fv("letter_main_course_name", "letter_main_course_name"),
-                fv("letter_main_start_date", "letter_main_start_date"),
-                fv("letter_main_end_date", "letter_main_end_date"),
-                fv("letter_year_level", "letter_year_level"),
-                fv("caaw_welfare_start_date", "caaw_welfare_start_date"),
-                fv("caaw_welfare_end_date", "caaw_welfare_end_date"),
-                oshc_company,
-                fv("oshc_policy_number", "oshc_policy_number"),
-                fv("oshc_policy_issue_date", "oshc_policy_issue_date"),
-                oshc_commencement,
-                oshc_expiry,
-                fv("receipt_amount", "receipt_amount"),
-                fv("receipt_date", "receipt_date"),
-                fv("payment_reference", "payment_reference"),
-                record_id, student_id,
-            ),
-        )
-        db.audit(self.user, "update", "coe_oshc", record_id, new_value="coe_oshc_fields_updated")
+        def persist_record(connection=None):
+            db.execute(
+                """UPDATE coe_oshc SET document_kind=?,school_name=?,coe_start_date=?,coe_end_date=?,
+                   oshc_provider=?,oshc_start_date=?,oshc_end_date=?,coe_provider=?,coe_course=?,coe_course_level=?,
+                   letter_language_course_name=?,letter_language_start_date=?,letter_language_end_date=?,
+                   letter_main_course_name=?,letter_main_start_date=?,letter_main_end_date=?,letter_year_level=?,
+                   caaw_welfare_start_date=?,caaw_welfare_end_date=?,oshc_company_name=?,oshc_policy_number=?,
+                   oshc_policy_issue_date=?,oshc_commencement_date=?,oshc_expiry_date=?,receipt_amount=?,
+                   receipt_date=?,payment_reference=? WHERE id=? AND student_id=?""",
+                (
+                    fv("document_kind", "document_kind") or "COE",
+                    coe_provider,
+                    fv("coe_start_date", "coe_start_date"),
+                    fv("coe_end_date", "coe_end_date"),
+                    oshc_company,
+                    oshc_commencement,
+                    oshc_expiry,
+                    coe_provider,
+                    fv("coe_course", "coe_course"),
+                    fv("coe_course_level", "coe_course_level"),
+                    fv("letter_language_course_name", "letter_language_course_name"),
+                    fv("letter_language_start_date", "letter_language_start_date"),
+                    fv("letter_language_end_date", "letter_language_end_date"),
+                    fv("letter_main_course_name", "letter_main_course_name"),
+                    fv("letter_main_start_date", "letter_main_start_date"),
+                    fv("letter_main_end_date", "letter_main_end_date"),
+                    fv("letter_year_level", "letter_year_level"),
+                    fv("caaw_welfare_start_date", "caaw_welfare_start_date"),
+                    fv("caaw_welfare_end_date", "caaw_welfare_end_date"),
+                    oshc_company,
+                    fv("oshc_policy_number", "oshc_policy_number"),
+                    fv("oshc_policy_issue_date", "oshc_policy_issue_date"),
+                    oshc_commencement,
+                    oshc_expiry,
+                    fv("receipt_amount", "receipt_amount"),
+                    fv("receipt_date", "receipt_date"),
+                    fv("payment_reference", "payment_reference"),
+                    record_id, student_id,
+                ),
+            )
+            db.audit(self.user, "update", "coe_oshc", record_id, new_value="coe_oshc_fields_updated")
+            if connection is not None:
+                process_revenue_coe_change(connection,int(record_id),int(self.user["id"]),now_iso())
+            return int(record_id)
+        atomic_result = None
+        if getattr(self,"business_changes_enabled",lambda:False)():
+            try:atomic_result = self.business_change_save_manual_record("COE + OSHC",student_id,int(record_id),persist_record)
+            except PermissionError:return self.deny_module_access("coe_oshc")
+            except ValueError as error:
+                if wants_json:return self.json_response({"ok":False,"error":str(error)},409)
+                return self.flash_redirect(f"/students/{student_id}?tab=coe",str(error),"error")
+        else:persist_record()
         if wants_json:
             return self.json_response({
                 "ok": True,
@@ -72670,6 +73123,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 "student_id": student_id,
                 "record_id": record_id,
                 "tab": "coe",
+                **({'business_receipt':self.business_change_record_form_values('COE + OSHC',student_id,int(record_id),
+                    version=atomic_result.result['version'])} if atomic_result is not None else {}),
             })
         return self.flash_redirect(f"/students/{student_id}?tab=coe", "COE / CAAW / OSHC 已更新")
 
@@ -72677,6 +73132,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if method != "POST":
             return
         upload = self.uploaded_for()
+        atomic_upload=bool(upload and getattr(self,"business_changes_enabled",lambda:False)())
         if not can_save_visa_record(self.user):
             db.audit(
                 self.user, "access_denied", "visa", record_id=student_id,
@@ -72696,7 +73152,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         student = db.one("SELECT * FROM students WHERE student_id=?", (student_id,))
         if not student:
             return self.error_page("学生不存在", 404)
-        if student["nas_status"] != "ready":
+        if student["nas_status"] != "ready" and not atomic_upload:
             student = ensure_student_storage(student)
         existing_visa_cycle = None
         existing_visa_evidence = (
@@ -72716,7 +73172,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             or str(self.form.get("progression_link_after_review") or "") == "1"
         ):
             token = create_upload_review(
-                student_id, "Visa", [upload], self.user, self.form
+                student_id, "Visa", [upload], self.user, self.form,permission_policy='visa_record'
             )
             return self.redirect(
                 f"/students/{student_id}/upload-review/{quote(token)}"
@@ -72729,22 +73185,46 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         if case_error:
             return self.flash_redirect(f"/students/{student_id}?tab=visa", case_error, "error")
+        prepared_upload=None
+        upload_context=None
+        if atomic_upload:
+            from business_changes.record_uploads import lookup_visa_upload
+            try:
+                if existing_visa_evidence:
+                    from business_changes.visa_review_context import freeze_context,validate_context
+                    from business_changes.snapshots import read_scope
+                    with read_scope(db) as connection:
+                        existing_visa_cycle=validate_context(connection,student_id,freeze_context(connection,student_id,self.form))
+                upload_context={"visa_case_id":target_case["id"] if target_case else None,
+                    "visa_cycle_id":target_case["application_cycle_id"] if target_case else None,
+                    "existing_cycle_id":existing_visa_cycle["id"] if existing_visa_cycle else None}
+                receipt=lookup_visa_upload(self,student_id,None,upload,self.visa_lodgement_document_type(visa_document_type_value),context=upload_context)
+                if receipt is not None:
+                    return self.flash_redirect(f"/students/{student_id}?tab=visa",
+                        "已有签证证明已保存，当前 Lifecycle 已设为沿用现有签证" if existing_visa_evidence else "VISA 记录已保存")
+                if target_case:self._visa_check_upload(dict(target_case),upload.data,visa_document_type_value)
+            except PermissionError:return self.deny_module_access("visa")
+            except ValueError as error:return self.flash_redirect(f"/students/{student_id}?tab=visa",str(error),"error")
         document_id = None
-        if upload and target_case:
+        if upload and target_case and not atomic_upload:
             try:self._visa_check_upload(dict(target_case),upload.data,visa_document_type_value)
             except (ValueError,OSError) as exc:return self.flash_redirect(f"/students/{student_id}?tab=visa",str(exc),"error")
         if upload:
-            inferred = infer_visa_details(upload)
-            document_id = save_document(
-                student,
-                upload,
-                "VISA",
-                self.user,
-                forced_type=self.visa_lodgement_document_type(visa_document_type_value),
-                duplicate_action="version",
-            )
-            doc = db.one("SELECT * FROM student_documents WHERE id=?", (document_id,))
-            path = doc["file_path"] if doc else ""
+            if atomic_upload:
+                prepared_upload=self.business_change_prepare_upload_review("Visa",self.visa_lodgement_document_type(visa_document_type_value),upload,"0")
+                inferred=prepared_upload["inferred"]
+            else:
+                inferred = infer_visa_details(upload)
+                document_id = save_document(
+                    student,
+                    upload,
+                    "VISA",
+                    self.user,
+                    forced_type=self.visa_lodgement_document_type(visa_document_type_value),
+                    duplicate_action="version",
+                )
+                doc = db.one("SELECT * FROM student_documents WHERE id=?", (document_id,))
+                path = doc["file_path"] if doc else ""
         visa_grant_date = crm_normalized_date_form_value(
             self.form, "visa_grant_date", "批准日期", inferred.get("visa_grant_date"), blank_uses_fallback=True
         )
@@ -72793,7 +73273,19 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 return self.flash_redirect(
                     f"/students/{student_id}?tab=visa", case_error, "error"
                 )
-        try:
+        record_id=None
+        link_message=""
+        def persist_record(connection=None):
+            nonlocal record_id,link_message,existing_visa_cycle
+            if connection is not None:
+                if existing_visa_evidence:
+                    from business_changes.visa_review_context import freeze_context,validate_context
+                    context=freeze_context(connection,student_id,self.form)
+                    existing_visa_cycle=validate_context(connection,student_id,context)
+                if target_case is not None:
+                    case=db.one("SELECT * FROM visa_cases WHERE id=? AND student_id=? AND archived_at IS NULL",(target_case["id"],student_id))
+                    if case is None or case["application_cycle_id"] != target_case["application_cycle_id"]:
+                        raise VisaDecisionConflictError("Visa Case 或申请周期已变化，请刷新后核对。")
             with db.transaction() as conn:
                 cursor = conn.execute(
                     """INSERT INTO visas(
@@ -72858,58 +73350,78 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         actor_user_id=self.user["id"],
                         actor_name=self.user.get("display_name") or self.user.get("username"),
                     )
+            if visa_expiry_date:
+                reminder_insert({
+                    "student_id": student_id,
+                    "reminder_type": "Visa expiry",
+                    "due_date": visa_expiry_date,
+                    "notes": self.form.get("visa_type"),
+                    "source_type": "visa",
+                    "source_record_id": record_id,
+                    "source_module": "visa",
+                    "source_object_type": "visa_record",
+                    "source_object_id": record_id,
+                    "source_event_type": "visa.expiry_recorded",
+                })
+            db.audit(self.user, "create", "visas", record_id, path, new_value=json.dumps(inferred, ensure_ascii=False))
+            if upload:
+                db.audit(
+                    self.user, "visa_auto_extracted", "visa", record_id, path,
+                    new_value=json.dumps({
+                        "visa_grant_date": visa_grant_date,
+                        "visa_start_date": visa_start_date,
+                        "visa_expiry_date": visa_expiry_date,
+                        "visa_sector": visa_sector,
+                        "visa_conditions": visa_conditions,
+                        "visa_status": visa_status,
+                        "machine_inferred": inferred,
+                    }, ensure_ascii=False),
+                    student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
+                )
+            final_visa_status = decision_type is not None and not existing_visa_evidence
+            if final_visa_status and visa_grant_date:
+                set_workflow_milestone(student_id, "visa_finalized_at", visa_grant_date)
+            link_message = ""
+            if upload and document_id and not existing_visa_evidence:
+                link_message = self.visa_lodgement_link_document_to_case(
+                    student_id,
+                    target_case,
+                    document_id,
+                    visa_document_type_value,
+                    upload.filename,
+                    **({"connection":connection,"prepared_bytes":prepared_upload["visa_bytes"],
+                        "prepared_text":prepared_upload["visa_text"]} if atomic_upload else {}),
+                )
+                extraction_message = ("已生成识别建议，请在 Visa Case 人工确认。" if target_case and visa_document_type_value in {"grant_letter","refusal_letter"} else "") if atomic_upload else self.visa_lodgement_auto_extract_result(
+                    target_case, document_id, visa_document_type_value
+                )
+                if extraction_message:
+                    link_message = f"{link_message}；{extraction_message}" if link_message else extraction_message
+            if not existing_visa_evidence:
+                advance_workflow_stage_to(student_id, "签证下签或拒签" if final_visa_status else "签证递交")
+            refresh_workflow_completion_metrics(student_id, source="visa_saved")
+            return int(record_id)
+        try:
+            if atomic_upload:
+                from business_changes.record_uploads import save_visa_upload
+                def persist_uploaded(view,did,destination,prepared):
+                    nonlocal document_id,path
+                    document_id=did;path=str(destination)
+                    return persist_record(view)
+                result=save_visa_upload(self,student,None,upload,self.visa_lodgement_document_type(visa_document_type_value),
+                    context=upload_context,prepare=lambda:prepared_upload,operation=persist_uploaded)
+                record_id=int(result.result["record_id"])
+            elif not upload and getattr(self,"business_changes_enabled",lambda:False)():
+                result=self.business_change_save_manual_record("Visa",student_id,None,persist_record)
+                record_id=int(result.result["record_id"])
+            else:persist_record()
         except VisaDecisionConflictError as exc:
             return self.flash_redirect(
                 f"/students/{student_id}?tab=visa", str(exc), "error"
             )
-        if visa_expiry_date:
-            reminder_insert({
-                "student_id": student_id,
-                "reminder_type": "Visa expiry",
-                "due_date": visa_expiry_date,
-                "notes": self.form.get("visa_type"),
-                "source_type": "visa",
-                "source_record_id": record_id,
-                "source_module": "visa",
-                "source_object_type": "visa_record",
-                "source_object_id": record_id,
-                "source_event_type": "visa.expiry_recorded",
-            })
-        db.audit(self.user, "create", "visas", record_id, path, new_value=json.dumps(inferred, ensure_ascii=False))
-        if upload:
-            db.audit(
-                self.user, "visa_auto_extracted", "visa", record_id, path,
-                new_value=json.dumps({
-                    "visa_grant_date": visa_grant_date,
-                    "visa_start_date": visa_start_date,
-                    "visa_expiry_date": visa_expiry_date,
-                    "visa_sector": visa_sector,
-                    "visa_conditions": visa_conditions,
-                    "visa_status": visa_status,
-                    "machine_inferred": inferred,
-                }, ensure_ascii=False),
-                student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
-            )
-        final_visa_status = decision_type is not None and not existing_visa_evidence
-        if final_visa_status and visa_grant_date:
-            set_workflow_milestone(student_id, "visa_finalized_at", visa_grant_date)
-        link_message = ""
-        if upload and document_id and not existing_visa_evidence:
-            link_message = self.visa_lodgement_link_document_to_case(
-                student_id,
-                target_case,
-                document_id,
-                visa_document_type_value,
-                upload.filename,
-            )
-            extraction_message = self.visa_lodgement_auto_extract_result(
-                target_case, document_id, visa_document_type_value
-            )
-            if extraction_message:
-                link_message = f"{link_message}；{extraction_message}" if link_message else extraction_message
-        if not existing_visa_evidence:
-            advance_workflow_stage_to(student_id, "签证下签或拒签" if final_visa_status else "签证递交")
-        refresh_workflow_completion_metrics(student_id, source="visa_saved")
+        except PermissionError:return self.deny_module_access("visa")
+        except ValueError as error:
+            return self.flash_redirect(f"/students/{student_id}?tab=visa",str(error),"error")
         if existing_visa_evidence:
             message = "已有签证证明已保存，当前 Lifecycle 已设为沿用现有签证"
         else:
@@ -73008,6 +73520,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if not student:
             return self.error_page("学生不存在", 404)
         upload = self.uploaded_for()
+        atomic_upload=bool(upload and getattr(self,"business_changes_enabled",lambda:False)())
         if upload and not can_module_action(self.user, "visa", "upload") and not allowed(self.user, "visas.manage"):
             db.audit(
                 self.user, "access_denied", "visa", record_id=record_id,
@@ -73031,9 +73544,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         visa_document_type_value = (
             requested_document_type.form_value if requested_document_type else "other"
         )
-        existing_visa_evidence = bool(
-            self.visa_existing_evidence_cycle(student_id, int(record_id))
-        )
+        existing_visa_cycle = self.visa_existing_evidence_cycle(student_id, int(record_id))
+        existing_visa_evidence = bool(existing_visa_cycle)
         target_case, case_error = (None, "") if existing_visa_evidence else self.visa_lodgement_resolve_target_case(
             student_id, self.form.get("visa_case_id"), bool(upload)
         )
@@ -73041,13 +73553,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if wants_json:
                 return self.json_response({"ok": False, "error": case_error}, 400)
             return self.flash_redirect(f"/students/{student_id}?tab=visa", case_error, "error")
-        if upload and target_case:
+        if upload and target_case and not atomic_upload:
             try:self._visa_check_upload(dict(target_case),upload.data,visa_document_type_value)
             except (ValueError,OSError) as exc:
                 if wants_json:return self.json_response({'ok':False,'error':str(exc)},400)
                 return self.flash_redirect(f"/students/{student_id}?tab=visa",str(exc),"error")
         document_id = None
-        if upload:
+        if upload and not atomic_upload:
             if student["nas_status"] != "ready":
                 student = ensure_student_storage(student)
             document_id = save_document(
@@ -73102,8 +73614,23 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 return self.flash_redirect(
                     f"/students/{student_id}?tab=visa", case_error, "error"
                 )
+        file_preparation=None
         document_type_update = None
-        try:
+        link_message = ""
+        def persist_record(connection=None):
+            nonlocal document_type_update,link_message
+            if connection is not None:
+                fresh=db.one("SELECT * FROM visas WHERE id=? AND student_id=?",(record_id,student_id))
+                if fresh is None or self.visa_confirmed_file_metadata(student_id,fresh):
+                    raise VisaDecisionConflictError("签证来源已变化或已确认，请刷新后核对。")
+                fresh_existing_cycle=self.visa_existing_evidence_cycle(student_id,int(record_id))
+                if ((int(fresh_existing_cycle['id']) if fresh_existing_cycle else None)
+                        != (int(existing_visa_cycle['id']) if existing_visa_cycle else None)):
+                    raise VisaDecisionConflictError("签证的 Lifecycle 用途已变化，请刷新后核对。")
+                if target_case is not None:
+                    case=db.one("SELECT * FROM visa_cases WHERE id=? AND student_id=? AND archived_at IS NULL",(target_case["id"],student_id))
+                    if case is None or case["application_cycle_id"] != target_case["application_cycle_id"]:
+                        raise VisaDecisionConflictError("Visa Case 或申请周期已变化，请刷新后核对。")
             with db.transaction() as conn:
                 conn.execute(
                     """UPDATE visas
@@ -73163,66 +73690,92 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         actor_user_id=self.user["id"],
                         actor_name=self.user.get("display_name") or self.user.get("username"),
                     )
+            final_visa_status = decision_type is not None and not existing_visa_evidence
+            if final_visa_status and visa_grant_date:
+                set_workflow_milestone(student_id, "visa_finalized_at", visa_grant_date)
+            link_message = ""
+            if upload and document_id and not existing_visa_evidence:
+                link_message = self.visa_lodgement_link_document_to_case(
+                    student_id,
+                    target_case,
+                    document_id,
+                    visa_document_type_value,
+                    upload.filename,
+                    **({"connection":connection,"prepared_bytes":file_preparation["visa_bytes"],
+                        "prepared_text":file_preparation["visa_text"]} if atomic_upload else {}),
+                )
+                extraction_message = ("已生成识别建议，请在 Visa Case 人工确认。" if target_case and visa_document_type_value in {"grant_letter","refusal_letter"} else "") if atomic_upload else self.visa_lodgement_auto_extract_result(
+                    target_case, document_id, visa_document_type_value
+                )
+                if extraction_message:
+                    link_message = f"{link_message}；{extraction_message}" if link_message else extraction_message
+            if not existing_visa_evidence:
+                advance_workflow_stage_to(student_id, "签证下签或拒签" if final_visa_status else "签证递交")
+            refresh_workflow_completion_metrics(student_id, source="visa_updated")
+            if document_type_update is not None:
+                audit_document_id = document_type_update.document_id
+                audit_document_type_old = document_type_update.old_document_type
+                audit_document_type_new = document_type_update.new_document_type
+                audit_document_type_changed = document_type_update.changed
+            elif upload and document_id:
+                audit_document = db.one(
+                    "SELECT id,document_type FROM student_documents WHERE id=? AND student_id=?",
+                    (document_id, student_id),
+                )
+                audit_document_id = int(audit_document["id"]) if audit_document else None
+                audit_document_type_old = ""
+                audit_document_type_new = str(audit_document["document_type"] or "") if audit_document else ""
+                audit_document_type_changed = bool(audit_document)
+            else:
+                audit_document_id = None
+                audit_document_type_old = ""
+                audit_document_type_new = ""
+                audit_document_type_changed = False
+            db.audit(
+                self.user, "update", "visas", record_id, file_path,
+                new_value=json.dumps({
+                    "visa_type": visa_type,
+                    "visa_sector": visa_sector,
+                    "visa_grant_date": visa_grant_date,
+                    "visa_start_date": visa_start_date,
+                    "visa_expiry_date": visa_expiry_date,
+                    "visa_status": visa_status,
+                    "visa_document_id": audit_document_id,
+                    "visa_document_type_old": audit_document_type_old,
+                    "visa_document_type_new": audit_document_type_new,
+                    "visa_document_type_changed": audit_document_type_changed,
+                    "file_replaced": bool(upload),
+                }, ensure_ascii=False),
+                student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
+            )
+            return int(record_id)
+        atomic_result=None
+        try:
+            if atomic_upload:
+                from business_changes.record_uploads import save_visa_upload
+                def prepare_upload():
+                    if target_case:self._visa_check_upload(dict(target_case),upload.data,visa_document_type_value)
+                    return self.business_change_prepare_upload_review("Visa",requested_document_type.document_type,upload,"0")
+                def persist_upload(view,did,path,prepared):
+                    nonlocal document_id,file_path,file_preparation
+                    document_id=did;file_path=str(path);file_preparation=prepared
+                    return persist_record(view)
+                atomic_result=save_visa_upload(self,student,int(record_id),upload,requested_document_type.document_type,
+                    context={"visa_case_id":target_case["id"] if target_case else None,
+                             "visa_cycle_id":target_case["application_cycle_id"] if target_case else None,
+                             "existing_cycle_id":existing_visa_cycle["id"] if existing_visa_cycle else None},
+                    prepare=prepare_upload,operation=persist_upload)
+            elif not upload and getattr(self,"business_changes_enabled",lambda:False)():
+                atomic_result=self.business_change_save_manual_record("Visa",student_id,int(record_id),persist_record)
+            else:persist_record()
         except (VisaDocumentNotFound, VisaDecisionConflictError) as exc:
             if wants_json:
                 return self.json_response({"ok": False, "error": str(exc)}, 409)
             return self.flash_redirect(f"/students/{student_id}?tab=visa", str(exc), "error")
-        final_visa_status = decision_type is not None and not existing_visa_evidence
-        if final_visa_status and visa_grant_date:
-            set_workflow_milestone(student_id, "visa_finalized_at", visa_grant_date)
-        link_message = ""
-        if upload and document_id and not existing_visa_evidence:
-            link_message = self.visa_lodgement_link_document_to_case(
-                student_id,
-                target_case,
-                document_id,
-                visa_document_type_value,
-                upload.filename,
-            )
-            extraction_message = self.visa_lodgement_auto_extract_result(
-                target_case, document_id, visa_document_type_value
-            )
-            if extraction_message:
-                link_message = f"{link_message}；{extraction_message}" if link_message else extraction_message
-        if not existing_visa_evidence:
-            advance_workflow_stage_to(student_id, "签证下签或拒签" if final_visa_status else "签证递交")
-        refresh_workflow_completion_metrics(student_id, source="visa_updated")
-        if document_type_update is not None:
-            audit_document_id = document_type_update.document_id
-            audit_document_type_old = document_type_update.old_document_type
-            audit_document_type_new = document_type_update.new_document_type
-            audit_document_type_changed = document_type_update.changed
-        elif upload and document_id:
-            audit_document = db.one(
-                "SELECT id,document_type FROM student_documents WHERE id=? AND student_id=?",
-                (document_id, student_id),
-            )
-            audit_document_id = int(audit_document["id"]) if audit_document else None
-            audit_document_type_old = ""
-            audit_document_type_new = str(audit_document["document_type"] or "") if audit_document else ""
-            audit_document_type_changed = bool(audit_document)
-        else:
-            audit_document_id = None
-            audit_document_type_old = ""
-            audit_document_type_new = ""
-            audit_document_type_changed = False
-        db.audit(
-            self.user, "update", "visas", record_id, file_path,
-            new_value=json.dumps({
-                "visa_type": visa_type,
-                "visa_sector": visa_sector,
-                "visa_grant_date": visa_grant_date,
-                "visa_start_date": visa_start_date,
-                "visa_expiry_date": visa_expiry_date,
-                "visa_status": visa_status,
-                "visa_document_id": audit_document_id,
-                "visa_document_type_old": audit_document_type_old,
-                "visa_document_type_new": audit_document_type_new,
-                "visa_document_type_changed": audit_document_type_changed,
-                "file_replaced": bool(upload),
-            }, ensure_ascii=False),
-            student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
-        )
+        except PermissionError:return self.deny_module_access("visa")
+        except ValueError as error:
+            if wants_json:return self.json_response({"ok":False,"error":str(error)},409)
+            return self.flash_redirect(f"/students/{student_id}?tab=visa",str(error),"error")
         message = "VISA 记录已更新，文件已替换" if upload else "VISA 记录已更新"
         if link_message:
             message = f"{message}；{link_message}"
@@ -73233,6 +73786,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 "student_id": student_id,
                 "record_id": record_id,
                 "tab": "visa",
+                **({"business_receipt":self.business_change_record_form_values("Visa",student_id,int(record_id),version=atomic_result.result["version"])} if atomic_result is not None else {}),
             })
         return self.flash_redirect(f"/students/{student_id}?tab=visa", message)
 
@@ -73257,13 +73811,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if fallback_upload:
             uploads.append(fallback_upload)
         if uploads:
-            token = create_upload_review(student_id, "Payments", uploads, self.user, self.form)
+            token = create_upload_review(student_id, "Payments", uploads, self.user, self.form,permission_policy='payment_create')
             return self.redirect(f"/students/{student_id}/upload-review/{quote(token)}")
         path = ""
         amount = self.form.get("amount") or None
         paid_date = crm_normalized_date_form_value(self.form, "paid_date", "支付日期")
         lifecycle_stamp = now_iso()
-        with db.transaction() as connection:
+        def persist_record(connection):
             transfer_branch_id = self.transfer_v2_requested_branch_id(
                 connection,student_id,require_acceptance=True
             )
@@ -73294,8 +73848,22 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         if "display_name" in self.user.keys() else None
                     ),
                 )
-        db.audit(self.user, "create", "payments", record_id, path)
-        advance_workflow_stage_to(student_id, "接受OFFER+缴费")
+            return record_id, None
+        def audit_record(record_id, metadata):
+            db.audit(self.user, "create", "payments", record_id, path)
+            advance_workflow_stage_to(student_id, "接受OFFER+缴费")
+        if getattr(self,'business_changes_enabled',lambda:False)():
+            def operation(view):
+                rid, metadata = persist_record(view)
+                audit_record(rid, metadata)
+                return rid
+            try:self.business_change_save_manual_record('Payments',student_id,None,operation)
+            except PermissionError:return self.deny_module_access('payments')
+            except ValueError as error:return self.flash_redirect(f"/students/{student_id}?tab=payments",str(error),"error")
+        else:
+            with db.transaction() as connection:
+                record_id, metadata = persist_record(connection)
+            audit_record(record_id, metadata)
         return self.flash_redirect(f"/students/{student_id}?tab=payments", "Payment 已保存")
 
     def payment_transfer_confirm(self, method, student_id, payment_id):
@@ -73407,7 +73975,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         uploads = [item for item in self.files if item.field_name in {"files", "file"} and item.filename]
         if not uploads:
             return self.flash_redirect(f"/students/{student_id}?tab=homestay", "请选择住宿/接机文件", "error")
-        token = create_upload_review(student_id, "Homestay + Airport Pickup", uploads, self.user, self.form)
+        token = create_upload_review(student_id, "Homestay + Airport Pickup", uploads, self.user, self.form,permission_policy='payment_upload')
         return self.redirect(f"/students/{student_id}/upload-review/{quote(token)}")
 
     def contract_forms_upload(self, method, student_id):
@@ -73803,6 +74371,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 <form class="contract-signed-upload" data-contract-signed-upload method="post"
                       enctype="multipart/form-data" action="/contracts/{contract['id']}/signed-upload">
                   <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                  {self.business_change_record_hidden_fields("Contracts",contract["student_id"],int(contract["id"]))}
                   <div class="contract-action-section-head">
                     <strong>上传签署版 PDF</strong><small>仅支持 PDF</small>
                   </div>
@@ -73827,11 +74396,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             stamp_actions = ""
             if transfer_management_allowed and can_apply_aaie_stamp(self.user) and normalize_contract_status(contract["contract_status"]) == "ParentSigned":
                 stamp_actions += f'<a class="secondary button-link" href="/contracts/{contract["id"]}/manual-placement">手动签名盖章</a>'
-                stamp_actions += f'<form method="post" action="/contracts/{contract["id"]}/apply-aaie-stamp"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><button class="primary">加盖 AAIE 签名和公章</button></form>'
+                stamp_actions += f'<form method="post" action="/contracts/{contract["id"]}/apply-aaie-stamp"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{self.business_change_record_hidden_fields("Contracts",contract["student_id"],int(contract["id"]))}<button class="primary">加盖 AAIE 签名和公章</button></form>'
             convert_form = ""
             if transfer_management_allowed and can_apply_aaie_stamp(self.user) and not contract["student_id"]:
                 convert_form = f'<form class="row-actions" method="post" action="/contracts/{contract["id"]}/convert-to-student"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><button class="secondary">转成新学生</button></form>'
-            status_form = f'<form class="row-actions" method="post" action="/contracts/{contract["id"]}/status"><input type="hidden" name="csrf" value="{esc(self.csrf)}"><select name="contract_status">{status_options}</select><button class="ghost">更新</button></form>' if transfer_management_allowed and can_create_contract_center(self.user) else ""
+            status_form = f'<form class="row-actions" method="post" action="/contracts/{contract["id"]}/status"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{self.business_change_record_hidden_fields("Contracts",contract['student_id'],int(contract["id"]))}<select name="contract_status">{status_options}</select><button class="ghost">更新</button></form>' if transfer_management_allowed and can_create_contract_center(self.user) else ""
             delete_form = ""
             if transfer_management_allowed and can_create_contract_center(self.user):
                 delete_form = f"""
@@ -74504,6 +75073,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         contract = db.one("SELECT * FROM contracts WHERE id=?", (contract_id,))
         if not contract:
             raise ValueError("合同不存在。")
+        if contract["contract_type"] == "TransferApplicationContract":
+            from student_lifecycle.transfer_state import pending_transfer_was_withdrawn
+
+            with db.read_snapshot() as connection:
+                if pending_transfer_was_withdrawn(connection, contract_id):
+                    raise ValueError("该轮转学已停止办理，请为新一轮转学建立新合同。")
         require_transfer_contract_signable(contract)
         if normalize_contract_status(contract["contract_status"]) in {"Deleted", "Voided", "Revoked", "Superseded"} or contract["deleted_at"] or contract["voided_at"]:
             raise ValueError("该合同已失效，请重新生成新合同。")
@@ -74512,6 +75087,33 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         validate_pdf_contains_contract_body(source_pdf)
         if contract["contract_type"] == transfer_contract_authority.TRANSFER:
             transfer_contract_authority.validate_fee_text(pdf_text(source_pdf), contract)
+        if getattr(self, 'business_changes_enabled', lambda: False)():
+            from business_changes.contract_records import update_signing_link
+            def persist(current):
+                for field in ('contract_file_path', 'standalone_data_json', 'template_version',
+                              'signed_file_path', 'final_signed_file_path'):
+                    if current.get(field) != contract[field]:
+                        raise ValueError('合同文件已变化，请刷新后重新生成签署链接。')
+                return self._contract_signing_persist_link(current, user, regenerate, days)
+            with db.transaction() as conn:
+                return update_signing_link(conn, database=db, contract_id=contract_id,
+                    actor_user_id=user['id'] if user else None, operation=persist)
+        return self._contract_signing_persist_link(contract, user, regenerate, days)
+
+    def _contract_signing_persist_link(self, contract, user=None, regenerate=False, days=7):
+        """Local persistence only; source PDF validation happens before entry."""
+        contract_id = contract['id']
+        if contract['contract_type'] == 'TransferApplicationContract':
+            from student_lifecycle.transfer_state import pending_transfer_was_withdrawn
+            connection = db.connect()
+            try:
+                if pending_transfer_was_withdrawn(connection, contract_id):
+                    raise ValueError('该轮转学已停止办理，请为新一轮转学建立新合同。')
+            finally:
+                db._release_connection(connection)
+        require_transfer_contract_signable(contract)
+        if normalize_contract_status(contract['contract_status']) in {'Deleted', 'Voided', 'Revoked', 'Superseded'} or contract['deleted_at'] or contract['voided_at']:
+            raise ValueError('该合同已失效，请重新生成新合同。')
         stamp = now_iso()
         active = db.one(
             "SELECT * FROM contract_signing_links WHERE contract_id=? AND status='active' ORDER BY id DESC LIMIT 1",
@@ -74766,7 +75368,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             raise ValueError("最终签署合同 PDF 无效。")
         return path
 
-    def contract_signing_save_signature_image(self, contract_id, signature_data):
+    def contract_signing_save_signature_image(self, contract_id, signature_data, *, exclusive=None):
         match = re.match(r"^data:image/(png|jpeg);base64,(.+)$", str(signature_data or ""), re.S)
         if not match:
             raise ValueError("请先完成电子签名。")
@@ -74783,6 +75385,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             raise ValueError("签名内容为空，请重新签名。")
         folder = CONTRACT_SIGNING_DIR / str(contract_id)
         folder.mkdir(parents=True, exist_ok=True)
+        if exclusive is None:exclusive=getattr(self,"business_changes_enabled",lambda:False)()
+        if exclusive:
+            from business_changes.files import persist_verified_file
+            prepared=io.BytesIO();visible_signature.save(prepared,format="PNG",optimize=True)
+            target=folder/("signature_sync_"+new_token(18).replace("-","_")+".png")
+            return persist_verified_file(target,prepared.getvalue(),lambda path,digest:path)
         target = folder / f"signature_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         visible_signature.save(target, format="PNG", optimize=True)
         return target
@@ -74829,6 +75437,73 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         db.execute("UPDATE contract_signatures SET confirmation_pdf_path=?,updated_at=? WHERE id=?", (str(target), now_iso(), signature_id))
         return target
+
+    def _contract_signing_finalize_archive(self,signature,contract,student,signed_doc,confirmation_doc,final_doc,stamp,*,user=None,silent_archive=False):
+        signature_id=int(signature["id"])
+        db.execute(
+            """UPDATE contract_signatures
+               SET signed_pdf_path=?,confirmation_pdf_path=?,archive_status='archived',archive_error='',updated_at=?
+               WHERE id=?""",
+            (signed_doc["path"], confirmation_doc["path"], stamp, signature_id),
+        )
+        db.execute(
+            """UPDATE contracts
+               SET signed_file_path=?,final_signed_file_path=?,contract_status='FullyExecuted',
+                   signed_at=?,fully_executed_at=?,updated_at=?
+               WHERE id=?""",
+            (signed_doc["path"], final_doc["path"], signature["signed_at"], stamp, stamp, contract["id"]),
+        )
+        db.audit(
+            user,
+            "contract_signature_archived_to_application",
+            "contracts",
+            contract["id"],
+            file_path=signed_doc["path"],
+            new_value=json.dumps({
+                "signature_id": signature_id,
+                "signed_document_id": signed_doc["document_id"],
+                "confirmation_document_id": confirmation_doc["document_id"],
+                "final_document_id": final_doc["document_id"],
+            }, ensure_ascii=False),
+            student_id=student["student_id"],
+            contract_id=contract["id"],
+        )
+        db.audit(
+            user,
+            "final_contract_generated",
+            "contracts",
+            contract["id"],
+            file_path=final_doc["path"],
+            new_value=json.dumps({"signature_id": signature_id, "final_document_id": final_doc["document_id"]}, ensure_ascii=False),
+            student_id=student["student_id"],
+            contract_id=contract["id"],
+        )
+        link_actor = db.one(
+            "SELECT created_by_user_id FROM contract_signing_links WHERE id=?",
+            (signature["link_id"],),
+        ) if signature["link_id"] else None
+        completion_actor_user_id = (
+            user["id"] if user and "id" in user.keys() and user["id"] is not None
+            else link_actor["created_by_user_id"] if link_actor and link_actor["created_by_user_id"] is not None
+            else contract["generated_by"]
+        )
+        record_contract_completion_fact(
+            contract["id"], stamp, completion_actor_user_id,
+            {
+                "signature_id": signature_id,
+                "final_document_id": final_doc["document_id"],
+                "silent_archive": silent_archive,
+            },
+        )
+        return {
+            "signed_document_id": signed_doc["document_id"],
+            "confirmation_document_id": confirmation_doc["document_id"],
+            "final_document_id": final_doc["document_id"],
+            "signed_document_path": signed_doc["path"],
+            "confirmation_document_path": confirmation_doc["path"],
+            "final_document_path": final_doc["path"],
+        }
+
 
     def contract_signing_archive_documents(self, signature_id, user=None, *, silent_archive=False):
         signature = db.one("SELECT * FROM contract_signatures WHERE id=?", (signature_id,))
@@ -74961,6 +75636,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         }
 
     def contract_signing_login_required_page(self, token, link):
+        if not self.school_plan_wechat_oauth_enabled() and getattr(STAGING, "mode", None) == "production":
+            return self.school_plan_share_public_page(
+                "微信验证暂不可用",
+                "<h1>微信验证暂不可用</h1><p>请联系 AAIE 顾问处理后重新打开原链接。</p>",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
         contract_title = link["contract_title"] or "AAIE 合同"
         student_name = " ".join(part for part in [link["passport_first_name"], link["passport_last_name"]] if part) or link["student_id"]
         if self.school_plan_wechat_oauth_enabled():
@@ -75024,6 +75705,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if self.school_plan_wechat_oauth_enabled():
                 return self.contract_signing_oauth_start(token, link)
             return self.contract_signing_login_required_page(token, link)
+        if getattr(STAGING, "mode", None) == "production" or self.school_plan_wechat_oauth_enabled():
+            return self.school_plan_share_public_page(
+                "请使用微信验证",
+                "<h1>请使用微信验证</h1><p>请在微信中重新打开原链接，完成官方微信身份验证。</p>",
+                HTTPStatus.FORBIDDEN,
+            )
         form, _files = parse_request_body(self)
         nickname = str(form.get("wechat_nickname") or "").strip() or "微信家长"
         openid = re.sub(r"[^A-Za-z0-9_\-]", "", str(form.get("wechat_openid") or "").strip())
@@ -75282,45 +75969,74 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         form, _files = parse_request_body(self)
         if form.get("declaration") != "yes":
             return self.school_plan_share_public_page("请确认声明", "<h1>请先勾选确认声明</h1><p>确认阅读合同后才能提交签名。</p>", HTTPStatus.BAD_REQUEST)
+        sync_parent=getattr(self,"business_changes_enabled",lambda:False)()
         try:
-            signature_path = self.contract_signing_save_signature_image(link["contract_id"], form.get("signature_data"))
+            signature_path = (self.contract_signing_save_signature_image(link["contract_id"],form.get("signature_data"),exclusive=True)
+                if sync_parent else self.contract_signing_save_signature_image(link["contract_id"],form.get("signature_data")))
         except Exception as exc:
             return self.school_plan_share_public_page("签名无效", f"<h1>签名无效</h1><p>{esc(str(exc))}</p>", HTTPStatus.BAD_REQUEST)
         stamp = now_iso()
         statement = "我已阅读并确认以上合同内容，同意以本人电子签名方式完成确认。"
         signature_id = None
         try:
-            signature_id = db.execute(
-                """INSERT INTO contract_signatures(contract_id,student_id,link_id,signed_at,signed_ip,user_agent,
-                   wechat_openid,wechat_unionid,wechat_nickname,signature_image_path,confirmation_statement,status,archive_status,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    link["contract_id"], link["student_id"] or link["contract_student_id"] or "", link["id"], stamp,
-                    self.client_address[0], self.headers.get("User-Agent", ""), link["bound_wechat_openid"] or "",
-                    link["bound_wechat_unionid"] or "", link["bound_wechat_nickname"] or "已验证用户", str(signature_path),
-                    statement, "signed", "pending", stamp, stamp,
-                ),
-            )
-            # Persist the parent's completed step before fallible PDF generation.
-            # A failed AAIE archive must not leave this contract awaiting a parent.
-            db.execute(
-                """UPDATE contracts SET contract_status='ParentSigned',
-                       signed_at=?,updated_at=?
-                   WHERE id=? AND contract_status NOT IN ('FullyExecuted','Voided','Deleted')
-                     AND deleted_at IS NULL AND voided_at IS NULL""",
-                (stamp, stamp, link["contract_id"]),
-            )
-            resolve_signed_contract_waiting_reminders(stamp, link["contract_id"])
-            emit_contract_business_event(
-                db.one("SELECT * FROM contracts WHERE id=?", (link["contract_id"],)),
-                event_type="contract.signed",
-                occurred_at=stamp,
-                actor_type="parent",
-                event_key=f"signed:{signature_id}",
-                metadata={"signature_id": signature_id, "link_id": link["id"]},
-            )
+            def persist_parent_step(active_link):
+                nonlocal signature_id
+                with db.transaction() as connection:
+                    active = connection.execute(
+                        """SELECT 1 FROM contract_signing_links link JOIN contracts c ON c.id=link.contract_id
+                           WHERE link.id=? AND link.status='active' AND coalesce(link.invalidated_at,'')=''
+                             AND c.contract_status NOT IN ('Revoked','Deleted','Voided','Superseded')
+                             AND c.deleted_at IS NULL AND c.voided_at IS NULL
+                             AND NOT EXISTS (SELECT 1 FROM audit_logs audit
+                                              WHERE audit.action_type='pending_transfer_withdrawn'
+                                                AND audit.contract_id=CAST(c.id AS TEXT))
+                             AND NOT EXISTS (SELECT 1 FROM contract_signatures signed
+                                              WHERE signed.link_id=link.id AND signed.status='signed')""",
+                        (active_link["id"],),
+                    ).fetchone()
+                    if active is None:
+                        raise BusinessPermissionError("合同签署权限已变化。")
+                    saved_signature_id = connection.execute(
+                        """INSERT INTO contract_signatures(contract_id,student_id,link_id,signed_at,signed_ip,user_agent,
+                           wechat_openid,wechat_unionid,wechat_nickname,signature_image_path,confirmation_statement,status,archive_status,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            active_link["contract_id"], active_link["student_id"] or active_link["contract_student_id"] or "", active_link["id"], stamp,
+                            self.client_address[0], self.headers.get("User-Agent", ""), active_link["bound_wechat_openid"] or "",
+                            active_link["bound_wechat_unionid"] or "", active_link["bound_wechat_nickname"] or "已验证用户", str(signature_path),
+                            statement, "signed", "pending", stamp, stamp,
+                        ),
+                    ).lastrowid
+                if not sync_parent:signature_id=int(saved_signature_id)
+                # Persist the parent's completed step before fallible PDF generation.
+                # A failed AAIE archive must not leave this contract awaiting a parent.
+                db.execute(
+                    """UPDATE contracts SET contract_status='ParentSigned',
+                           signed_at=?,updated_at=?
+                       WHERE id=? AND contract_status NOT IN ('FullyExecuted','Voided','Deleted')
+                         AND deleted_at IS NULL AND voided_at IS NULL""",
+                    (stamp, stamp, active_link["contract_id"]),
+                )
+                resolve_signed_contract_waiting_reminders(stamp, active_link["contract_id"])
+                emit_contract_business_event(
+                    db.one("SELECT * FROM contracts WHERE id=?", (active_link["contract_id"],)),
+                    event_type="contract.signed",
+                    occurred_at=stamp,
+                    actor_type="parent",
+                    event_key=f"signed:{saved_signature_id}",
+                    metadata={"signature_id": saved_signature_id, "link_id": active_link["id"]},
+                )
+                return int(saved_signature_id)
+            if sync_parent:
+                result=self.business_change_save_parent_signature(link,token,signature_path,stamp,persist_parent_step)
+                signature_id=int(result.result["record_id"])
+                if result.replayed:
+                    try:self.business_change_discard_signature_image(signature_path,link["contract_id"])
+                    except OSError as cleanup_error:append_service_log("parent","signature_image_cleanup_failed",str(cleanup_error),contract_id=link["contract_id"])
+                    return self.contract_signing_portal("GET",token)
+            else:signature_id=persist_parent_step(link)
             archive = self.contract_signing_archive_documents(signature_id, user=None, silent_archive=True)
-            self.contract_signing_mark_link_signed(link["id"], stamp, signature_id)
+            if not sync_parent:self.contract_signing_mark_link_signed(link["id"], stamp, signature_id)
             self.contract_signing_record_log(
                 self.contract_signing_row_by_id(link["id"]),
                 "signed",
@@ -75330,6 +76046,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     "final_document_id": archive.get("final_document_id"),
                 },
             )
+            if sync_parent:
+                current_link=self.contract_signing_row_by_token(token)
+                _title,_message,current_status=self.contract_signing_status_problem(current_link,allow_signed=True)
+                if current_status!=200 or not self.contract_signing_cookie_valid(current_link):
+                    return self.school_plan_share_public_page("签署已保存","<h1>签署已保存</h1><p>当前链接权限已变化，请联系 AAIE 顾问查看归档结果。</p>",HTTPStatus.FORBIDDEN)
             signature_uri = ""
             try:
                 signature_uri = "data:image/png;base64," + base64.b64encode(Path(signature_path).read_bytes()).decode("ascii")
@@ -75360,13 +76081,23 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             """
             return self.school_plan_share_public_page("合同已签署", body)
         except Exception as exc:
+            if not sync_parent and signature_id is None and isinstance(exc, BusinessPermissionError):
+                return self.school_plan_share_public_page(
+                    "链接已失效", "<h1>签署链接已失效，请联系顾问。</h1>", HTTPStatus.GONE,
+                )
+            if sync_parent and signature_id is None:
+                try:self.business_change_discard_signature_image(signature_path,link["contract_id"])
+                except OSError as cleanup_error:append_service_log("parent","signature_image_cleanup_failed",str(cleanup_error),contract_id=link["contract_id"])
+                if isinstance(exc,BusinessPermissionError):
+                    return self.school_plan_share_public_page("签署权限已变化","<h1>签署权限已变化</h1><p>请重新打开原签署链接并验证身份后再试。</p>",HTTPStatus.FORBIDDEN)
             if signature_id:
                 try:
-                    db.execute("UPDATE contract_signatures SET archive_status='failed',archive_error=?,updated_at=? WHERE id=?", (str(exc), now_iso(), signature_id))
+                    if sync_parent:self.business_change_contract_archive_failed(signature_id,exc)
+                    else:db.execute("UPDATE contract_signatures SET archive_status='failed',archive_error=?,updated_at=? WHERE id=?", (str(exc), now_iso(), signature_id))
                 except Exception as status_exc:
                     append_service_log("parent", "contract_signature_failure_status_update_failed", str(status_exc), contract_id=link["contract_id"], signature_id=signature_id)
                 try:
-                    self.contract_signing_mark_link_signed(link["id"], stamp, signature_id)
+                    if not sync_parent:self.contract_signing_mark_link_signed(link["id"], stamp, signature_id)
                 except Exception as link_exc:
                     append_service_log("parent", "contract_signature_link_signed_update_failed", str(link_exc), contract_id=link["contract_id"], signature_id=signature_id)
             append_service_log("parent", "contract_signature_submit_failed", str(exc), contract_id=link["contract_id"], signature_id=signature_id)
@@ -75399,21 +76130,26 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.flash_redirect("/contracts?view=list", "没有找到已保存的家长签署记录，无法重新归档。", "error")
         try:
             result = self.contract_signing_archive_documents(signature["id"], user=self.user)
-            if signature["link_id"]:
+            if signature["link_id"] and not getattr(self,"business_changes_enabled",lambda:False)():
                 self.contract_signing_mark_link_signed(signature["link_id"], signature["signed_at"], signature["id"])
             db.audit(
-                self.user, "contract_signature_archive_regenerated", "contracts", contract_id,
+                self.user, ("contract_signature_archive_checked" if getattr(self,"_business_archive_replayed",False) else "contract_signature_archive_regenerated"), "contracts", contract_id,
                 file_path=result.get("signed_document_path") or "",
                 new_value=json.dumps({"signature_id": signature["id"]}, ensure_ascii=False),
                 ip=self.client_address[0], device=self.headers.get("User-Agent"),
                 student_id=signature["student_id"] or None, contract_id=contract_id,
             )
-            return self.flash_redirect("/contracts?view=list", "已重新生成并归档签署合同。")
+            return self.flash_redirect("/contracts?view=list", "已核对签署合同归档，原文件可正常查看。" if getattr(self,"_business_archive_replayed",False) else "已重新生成并归档签署合同。")
         except Exception as exc:
-            db.execute(
-                "UPDATE contract_signatures SET archive_status='failed',archive_error=?,updated_at=? WHERE id=?",
-                (str(exc), now_iso(), signature["id"]),
-            )
+            if getattr(self,"business_changes_enabled",lambda:False)():
+                from business_changes.contracts import BusinessPermissionError
+                if isinstance(exc,BusinessPermissionError):return self.error_page("合同归档权限已变化，请重新登录后操作。",403)
+                self.business_change_contract_archive_failed(signature["id"],exc,user=self.user)
+            else:
+                db.execute(
+                    "UPDATE contract_signatures SET archive_status='failed',archive_error=?,updated_at=? WHERE id=?",
+                    (str(exc), now_iso(), signature["id"]),
+                )
             append_service_log("admin", "contract_signature_archive_retry_failed", str(exc), contract_id=contract_id, signature_id=signature["id"])
             return self.flash_redirect("/contracts?view=list", "重新归档失败，请检查后台日志或联系技术支持。", "error")
 
@@ -75432,6 +76168,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if Path(upload.filename).suffix.lower() != ".pdf":
             return self.flash_redirect("/contracts?view=list", "已签署合同 MVP 阶段请上传 PDF", "error")
         require_transfer_pdf_bytes(contract, upload.data)
+        if getattr(self,"business_changes_enabled",lambda:False)():
+            from business_changes.contract_manual_uploads import save_signed_contract
+            try:save_signed_contract(self,contract,upload)
+            except PermissionError:return self.error_page("合同管理权限已变化。",403)
+            except ValueError as error:return self.flash_redirect("/contracts?view=list",str(error),"error")
+            return self.flash_redirect("/contracts?view=list", "已上传家长签署版合同，状态已更新为 ParentSigned")
         uid = ensure_contract_uid(contract)
         if contract["student_id"]:
             student = db.one("SELECT * FROM students WHERE student_id=?", (contract["student_id"],))
@@ -75483,17 +76225,59 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         require_transfer_status_artifact(contract, status)
         old_status = normalize_contract_status(contract["contract_status"])
         now = now_iso()
-        db.execute(
-            "UPDATE contracts SET contract_status=?,signed_at=COALESCE(?,signed_at),fully_executed_at=COALESCE(?,fully_executed_at),updated_at=? WHERE id=?",
-            (status, now if status == "ParentSigned" else None, now if status == "FullyExecuted" else None, now, contract_id),
-        )
-        if status in {"ParentSigned", "FullyExecuted"}:
-            notify_recorded_contract_signature(contract, now)
-        if status == "FullyExecuted" and contract["student_id"]:
-            record_contract_completion_fact(contract_id, now, self.user["id"])
-        action = "contract_sent_status_marked" if status == "Sent" else ("contract_cancelled" if status == "Cancelled" else "contract_status_updated")
-        db.audit(self.user, action, "contracts", contract_id, old_value=old_status, new_value=status, ip=self.client_address[0], device=self.headers.get("User-Agent"))
+        def persist_status(view=None):
+            if view is not None:
+                fresh=db.one("SELECT * FROM contracts WHERE id=?",(contract_id,))
+                if fresh is None or dict(fresh)!=dict(contract):
+                    raise ValueError("合同已更新，请刷新后重试。")
+            db.execute(
+                "UPDATE contracts SET contract_status=?,signed_at=COALESCE(?,signed_at),fully_executed_at=COALESCE(?,fully_executed_at),updated_at=? WHERE id=?",
+                (status, now if status == "ParentSigned" else None, now if status == "FullyExecuted" else None, now, contract_id),
+            )
+            if status in {"ParentSigned", "FullyExecuted"}:
+                notify_recorded_contract_signature(contract, now)
+            if status == "FullyExecuted" and contract["student_id"]:
+                record_contract_completion_fact(contract_id, now, self.user["id"])
+            action = "contract_sent_status_marked" if status == "Sent" else ("contract_cancelled" if status == "Cancelled" else "contract_status_updated")
+            db.audit(self.user, action, "contracts", contract_id, old_value=old_status, new_value=status, ip=self.client_address[0], device=self.headers.get("User-Agent"))
+            return int(contract_id)
+        if getattr(self,"business_changes_enabled",lambda:False)():
+            try:self.business_change_save_manual_record("Contracts",contract['student_id'],int(contract_id),persist_status)
+            except PermissionError:return self.error_page("合同管理权限已变化。",403)
+            except ValueError as error:return self.flash_redirect("/contracts?view=list",str(error),"error")
+        else:persist_status()
         return self.flash_redirect("/contracts?view=completed" if status == "FullyExecuted" else "/contracts?view=list", "合同状态已更新")
+
+    def _business_contract_center_apply_aaie_stamp_metadata(self,view,contract,prepared):
+        contract_id=int(contract["id"]);student_id=contract["student_id"]
+        student=prepared["student"];source=prepared["source"];target=prepared["target"]
+        version=prepared["version"];placement=prepared["placement"]
+        company_signing_date=prepared["company_signing_date"]
+        signature_path=prepared["signature_path"];stamp_path=prepared["stamp_path"]
+        old_status=normalize_contract_status(contract["contract_status"]);new_status="FullyExecuted"
+        now = now_iso()
+        document_id = ""
+        if student:
+            document_id = db.execute(
+                """INSERT INTO student_documents(student_id,folder_category,document_type,original_name,stored_name,
+                   file_path,version,file_size,uploaded_by,uploaded_at,preview_path,is_active)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,1)""",
+                (student["student_id"], "Forms", "FinalSignedStudyAbroadContract", source.name, target.name,
+                 str(target), version, target.stat().st_size, self.user["id"], now, ""),
+            )
+        db.execute(
+            "UPDATE contracts SET final_signed_file_path=?,contract_status='FullyExecuted',fully_executed_at=?,updated_at=? WHERE id=?",
+            (str(target), now, now, contract_id),
+        )
+        if student:
+            record_contract_completion_fact(contract_id, now, self.user["id"])
+        db.audit(
+            self.user, "aaie_signature_stamp_applied", "contracts", contract_id, file_path=str(target),
+            old_value=old_status, new_value=json.dumps({"new_status": "FullyExecuted", "document_id": document_id, "output_file_path": str(target)}, ensure_ascii=False),
+            ip=self.client_address[0], device=self.headers.get("User-Agent"),
+        )
+        db.audit(self.user, "final_contract_generated", "contracts", contract_id, file_path=str(target), old_value=old_status, new_value="FullyExecuted", ip=self.client_address[0], device=self.headers.get("User-Agent"))
+        return int(contract_id)
 
     def contract_center_apply_aaie_stamp(self, method, contract_id):
         if method != "POST" or not self.require("contracts.manage"):
@@ -75505,6 +76289,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("合同不存在", 404)
         if normalize_contract_type(contract["contract_type"]) == "TransferApplicationContract" and not can_manage_transfer_contract(self.user):
             return self.error_page("仅 Admin / Manager 可以管理转学合同", 403)
+        if getattr(self,"business_changes_enabled",lambda:False)():
+            if contract is None:return self.error_page("合同不存在",404)
+            from business_changes.contract_final_commands import generate_final_contract
+            try:generate_final_contract(self,contract,lambda view,prepared:self._business_contract_center_apply_aaie_stamp_metadata(view,contract,prepared),student_entry=False,manual=False)
+            except PermissionError:return self.error_page("合同管理权限已变化。",403)
+            except (ValueError,OSError) as error:return self.flash_redirect("/contracts?view=list",str(error),"error")
+            return self.flash_redirect("/contracts?view=completed","签章请求已完成，请查看当前合同状态和最终合同。")
         require_transfer_contract_signable(contract)
         if normalize_contract_status(contract["contract_status"]) != "ParentSigned":
             return self.flash_redirect("/contracts?view=list", "只有 ParentSigned 合同可以加盖 AAIE 签名和公章。", "error")
@@ -75552,7 +76343,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return self.flash_redirect("/contracts?view=completed", f"已生成双方签署完成合同：{target.name}")
 
     def contract_center_manual_context(self, contract_id):
-        contract = db.one("SELECT * FROM contracts WHERE id=?", (contract_id,))
+        contract = db.one("""SELECT c.*,s.passport_first_name,s.passport_last_name,s.date_of_birth
+            FROM contracts c LEFT JOIN students s ON s.student_id=c.student_id WHERE c.id=?""", (contract_id,))
         if not contract:
             raise ValueError("合同不存在")
         require_transfer_contract_signable(contract)
@@ -75632,7 +76424,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <div class="manual-object manual-signature" data-manual-object="signature" data-left="19" data-top="64" data-width="170" data-height="68" title="拖动签名"><img src="/contracts/manual-assets/signature" alt="Sonny Zhang 签名"><span data-manual-resize></span></div>
             <div class="manual-object manual-date" data-manual-object="date" data-left="22" data-top="75" data-width="150" data-height="24" data-font-size="16" title="拖动日期">{esc(company_date)}</div>
           </div></div></div>
-          <form method="post" data-manual-form action="/contracts/{contract_id}/manual-placement/confirm"><input type="hidden" name="csrf" value="{esc(self.csrf)}">
+          <form method="post" data-manual-form action="/contracts/{contract_id}/manual-placement/confirm"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{self.business_change_record_hidden_fields("Contracts",contract["student_id"],int(contract_id))}
             <input type="hidden" name="page_number" data-manual-input="page_number" value="{total_pages}"><input type="hidden" name="page_rotation" data-manual-input="page_rotation" value="0">
             <input type="hidden" name="stamp_x" data-manual-input="stamp_x"><input type="hidden" name="stamp_y" data-manual-input="stamp_y"><input type="hidden" name="stamp_width" data-manual-input="stamp_width"><input type="hidden" name="stamp_height" data-manual-input="stamp_height">
             <input type="hidden" name="signature_x" data-manual-input="signature_x"><input type="hidden" name="signature_y" data-manual-input="signature_y"><input type="hidden" name="signature_width" data-manual-input="signature_width"><input type="hidden" name="signature_height" data-manual-input="signature_height">
@@ -75642,6 +76434,38 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         </section>"""
         self.send_html(page("手动签名盖章", body, self.user, self.csrf, "contracts", nas.status()))
 
+    def _business_contract_center_manual_placement_confirm_metadata(self,view,contract,prepared):
+        contract_id=int(contract["id"]);student_id=contract["student_id"]
+        student=prepared["student"];source=prepared["source"];target=prepared["target"]
+        version=prepared["version"];placement=prepared["placement"]
+        company_signing_date=prepared["company_signing_date"]
+        signature_path=prepared["signature_path"];stamp_path=prepared["stamp_path"]
+        old_status=normalize_contract_status(contract["contract_status"]);new_status="FullyExecuted"
+        now = now_iso()
+        document_id = ""
+        if student:
+            document_id = db.execute(
+                """INSERT INTO student_documents(student_id,folder_category,document_type,original_name,stored_name,
+                   file_path,version,file_size,uploaded_by,uploaded_at,preview_path,is_active)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,1)""",
+                (student["student_id"], "Forms", "FinalSignedStudyAbroadContract", source.name, target.name, str(target), version, target.stat().st_size, self.user["id"], now, ""),
+            )
+        db.execute("UPDATE contracts SET final_signed_file_path=?,contract_status='FullyExecuted',fully_executed_at=?,updated_at=? WHERE id=?", (str(target), now, now, contract_id))
+        if student:
+            record_contract_completion_fact(contract_id, now, self.user["id"])
+        db.execute(
+            """INSERT INTO contract_manual_placements(contract_id,student_id,source_file_path,output_file_path,page_number,page_rotation,
+               stamp_x,stamp_y,stamp_width,stamp_height,signature_x,signature_y,signature_width,signature_height,date_x,date_y,date_font_size,created_by,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (contract_id, contract["student_id"], str(source), str(target), placement["page_number"], placement["page_rotation"],
+             placement["stamp_x"], placement["stamp_y"], placement["stamp_width"], placement["stamp_height"], placement["signature_x"], placement["signature_y"],
+             placement["signature_width"], placement["signature_height"], placement["date_x"], placement["date_y"], placement["date_font_size"], self.user["id"], now),
+        )
+        payload = {"new_status": "FullyExecuted", "document_id": document_id, "output_file_path": str(target), "placement": placement}
+        for action in ("manual_stamp_placement_confirmed", "final_contract_generated", "placement_metadata_saved"):
+            db.audit(self.user, action, "contracts", contract_id, file_path=str(target), old_value=old_status, new_value=json.dumps(payload, ensure_ascii=False), ip=self.client_address[0], device=self.headers.get("User-Agent"))
+        return int(contract_id)
+
     def contract_center_manual_placement_confirm(self, method, contract_id):
         if method != "POST" or not self.require("contracts.manage"):
             return
@@ -75650,6 +76474,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         contract = db.one("SELECT * FROM contracts WHERE id=?", (contract_id,))
         if contract and normalize_contract_type(contract["contract_type"]) == "TransferApplicationContract" and not can_manage_transfer_contract(self.user):
             return self.error_page("仅 Admin / Manager 可以管理转学合同", 403)
+        if getattr(self,"business_changes_enabled",lambda:False)():
+            if contract is None:return self.error_page("合同不存在",404)
+            from business_changes.contract_final_commands import generate_final_contract
+            try:generate_final_contract(self,contract,lambda view,prepared:self._business_contract_center_manual_placement_confirm_metadata(view,contract,prepared),student_entry=False,manual=True)
+            except PermissionError:return self.error_page("合同管理权限已变化。",403)
+            except (ValueError,OSError) as error:return self.flash_redirect("/contracts?view=list",str(error),"error")
+            return self.flash_redirect("/contracts?view=completed","签章请求已完成，请查看当前合同状态和最终合同。")
         if not contract_assets_configured():
             return self.flash_redirect("/contracts?view=list", "AAIE signature/stamp assets are not configured.", "error")
         try:
@@ -76124,7 +76955,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         student = db.one("SELECT * FROM students WHERE student_id=?", (student_id,))
         if not student:
             return self.error_page("学生不存在", 404)
-        if student["nas_status"] != "ready":
+        atomic_upload=getattr(self,"business_changes_enabled",lambda:False)()
+        if not atomic_upload and student["nas_status"] != "ready":
             student = ensure_student_storage(student)
         upload = self.uploaded_for()
         if not upload:
@@ -76132,6 +76964,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if Path(upload.filename).suffix.lower() != ".pdf":
             raise ValueError("已签署合同 MVP 阶段请上传 PDF")
         require_transfer_pdf_bytes(contract, upload.data)
+        if atomic_upload:
+            from business_changes.contract_manual_uploads import save_signed_contract
+            try:save_signed_contract(self,contract,upload,student_entry=True)
+            except PermissionError:return self.error_page("合同管理权限已变化。",403)
+            except ValueError as error:return self.flash_redirect(f"/students/{student_id}?tab=contracts",str(error),"error")
+            return self.flash_redirect(f"/students/{student_id}?tab=contracts", "已上传家长签署版合同，状态已更新为 ParentSigned")
         folder = forms_folder_for_student(student)
         stamp = datetime.now().astimezone().strftime("%Y%m%d")
         target, version = next_version_path(folder, f"SignedStudyAbroadContract_{stamp}_V1.pdf")
@@ -76154,6 +76992,54 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         db.audit(self.user, "upload_signed", "contracts", contract_id, file_path=str(target), new_value=str(document_id))
         return self.flash_redirect(f"/students/{student_id}?tab=contracts", "已上传家长签署版合同，状态已更新为 ParentSigned")
 
+    def _business_contract_apply_aaie_stamp_metadata(self,view,contract,prepared):
+        contract_id=int(contract["id"]);student_id=contract["student_id"]
+        student=prepared["student"];source=prepared["source"];target=prepared["target"]
+        version=prepared["version"];placement=prepared["placement"]
+        company_signing_date=prepared["company_signing_date"]
+        signature_path=prepared["signature_path"];stamp_path=prepared["stamp_path"]
+        old_status=normalize_contract_status(contract["contract_status"]);new_status="FullyExecuted"
+        action_timestamp = now_iso()
+        document_id = db.execute(
+            """INSERT INTO student_documents(student_id,folder_category,document_type,original_name,stored_name,
+               file_path,version,file_size,uploaded_by,uploaded_at,preview_path,is_active)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,1)""",
+            (
+                student_id, "Forms", "FinalSignedStudyAbroadContract", source.name, target.name,
+                str(target), version, target.stat().st_size, self.user["id"], action_timestamp, "",
+            ),
+        )
+        db.execute(
+            "UPDATE contracts SET final_signed_file_path=?,contract_status='FullyExecuted',fully_executed_at=?,updated_at=? WHERE id=?",
+            (str(target), action_timestamp, action_timestamp, contract_id),
+        )
+        record_contract_completion_fact(contract_id, action_timestamp, self.user["id"])
+        db.audit(
+            self.user,
+            "apply_aaie_signature_stamp_and_date",
+            "contracts",
+            contract_id,
+            file_path=str(target),
+            old_value=old_status,
+            new_value=json.dumps({
+                "user_id": self.user["id"],
+                "username": self.user["username"],
+                "action": "apply_aaie_signature_stamp_and_date",
+                "student_id": student_id,
+                "contract_id": str(contract_id),
+                "document_id": document_id,
+                "source_file_path": str(source),
+                "output_file_path": str(target),
+                "signature_asset_path": str(signature_path),
+                "stamp_asset_path": str(stamp_path),
+                "auto_company_signing_date": company_signing_date,
+                "timestamp": action_timestamp,
+                "old_status": old_status,
+                "new_status": new_status,
+            }, ensure_ascii=False),
+        )
+        return int(contract_id)
+
     def contract_apply_aaie_stamp(self, method, student_id, contract_id):
         if method != "POST" or not self.require("contracts.manage"):
             return
@@ -76164,6 +77050,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("合同记录不存在", 404)
         if normalize_contract_type(contract["contract_type"]) == "TransferApplicationContract" and not can_manage_transfer_contract(self.user):
             return self.error_page("仅 Admin / Manager 可以管理转学合同", 403)
+        if getattr(self,"business_changes_enabled",lambda:False)():
+            if contract is None:return self.error_page("合同不存在",404)
+            from business_changes.contract_final_commands import generate_final_contract
+            try:generate_final_contract(self,contract,lambda view,prepared:self._business_contract_apply_aaie_stamp_metadata(view,contract,prepared),student_entry=True,manual=False)
+            except PermissionError:return self.error_page("合同管理权限已变化。",403)
+            except (ValueError,OSError) as error:return self.flash_redirect(f"/students/{student_id}?tab=contracts",str(error),"error")
+            return self.flash_redirect(f"/students/{student_id}?tab=contracts","签章请求已完成，请查看当前合同状态和最终合同。")
         require_transfer_contract_signable(contract)
         if normalize_contract_status(contract["contract_status"]) != "ParentSigned":
             return self.flash_redirect(f"/students/{student_id}?tab=contracts", "只有状态为 ParentSigned 的合同可以加盖 AAIE 签名和公章。", "error")
@@ -76369,7 +77262,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             </div>
           </div>
           <form method="post" data-manual-form action="/students/{student_id}/contracts/{contract_id}/manual-placement/confirm">
-            <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+            <input type="hidden" name="csrf" value="{esc(self.csrf)}">{self.business_change_record_hidden_fields("Contracts",student_id,int(contract_id))}
             <input type="hidden" name="page_number" data-manual-input="page_number" value="{total_pages}">
             <input type="hidden" name="page_rotation" data-manual-input="page_rotation" value="0">
             <input type="hidden" name="stamp_x" data-manual-input="stamp_x"><input type="hidden" name="stamp_y" data-manual-input="stamp_y">
@@ -76386,6 +77279,64 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         </section>"""
         self.send_html(page("手动签名盖章", body, self.user, self.csrf, "students", nas.status()))
 
+    def _business_contract_manual_placement_confirm_metadata(self,view,contract,prepared):
+        contract_id=int(contract["id"]);student_id=contract["student_id"]
+        student=prepared["student"];source=prepared["source"];target=prepared["target"]
+        version=prepared["version"];placement=prepared["placement"]
+        company_signing_date=prepared["company_signing_date"]
+        signature_path=prepared["signature_path"];stamp_path=prepared["stamp_path"]
+        old_status=normalize_contract_status(contract["contract_status"]);new_status="FullyExecuted"
+        action_timestamp = now_iso()
+        document_id = db.execute(
+            """INSERT INTO student_documents(student_id,folder_category,document_type,original_name,stored_name,
+               file_path,version,file_size,uploaded_by,uploaded_at,preview_path,is_active)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,1)""",
+            (
+                student_id, "Forms", "FinalSignedStudyAbroadContract", source.name, target.name,
+                str(target), version, target.stat().st_size, self.user["id"], action_timestamp, "",
+            ),
+        )
+        db.execute(
+            "UPDATE contracts SET final_signed_file_path=?,contract_status='FullyExecuted',fully_executed_at=?,updated_at=? WHERE id=?",
+            (str(target), action_timestamp, action_timestamp, contract_id),
+        )
+        record_contract_completion_fact(contract_id, action_timestamp, self.user["id"])
+        db.execute(
+            """INSERT INTO contract_manual_placements(
+               contract_id,student_id,source_file_path,output_file_path,page_number,page_rotation,
+               stamp_x,stamp_y,stamp_width,stamp_height,signature_x,signature_y,signature_width,signature_height,
+               date_x,date_y,date_font_size,created_by,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                contract_id, student_id, str(source), str(target), placement["page_number"], placement["page_rotation"],
+                placement["stamp_x"], placement["stamp_y"], placement["stamp_width"], placement["stamp_height"],
+                placement["signature_x"], placement["signature_y"], placement["signature_width"], placement["signature_height"],
+                placement["date_x"], placement["date_y"], placement["date_font_size"], self.user["id"], action_timestamp,
+            ),
+        )
+        audit_payload = {
+            "user_id": self.user["id"],
+            "username": self.user["username"],
+            "student_id": student_id,
+            "contract_id": str(contract_id),
+            "document_id": document_id,
+            "source_file_path": str(source),
+            "output_file_path": str(target),
+            "auto_company_signing_date": company_signing_date,
+            "old_status": old_status,
+            "new_status": "FullyExecuted",
+            "placement": placement,
+            "timestamp": action_timestamp,
+        }
+        action_name = "final_contract_regenerated" if contract["final_signed_file_path"] else "final_contract_generated"
+        for action in ("manual_signature_stamp_confirmed", action_name, "placement_metadata_saved"):
+            db.audit(
+                self.user, action, "contracts", contract_id, file_path=str(target),
+                old_value=old_status, new_value=json.dumps(audit_payload, ensure_ascii=False),
+                ip=self.client_address[0], device=self.headers.get("User-Agent"),
+            )
+        return int(contract_id)
+
     def contract_manual_placement_confirm(self, method, student_id, contract_id):
         if method != "POST" or not self.require("contracts.manage"):
             return
@@ -76394,6 +77345,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         contract = db.one("SELECT * FROM contracts WHERE id=? AND student_id=?", (contract_id, student_id))
         if contract and normalize_contract_type(contract["contract_type"]) == "TransferApplicationContract" and not can_manage_transfer_contract(self.user):
             return self.error_page("仅 Admin / Manager 可以管理转学合同", 403)
+        if getattr(self,"business_changes_enabled",lambda:False)():
+            if contract is None:return self.error_page("合同不存在",404)
+            from business_changes.contract_final_commands import generate_final_contract
+            try:generate_final_contract(self,contract,lambda view,prepared:self._business_contract_manual_placement_confirm_metadata(view,contract,prepared),student_entry=True,manual=True)
+            except PermissionError:return self.error_page("合同管理权限已变化。",403)
+            except (ValueError,OSError) as error:return self.flash_redirect(f"/students/{student_id}?tab=contracts",str(error),"error")
+            return self.flash_redirect(f"/students/{student_id}?tab=contracts","签章请求已完成，请查看当前合同状态和最终合同。")
         if not contract_assets_configured():
             return self.flash_redirect(f"/students/{student_id}?tab=contracts", "AAIE signature/stamp assets are not configured.", "error")
         try:
@@ -76494,15 +77452,26 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         require_transfer_status_artifact(old, status)
         signed_at = now_iso() if status == "ParentSigned" else None
         fully_executed_at = now_iso() if status == "FullyExecuted" else None
-        db.execute(
-            "UPDATE contracts SET contract_status=?,signed_at=COALESCE(?,signed_at),fully_executed_at=COALESCE(?,fully_executed_at),updated_at=? WHERE id=? AND student_id=?",
-            (status, signed_at, fully_executed_at, now_iso(), contract_id, student_id),
-        )
-        if status in {"ParentSigned", "FullyExecuted"}:
-            notify_recorded_contract_signature(old, signed_at or fully_executed_at)
-        if status == "FullyExecuted":
-            record_contract_completion_fact(contract_id, fully_executed_at, self.user["id"])
-        db.audit(self.user, "status_change", "contracts", contract_id, old_value=old["contract_status"], new_value=status)
+        def persist_status(view=None):
+            if view is not None:
+                fresh=db.one("SELECT * FROM contracts WHERE id=?",(contract_id,))
+                if fresh is None or dict(fresh)!=dict(old):
+                    raise ValueError("合同已更新，请刷新后重试。")
+            db.execute(
+                "UPDATE contracts SET contract_status=?,signed_at=COALESCE(?,signed_at),fully_executed_at=COALESCE(?,fully_executed_at),updated_at=? WHERE id=? AND student_id=?",
+                (status, signed_at, fully_executed_at, now_iso(), contract_id, student_id),
+            )
+            if status in {"ParentSigned", "FullyExecuted"}:
+                notify_recorded_contract_signature(old, signed_at or fully_executed_at)
+            if status == "FullyExecuted":
+                record_contract_completion_fact(contract_id, fully_executed_at, self.user["id"])
+            db.audit(self.user, "status_change", "contracts", contract_id, old_value=old["contract_status"], new_value=status)
+            return int(contract_id)
+        if getattr(self,"business_changes_enabled",lambda:False)():
+            try:self.business_change_save_manual_record("Contracts",student_id,int(contract_id),persist_status,authorization_policy='contracts_manage')
+            except PermissionError:return self.error_page("合同管理权限已变化。",403)
+            except ValueError as error:return self.flash_redirect(f"/students/{student_id}?tab=contracts",str(error),"error")
+        else:persist_status()
         return self.flash_redirect(f"/students/{student_id}?tab=contracts", "合同状态已更新")
 
     def offer_download(self, method, offer_id):
@@ -77189,7 +78158,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         uploads = [item for item in self.files if item.field_name == "files" and item.filename]
         if not uploads:
             return self.flash_redirect(f"/file-manager?year={quote(year)}&student={quote(student_name)}&folder={quote(module_folder)}", "请选择文件。", "error")
-        token = create_upload_review(student["student_id"], module, uploads, self.user, self.form)
+        token = create_upload_review(student["student_id"], module, uploads, self.user, self.form,permission_policy='file_manager_upload')
         db.audit(self.user, "file_uploaded", "file_manager", student["student_id"], file_path=str(folder_path), student_id=student["student_id"], ip=self.client_address[0], device=self.headers.get("User-Agent"))
         return self.redirect(f"/students/{student['student_id']}/upload-review/{quote(token)}")
 
@@ -77347,6 +78316,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.flash_redirect("/file-manager", "文件标记状态已更新。")
 
     def parent_form_login_required_page(self, token, token_row):
+        if not self.school_plan_wechat_oauth_enabled() and getattr(STAGING, "mode", None) == "production":
+            return self.parent_result_page(
+                "微信验证暂不可用",
+                "请联系 AAIE 顾问处理后重新打开原链接。",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
         body = parent_form_login(
             token,
             display_datetime(token_row["expires_at"]),
@@ -77427,6 +78402,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 return self.parent_form_wechat_oauth_start(token, token_row)
             return self.parent_form_login_required_page(token, token_row)
 
+        if getattr(STAGING, "mode", None) == "production" or self.school_plan_wechat_oauth_enabled():
+            return self.parent_result_page(
+                "请使用微信验证",
+                "请在微信中重新打开原链接，完成官方微信身份验证。",
+                HTTPStatus.FORBIDDEN,
+            )
         form, _files = parse_request_body(self)
         nickname = str(form.get("wechat_nickname") or "").strip() or "微信家长"
         openid = re.sub(r"[^A-Za-z0-9_\-]", "", str(form.get("wechat_openid") or "").strip())
@@ -83496,7 +84477,13 @@ from visa_evidence_candidate import VisaEvidenceCandidateMixin
 from visa_workspace_candidate import VisaWorkspaceCandidateMixin
 
 
-class CRMHandler(VisaWorkspaceCandidateMixin, VisaFormsCandidateMixin, VisaEvidenceCandidateMixin, CRMLegacyHandler):
+from business_change_sync import BusinessChangeSyncMixin
+
+
+class CRMHandler(BusinessChangeSyncMixin, VisaWorkspaceCandidateMixin, VisaFormsCandidateMixin, VisaEvidenceCandidateMixin, CRMLegacyHandler):
+    def business_change_runtime(self):
+        return globals()
+
     def contract_center_download(self, method, contract_id, kind):
         if method != "GET" or not can_view_contract_center(self.user):
             return self.error_page("你没有下载合同的权限。", 403)
@@ -83797,6 +84784,37 @@ class CRMHandler(VisaWorkspaceCandidateMixin, VisaFormsCandidateMixin, VisaEvide
         self.end_headers()
         self.wfile.write(payload)
 
+    def _business_contract_center_apply_aaie_stamp_metadata(self,view,contract,prepared):
+        contract_id=int(contract["id"]);student_id=contract["student_id"]
+        student=prepared["student"];source=prepared["source"];target=prepared["target"]
+        version=prepared["version"];placement=prepared["placement"]
+        company_signing_date=prepared["company_signing_date"]
+        signature_path=prepared["signature_path"];stamp_path=prepared["stamp_path"]
+        old_status=normalize_contract_status(contract["contract_status"]);new_status="FullyExecuted"
+        now = now_iso()
+        document_id = ""
+        if student:
+            document_id = db.execute(
+                """INSERT INTO student_documents(student_id,folder_category,document_type,original_name,stored_name,
+                   file_path,version,file_size,uploaded_by,uploaded_at,preview_path,is_active)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,1)""",
+                (student["student_id"], "Forms", "FinalSignedStudyAbroadContract", source.name, target.name,
+                 str(target), version, target.stat().st_size, self.user["id"], now, ""),
+            )
+        db.execute(
+            "UPDATE contracts SET final_signed_file_path=?,contract_status='FullyExecuted',fully_executed_at=?,updated_at=? WHERE id=?",
+            (str(target), now, now, contract_id),
+        )
+        if student:
+            record_contract_completion_fact(contract_id, now, self.user["id"])
+        db.audit(
+            self.user, "aaie_signature_stamp_applied", "contracts", contract_id, file_path=str(target),
+            old_value=old_status, new_value=json.dumps({"new_status": "FullyExecuted", "document_id": document_id, "output_file_path": str(target)}, ensure_ascii=False),
+            ip=self.client_address[0], device=self.headers.get("User-Agent"),
+        )
+        db.audit(self.user, "final_contract_generated", "contracts", contract_id, file_path=str(target), old_value=old_status, new_value="FullyExecuted", ip=self.client_address[0], device=self.headers.get("User-Agent"))
+        return int(contract_id)
+
     def contract_center_apply_aaie_stamp(self, method, contract_id):
         if method != "POST" or not self.require("contracts.manage"):
             return
@@ -83807,6 +84825,13 @@ class CRMHandler(VisaWorkspaceCandidateMixin, VisaFormsCandidateMixin, VisaEvide
             return self.error_page("合同不存在", 404)
         if normalize_contract_type(contract["contract_type"]) == "TransferApplicationContract" and not can_manage_transfer_contract(self.user):
             return self.error_page("仅 Admin / Manager 可以管理转学合同", 403)
+        if getattr(self,"business_changes_enabled",lambda:False)():
+            if contract is None:return self.error_page("合同不存在",404)
+            from business_changes.contract_final_commands import generate_final_contract
+            try:generate_final_contract(self,contract,lambda view,prepared:self._business_contract_center_apply_aaie_stamp_metadata(view,contract,prepared),student_entry=False,manual=False)
+            except PermissionError:return self.error_page("合同管理权限已变化。",403)
+            except (ValueError,OSError) as error:return self.flash_redirect("/contracts?view=list",str(error),"error")
+            return self.flash_redirect("/contracts?view=completed","签章请求已完成，请查看当前合同状态和最终合同。")
         require_transfer_contract_signable(contract)
         if normalize_contract_status(contract["contract_status"]) != "ParentSigned":
             return self.flash_redirect("/contracts?view=list", "只有 ParentSigned 合同可以加盖 AAIE 签名和公章。", "error")
@@ -83927,7 +84952,9 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
                         if (not current.enabled or current.stage not in {"invoicing", "settlement"}
                                 or event.get("mail_kind") == "reminder" and current.stage != "settlement"):
                             return False
-                        scope = school_pilot_scope(connection, current, entity_id=event["entity_id"])
+                        from revenue.school_invoice_workspace import invoice_school_scope
+
+                        scope = invoice_school_scope(connection, current, entity_id=event["entity_id"])
                         if scope and scope.enabled and scope.stage in {"invoicing", "settlement"}:
                             if (event.get("mail_kind") == "reminder" and not event.get("institution_draft")
                                     and scope.stage != "settlement"):

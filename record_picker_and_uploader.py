@@ -168,8 +168,11 @@ def _record_has_confirmed_review(
     student_id: str,
     module: str,
     final_path: str,
+    connection=None,
 ) -> bool:
-    connection = sqlite3.connect(Path(database_path).resolve())
+    owns_connection = connection is None
+    if owns_connection:
+        connection = sqlite3.connect(Path(database_path).resolve())
     try:
         if not _columns(connection, "upload_review_items"):
             return False
@@ -181,19 +184,23 @@ def _record_has_confirmed_review(
             (str(student_id), module, str(final_path)),
         ).fetchone() is not None
     finally:
-        connection.close()
+        if owns_connection:
+            connection.close()
 
 
 def list_record_candidates(
     database_path: str | Path,
     student_id: str,
     record_type: str,
+    *, connection=None,
 ) -> tuple[RecordCandidate, ...]:
     """Return valid student records in deterministic latest-business-first order."""
     policy = _POLICIES.get(str(record_type or "").strip().lower())
     if policy is None:
         raise ValueError("unsupported Transfer record type")
-    connection = sqlite3.connect(Path(database_path).resolve())
+    owns_connection = connection is None
+    if owns_connection:
+        connection = sqlite3.connect(Path(database_path).resolve())
     connection.row_factory = sqlite3.Row
     try:
         columns = _columns(connection, policy["table"])
@@ -215,7 +222,8 @@ def list_record_candidates(
             )
         ]
     finally:
-        connection.close()
+        if owns_connection:
+            connection.close()
     candidates = []
     for row in rows:
         status = _first(row, policy["status_columns"]).lower()
@@ -487,19 +495,22 @@ def select_existing_record(
     actor_permissions: Collection[str],
     flags: StudentCaseFeatureFlags,
     replace: bool = False,
+    caller_transaction=None,
 ):
     """Validate and persist one canonical-record association.
 
     This deliberately delegates all writes, ownership checks, history and
     audit events to the existing Transfer services.
     """
+    transaction_options = {'caller_transaction': caller_transaction} if caller_transaction is not None else {}
+    read_options = {'connection': caller_transaction} if caller_transaction is not None else {}
     common = {
         "actor_user_id": int(actor_user_id),
         "actor_permissions": actor_permissions,
         "flags": flags,
     }
     if context.record_type in {"offer", "coe"}:
-        service = TransferCaseService(database_path)
+        service = TransferCaseService(database_path, **transaction_options)
         method_name = (
             f"{'replace' if replace else 'attach'}_transfer_"
             f"{context.record_type}"
@@ -515,9 +526,10 @@ def select_existing_record(
             item.record_id: item
             for item in list_record_candidates(
                 database_path,
-                TransferCaseService(database_path)
+                TransferCaseService(database_path, **transaction_options)
                 .get_transfer_case(context.case_id).student_id,
                 "payment",
+                **read_options,
             )
         }
         candidate = candidates.get(int(record_id))
@@ -526,9 +538,10 @@ def select_existing_record(
             student_id=candidate.student_id,
             module="Payments",
             final_path=str(candidate.metadata.get("receipt_file_path") or ""),
+            **read_options,
         ):
             raise ValueError("付款证明尚未通过Upload Review")
-        service = TransferCaseService(database_path)
+        service = TransferCaseService(database_path, **transaction_options)
         method = (
             service.replace_transfer_payment_proof
             if replace
@@ -543,7 +556,7 @@ def select_existing_record(
             mark_paid_on_success=True,
             **common,
         )
-    arrangements = TransferArrangementService(database_path)
+    arrangements = TransferArrangementService(database_path, **transaction_options)
     method_name = f"select_transfer_{context.record_type}_pending"
     return getattr(arrangements, method_name)(
         context.case_id,
@@ -637,14 +650,16 @@ def complete_upload_and_link(
     actor_user_id: int,
     actor_permissions: Collection[str],
     flags: StudentCaseFeatureFlags,
+    caller_transaction=None,
 ):
+    transaction_options = {'caller_transaction': caller_transaction} if caller_transaction is not None else {}
     context = upload_context_from_form(stored_form)
     if context is None:
         return None
     if isinstance(context, ProgressionUploadContext):
         if canonical_document_id is None:
             raise ValueError("升学上传缺少学生文件编号")
-        service = ProgressionCaseService(database_path)
+        service = ProgressionCaseService(database_path, **transaction_options)
         status = (
             "verified"
             if context.document_role == "latest_transcript"
@@ -683,6 +698,7 @@ def complete_upload_and_link(
         actor_permissions=actor_permissions,
         flags=flags,
         replace=True,
+        **transaction_options,
     )
 
 

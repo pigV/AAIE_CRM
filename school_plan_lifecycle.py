@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+from business_changes.plans import synchronized_plan_write
 from typing import Literal, Sequence
 
 from school_scope_resolver import resolve_school_scopes
@@ -259,6 +260,7 @@ def normalize_parent_decision(report, schools, form) -> ParentDecision:
     raise ParentDecisionError("该学校方案尚未完成公校/私校分类，请联系顾问。")
 
 
+@synchronized_plan_write
 def save_parent_confirmation(connection, context, decision: ParentDecision) -> int:
     """Persist confirmation, canonical decisions and lifecycle evidence atomically."""
 
@@ -408,6 +410,7 @@ def save_parent_confirmation(connection, context, decision: ParentDecision) -> i
     return int(confirmation_id)
 
 
+@synchronized_plan_write
 def set_school_submission(
     connection,
     confirmed_school_id: int,
@@ -706,6 +709,7 @@ def list_student_plans(connection, student_id: str) -> list[dict]:
     ]
 
 
+@synchronized_plan_write
 def activate_created_report(
     connection,
     report_id: int,

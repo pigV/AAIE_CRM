@@ -513,12 +513,12 @@ def complete_base_fixture_columns(database_path):
         )
         for statement in migration_runner.split_sql_statements(SCHEMA):
             if re.match(
-                r"CREATE TABLE IF NOT EXISTS visa_evidence_profiles\b",
+                r"CREATE TABLE IF NOT EXISTS (?:visa_evidence_profiles|audit_logs)\b",
                 statement.strip(),
                 re.I,
             ):
+                # Both are original base tables required by later migrations.
                 connection.execute(statement)
-                break
         connection.commit()
         from tests.visa_test_schema import prepare_production_visa_schema
         prepare_production_visa_schema(connection)
@@ -10448,7 +10448,7 @@ class TransferCaseT3RouteTests(TransferCaseRepositoryServiceTests):
         super().setUp()
         with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute(
-                """CREATE TABLE audit_logs(
+                """CREATE TABLE IF NOT EXISTS audit_logs(
                     id INTEGER PRIMARY KEY,user_id INTEGER,username TEXT,
                     action_type TEXT,module_name TEXT,module_key TEXT,
                     record_id TEXT,file_path TEXT,old_value TEXT,new_value TEXT,

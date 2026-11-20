@@ -5,10 +5,11 @@ from __future__ import annotations
 from progression_case_service import ProgressionCaseService
 
 
-def build_progression_workspace(database_path, case_id):
+def build_progression_workspace(database_path, case_id, *, connection=None):
     service = ProgressionCaseService(database_path)
-    data = service.get_case_data(case_id)
-    readiness = service.get_completion_readiness(case_id)
+    read_options = {'connection': connection} if connection is not None else {}
+    data = service.get_case_data(case_id, **read_options)
+    readiness = service.get_completion_readiness(case_id, **read_options)
     applications = []
     for row in data["target_applications"]:
         application = dict(row)

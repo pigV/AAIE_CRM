@@ -1,5 +1,6 @@
 """Case-scoped non-AI dates; never modify official Visa decision authority."""
 import json
+from business_changes.visa_domains import synchronized_visa_write
 import re
 from datetime import date
 from visa_documents_candidate import _text_date, _DATE_TOKEN
@@ -59,6 +60,7 @@ def _authorize(conn,case_id,actor,stamp,document_id=None):
  if not stamp or not conn.execute('SELECT 1 FROM users WHERE id=?',(actor,)).fetchone():raise ValueError('Valid Staff and timestamp required.')
  if not conn.execute('SELECT 1 FROM visa_cases WHERE id=?',(case_id,)).fetchone():raise ValueError('Case not found.')
  if document_id is not None and not conn.execute('SELECT 1 FROM visa_case_documents WHERE id=? AND visa_case_id=? AND archived_at IS NULL',(document_id,case_id)).fetchone():raise ValueError('Active document must belong to this Case.')
+@synchronized_visa_write
 def save_processing_extraction(conn,case_id,document_id,text,*,actor_user_id,occurred_at,today=None):
  _authorize(conn,case_id,actor_user_id,occurred_at,document_id)
  result=parse_processing_dates(text,today=today)
@@ -106,6 +108,7 @@ def processing_summary(conn,case_id,*,today=None):
   except ValueError:item.update(value='',status='invalid')
  metrics,validation=_metrics(fields)
  return dict(fields=fields,validation=validation,**metrics)
+@synchronized_visa_write
 def correct_processing_dates(conn,case_id,values,*,actor_user_id,occurred_at,source_document_ids=None,today=None):
  _authorize(conn,case_id,actor_user_id,occurred_at)
  if not isinstance(values,dict) or not values or set(values)-set(FIELDS):raise ValueError('Unsupported processing date fields.')

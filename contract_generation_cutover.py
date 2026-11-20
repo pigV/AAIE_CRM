@@ -128,8 +128,8 @@ def _insert_audit(
     file_path: str,
     new_value: Mapping[str, object],
     occurred_at: str,
-) -> None:
-    conn.execute(
+) -> int:
+    cursor = conn.execute(
         """INSERT INTO audit_logs(
            user_id,username,action_type,module_name,module_key,record_id,file_path,
            old_value,new_value,student_id,contract_id,ip_address,user_agent,device_info,
@@ -142,6 +142,7 @@ def _insert_audit(
             student_id, str(contract_id), "", "", "", "success", "", occurred_at,
         ),
     )
+    return int(cursor.lastrowid)
 
 
 def _row_values(bound: Mapping[str, object]) -> dict[str, object]:
@@ -315,7 +316,7 @@ def create_contract_atomic(
                 ),
             )
             document_id = int(document.lastrowid)
-            _insert_audit(
+            audit_id = _insert_audit(
                 conn, user=user, action="published_v2_contract_generated",
                 contract_id=contract_id, student_id=student_id, file_path=str(target),
                 new_value={
@@ -336,6 +337,10 @@ def create_contract_atomic(
                 },
                 occurred_at=occurred_at,
             )
+            from business_changes.contract_records import publish_generated_contract
+            publish_generated_contract(conn, contract_id=contract_id, document_id=document_id,
+                audit_id=audit_id, event_type='contract.generated', actor_user_id=user.get('id'),
+                occurred_at=occurred_at)
         return PersistedContractResult(contract_id, document_id, str(target), True)
     except Exception:
         if promoted and target.exists():
@@ -441,7 +446,7 @@ def replace_draft_atomic(
                     occurred_at, occurred_at, contract_id, student_id,
                 ),
             )
-            _insert_audit(
+            audit_id = _insert_audit(
                 conn, user=user, action="published_v2_contract_draft_regenerated",
                 contract_id=contract_id, student_id=student_id, file_path=str(target),
                 new_value={
@@ -460,6 +465,10 @@ def replace_draft_atomic(
                 },
                 occurred_at=occurred_at,
             )
+            from business_changes.contract_records import publish_generated_contract
+            publish_generated_contract(conn, contract_id=contract_id, document_id=document_id,
+                audit_id=audit_id, event_type='contract.draft_regenerated', actor_user_id=user.get('id'),
+                occurred_at=occurred_at)
         return PersistedContractResult(contract_id, document_id, str(target), True)
     except Exception:
         if promoted and target.exists():

@@ -10,6 +10,7 @@ from typing import Literal
 
 
 from school_scope_resolver import ResolvedSchoolScope, resolve_school_scopes
+from business_changes.offer_selection import synchronized_offer_selection
 
 
 ClassificationStatus = Literal["resolved", "unresolved", "ambiguous"]
@@ -297,6 +298,7 @@ def classify_offer_school(connection, school_name: str) -> OfferClassification:
     return _classification_from_candidates(candidates)
 
 
+@synchronized_offer_selection
 def assign_offer_school(connection, offer_id: int, school_id: int, actor) -> OfferClassification:
     """Assign a staff-selected canonical school and its validated scope to an Offer."""
 
@@ -328,6 +330,7 @@ def assign_offer_school(connection, offer_id: int, school_id: int, actor) -> Off
     return result
 
 
+@synchronized_offer_selection
 def apply_offer_classification(connection, offer_id: int, school_name: str) -> OfferClassification:
     """Persist an automatic classification result without blocking normal Offer saves."""
 
@@ -442,6 +445,7 @@ def _authorized_actor(actor) -> tuple[int | None, str]:
     return actor_id, str(_value(actor, "display_name", "System") or "System")
 
 
+@synchronized_offer_selection
 def set_accepted_offer(
     connection,
     student_id: str,
@@ -618,6 +622,7 @@ def set_accepted_offer(
     )
 
 
+@synchronized_offer_selection
 def withdraw_accepted_offer(
     connection,
     student_id: str,

@@ -62,6 +62,7 @@ class WorkflowFacts:
     final_school_coe_confirmed: bool | None = None
     final_school_coe_issue: str | None = None
     requires_fresh_parent_form: bool = False
+    education_stream: str = 'school_education'
 
 
 @dataclass(frozen=True)
@@ -228,15 +229,22 @@ def resolve_workflow_stage(facts: WorkflowFacts) -> WorkflowStageResult:
             blocker = "待递交 Signed Offer + Payment 给最终学校"
         return _active_result(facts, 8, facts.final_school_coe_issue or blocker, issues, pending_action=pending)
     if facts.submitted_application_count:
-        return _active_result(facts, 7, facts.final_school_coe_issue or "等待 Public Group / Private Application 学校回复", issues)
+        waiting='等待大学回复' if facts.education_stream=='higher_education' else '等待 Public Group / Private Application 学校回复'
+        return _active_result(facts, 7, facts.final_school_coe_issue or waiting, issues)
     if facts.plan_confirmed:
         return _active_result(facts, 6, "等待正式递交学校申请", issues)
     if facts.plan_sent:
+        if facts.education_stream=='higher_education':
+            return _active_result(facts,5,'等待工作人员确认高等教育学校方案',issues,title='等待确认高等教育学校方案')
         return _active_result(facts, 5, "等待家长最终确认学校方案", issues)
     if facts.plan_exists:
+        if facts.education_stream=='higher_education':
+            return _active_result(facts,4,'请完善大学、升学路径和课程后确认方案',issues,title='等待完善高等教育学校方案')
         return _active_result(
             facts, 4, "已有方案，待重新发送", issues, title="等待发送学校方案"
         )
+    if facts.contract_gate_status=='not_required' and facts.student_exists:
+        return _active_result(facts,4,'等待制作高等教育学校方案' if facts.education_stream=='higher_education' else '等待制作学校方案',issues)
     if facts.contract_execution_pending:
         return _active_result(
             facts, 3, "家长已签署，等待 AAIE 完成签章及完整合同归档", issues,

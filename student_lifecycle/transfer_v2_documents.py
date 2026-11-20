@@ -12,6 +12,7 @@ from student_lifecycle.transfer_v2_cutover import (
     cutover_applied_at,
     is_new_transfer_cycle,
 )
+from business_changes.transfer import record_transfer_change
 
 
 class TransferV2DocumentError(RuntimeError):
@@ -223,6 +224,8 @@ class TransferV2DocumentService:
                 "SELECT * FROM transfer_document_requirements WHERE id=?",
                 (requirement_id,),
             ).fetchone()
+            record_transfer_change(connection,event_type='transfer.document_requirement_added',
+                cycle_id=cycle_id,branch_id=branch_id,actor_user_id=actor_user_id,idempotency_key=uid,stamp=timestamp)
             connection.commit()
             return self._requirement_from_row(row)
 
@@ -292,6 +295,8 @@ class TransferV2DocumentService:
             row = connection.execute(
                 self._binding_query() + " WHERE binding.id=?", (binding_id,)
             ).fetchone()
+            record_transfer_change(connection,event_type='transfer.document_bound',
+                cycle_id=cycle_id,branch_id=branch_id,actor_user_id=actor_user_id,idempotency_key=uid,stamp=timestamp)
             connection.commit()
             return self._binding_from_row(row)
 
@@ -343,6 +348,9 @@ class TransferV2DocumentService:
                         int(binding_id), int(actor_user_id), timestamp, timestamp,
                     ),
                 )
+                record_transfer_change(connection,event_type='transfer.document_adopted',
+                    cycle_id=requirement['application_cycle_id'],branch_id=requirement['branch_id'],
+                    actor_user_id=actor_user_id,idempotency_key=uid,stamp=timestamp)
             connection.commit()
             return self._binding_from_row(binding)
 
@@ -512,6 +520,8 @@ class TransferV2DocumentService:
                         )""",
                     (new_state, int(branch_id)),
                 )
+            record_transfer_change(connection,event_type='transfer.branch_transitioned',
+                cycle_id=cycle_id,branch_id=branch_id,actor_user_id=actor_user_id,idempotency_key=uid,stamp=timestamp)
             connection.commit()
             return TransferV2BranchTransition(uid, previous_state, new_state, missing)
 
@@ -628,7 +638,7 @@ class TransferV2DocumentService:
                 ]
                 current_only = ""
                 if bool(requirement["requires_current_cycle"]):
-                    current_only = " AND candidate.source_cycle_id=?"
+                    current_only = " AND binding.source_cycle_id=?"
                     parameters.append(int(binding["current_cycle_id"]))
                 candidate = connection.execute(
                     self._binding_query()
@@ -664,5 +674,9 @@ class TransferV2DocumentService:
                 )
                 if first_fallback is None:
                     first_fallback = self._binding_from_row(candidate)
+            if replay is None:
+                record_transfer_change(connection,event_type='transfer.document_invalidated',
+                    cycle_id=binding['current_cycle_id'],branch_id=binding['branch_id'],
+                    actor_user_id=actor_user_id,idempotency_key=uid,stamp=timestamp)
             connection.commit()
             return first_fallback

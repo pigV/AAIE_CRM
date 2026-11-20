@@ -25,9 +25,15 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = { matchesMaterial, materialCounts, materialVisible };
   if (typeof document === 'undefined') return;
 
+  const lifecycleCleanup = new Map();
+  function initialize(restorePosition = true) {
+    for (const [panel, cleanup] of lifecycleCleanup) if (!panel.isConnected) { cleanup(); lifecycleCleanup.delete(panel); }
   document.querySelectorAll('[data-visa-material-workspace]').forEach(panel => {
     if (panel.dataset.workspaceBound) return;
     panel.dataset.workspaceBound = 'true';
+    const remove = [];
+    const listenWindow = (type, listener) => { window.addEventListener(type, listener); remove.push(() => window.removeEventListener(type, listener)); };
+    lifecycleCleanup.set(panel, () => remove.forEach(cleanup => cleanup()));
     const one = selector => panel.querySelector(selector);
     const all = selector => Array.from(panel.querySelectorAll(selector));
     const rows = all('[data-material-item]');
@@ -35,6 +41,7 @@
     const filterSelect = one('[data-material-filter]');
     const categorySelect = one('[data-category-mobile]');
     const saveForm = one('[data-material-save]');
+    saveForm.dataset.businessSyncManaged = '1';
     const saveButton = one('[data-material-save-button]');
     const message = one('[data-material-save-status]');
     const initial = new Map();
@@ -54,11 +61,11 @@
       const urlFilter = new URL(location.href).searchParams.get('material_filter');
       if (!urlFilter && allowedFilters.has(stored.filter)) filterSelect.value = stored.filter;
       category = typeof stored.category === 'string' && all('[data-category-choice]').some(b => b.dataset.categoryChoice === stored.category) ? stored.category : '';
-      if (Array.isArray(stored.open)) stored.open.forEach(id => {
+      if (restorePosition && Array.isArray(stored.open)) stored.open.forEach(id => {
         const details = all('[data-material-details]').find(d => d.dataset.materialDetails === String(id));
         if (details) details.open = true;
       });
-      if (Array.isArray(stored.collapsed)) all('[data-material-category]').forEach(section => {
+      if (restorePosition && Array.isArray(stored.collapsed)) all('[data-material-category]').forEach(section => {
         section.open = !stored.collapsed.includes(section.dataset.materialCategory);
       });
     }
@@ -84,6 +91,7 @@
       label.append(document.createTextNode(name.slice(0, index)), mark, document.createTextNode(name.slice(index + query.length)));
     }
     function render() {
+      if (dirty.size) saveForm.dataset.businessSyncDirty = '1'; else delete saveForm.dataset.businessSyncDirty;
       const state = { query: input.value, category, filter: filterSelect.value };
       let visible = 0, pinned = 0;
       rows.forEach(row => {
@@ -176,7 +184,7 @@
       if (event.defaultPrevented) return;
       if (event.target !== saveForm && dirty.size) {
         event.preventDefault();
-        message.textContent = '请先保存材料状态和备注，再上传文件。';
+        message.textContent = '请先保存材料状态和备注，再进行其他操作。';
         saveButton.focus(); return;
       }
       if (event.target === saveForm) {
@@ -186,14 +194,24 @@
       }
       remember(true); submitting = true;
       if (event.target === saveForm) render();
+      if (event.target === saveForm && saveForm.elements.namedItem('business_command_key') && window.AAIEBusinessChanges?.submitChecklist) {
+        event.preventDefault();
+        window.AAIEBusinessChanges.submitChecklist(saveForm).then(() => {
+          fields.forEach(field => initial.set(field, field.value)); dirty.clear();
+          recentItem = lastItem; submitting = false; render();
+          window.dispatchEvent(new Event('aaie:business-change'));
+        }).catch(error => {
+          submitting = false; render(); message.textContent = error.message;
+        });
+      }
     });
-    window.addEventListener('beforeunload', event => {
+    listenWindow('beforeunload', event => {
       if (dirty.size && !submitting) { event.preventDefault(); event.returnValue = ''; }
     });
-    window.addEventListener('pagehide', () => remember(true));
-    window.addEventListener('pageshow', event => { if (event.persisted) { submitting = false; render(); } });
+    listenWindow('pagehide', () => remember(true));
+    listenWindow('pageshow', event => { if (event.persisted) { submitting = false; render(); } });
     render();
-    if (stored && stored.resume && !panel.closest('[hidden]')) {
+    if (restorePosition && stored && stored.resume && !panel.closest('[hidden]')) {
       requestAnimationFrame(() => {
         const target = rows.find(row => row.id === stored.anchor && !row.hidden);
         if (target && Number.isFinite(stored.offset)) {
@@ -204,4 +222,7 @@
       });
     }
   });
+  }
+  initialize();
+  document.addEventListener('aaie:business-fragment-rendered', () => initialize(false));
 })();

@@ -2635,12 +2635,16 @@ class Database:
             return self._open_connection()
         if state["thread_id"] != threading.get_ident():
             raise RuntimeError("request-scoped SQLite connection cannot cross threads")
+        if state.get("business_connection") is not None:
+            return state["business_connection"]
         if state["connection"] is None:
             state["connection"] = self._open_connection()
         return state["connection"]
 
     def _release_connection(self, conn):
         state = self._request_state()
+        if state is not None and state.get("business_connection") is conn:
+            return
         if state is not None and state["connection"] is conn:
             return
         conn.close()
@@ -2675,10 +2679,44 @@ class Database:
                 del self._request_local.state
 
     @contextmanager
+    def business_scope(self, view):
+        """Opt-in bridge for reviewed legacy helpers inside one guarded command.
+
+        Only this explicit scope changes nested transaction behavior. Ordinary
+        requests retain their existing transaction ownership and failure rules.
+        """
+        from business_changes.commands import TransactionView, _domain_owner
+        from business_changes.runtime import enabled
+        if not isinstance(view, TransactionView) or not view.in_transaction:
+            raise ValueError("guarded_business_transaction_required")
+        owner = _domain_owner(view)
+        main = next((row[2] for row in owner.execute("PRAGMA database_list") if row[1] == "main"), None)
+        if not main or Path(main).resolve() != self.path.resolve():
+            raise ValueError("business_scope_database_mismatch")
+        if not enabled(owner):
+            raise ValueError("business_scope_requires_enabled_sync")
+        with self.request_scope():
+            state = self._request_state()
+            previous = state.get("business_connection")
+            current = previous if previous is not None else state["connection"]
+            if current is not None and _domain_owner(current) is not owner and current.in_transaction:
+                raise RuntimeError("cannot replace another active business transaction")
+            state["business_connection"] = view
+            try:
+                yield view
+            finally:
+                if previous is None:
+                    state.pop("business_connection", None)
+                else:
+                    state["business_connection"] = previous
+
+    @contextmanager
     def read_snapshot(self):
         """Own a read-only snapshot; restore the request's previous connection."""
         with self.request_scope():
             state = self._request_state()
+            if state.get("business_connection") is not None:
+                raise RuntimeError("cannot replace an active business scope")
             previous = state["connection"]
             if previous is not None and previous.in_transaction:
                 raise RuntimeError("cannot replace an active request transaction")
@@ -2688,8 +2726,11 @@ class Database:
             connection.row_factory = sqlite3.Row
             try:
                 connection.execute("BEGIN")
+                connection.execute("PRAGMA query_only=ON")
                 state["connection"] = connection
-                yield connection
+                from snapshot_read_cache import read_cache_scope
+                with read_cache_scope(connection):
+                    yield connection
             finally:
                 state["connection"] = previous
                 try:
@@ -2700,6 +2741,20 @@ class Database:
     @contextmanager
     def transaction(self):
         with DB_LOCK:
+            state = self._request_state()
+            bound = state.get("business_connection") if state is not None else None
+            if bound is not None:
+                from uuid import uuid4
+                name = "domain_call_" + uuid4().hex
+                bound.execute("SAVEPOINT " + name)
+                try:
+                    yield bound
+                    bound.execute("RELEASE SAVEPOINT " + name)
+                except BaseException:
+                    bound.execute("ROLLBACK TO SAVEPOINT " + name)
+                    bound.execute("RELEASE SAVEPOINT " + name)
+                    raise
+                return
             conn = self.connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")

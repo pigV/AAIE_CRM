@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -146,10 +146,14 @@ class ProgressionEventDTO:
 
 
 class ProgressionCaseService:
-    def __init__(self, database_path):
+    def __init__(self, database_path, *, caller_transaction=None):
         self.database_path = Path(database_path).resolve()
+        self._caller_transaction = caller_transaction
 
     def _connect(self):
+        if self._caller_transaction is not None:
+            from business_changes.service_connection import ServiceConnection
+            return ServiceConnection(self._caller_transaction, self.database_path)
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
@@ -552,12 +556,12 @@ class ProgressionCaseService:
                 raise ProgressionCaseNotFoundError(case_id)
             return self._dto(row)
 
-    def list_cases(self, student_id):
-        with closing(self._connect()) as connection:
+    def list_cases(self, student_id, *, connection=None):
+        with (nullcontext(connection) if connection is not None else closing(self._connect())) as connection:
             return [self._dto(row) for row in repository.list_case_rows(connection, student_id)]
 
-    def get_case_data(self, case_id):
-        with closing(self._connect()) as connection:
+    def get_case_data(self, case_id, *, connection=None):
+        with (nullcontext(connection) if connection is not None else closing(self._connect())) as connection:
             row = repository.case_row(connection, case_id)
             if not row:
                 raise ProgressionCaseNotFoundError(case_id)
@@ -1355,8 +1359,8 @@ class ProgressionCaseService:
             transition_ready=transition_ready,
         )
 
-    def get_completion_readiness(self, case_id):
-        with closing(self._connect()) as connection:
+    def get_completion_readiness(self, case_id, *, connection=None):
+        with (nullcontext(connection) if connection is not None else closing(self._connect())) as connection:
             if not repository.case_row(connection, case_id):
                 raise ProgressionCaseNotFoundError(case_id)
             return evaluate_progression_completion(

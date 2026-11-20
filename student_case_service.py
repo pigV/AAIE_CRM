@@ -5,7 +5,7 @@ depend on the application's configured production database and has no import
 time database side effects.
 """
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -637,11 +637,12 @@ def get_active_case_for_student(
     student_id: str,
     *,
     timeout_seconds: float = 5.0,
+    connection=None,
 ) -> StudentCaseDTO | None:
     try:
-        with closing(
+        with (nullcontext(connection) if connection is not None else closing(
             _connect(database_path, readonly=True, timeout_seconds=timeout_seconds)
-        ) as connection:
+        )) as connection:
             _ensure_schema(connection)
             row = repository.get_active_case_for_student(connection, student_id)
             return None if row is None else _case_dto(row)
@@ -675,13 +676,14 @@ def get_case_read_model(
     case_type: str,
     *,
     timeout_seconds: float = 5.0,
+    connection=None,
 ) -> StudentCaseReadModelDTO:
     if case_type not in CASE_TYPES:
         raise StudentCaseInvalidTypeError()
     try:
-        with closing(
+        with (nullcontext(connection) if connection is not None else closing(
             _connect(database_path, readonly=True, timeout_seconds=timeout_seconds)
-        ) as connection:
+        )) as connection:
             _ensure_schema(connection)
             counts = repository.get_case_counts_for_student(
                 connection, student_id

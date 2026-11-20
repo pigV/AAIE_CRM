@@ -7,6 +7,7 @@ the connection that owns their transaction.
 from __future__ import annotations
 
 import sqlite3
+from business_changes.case_events import synchronized_case_event_writer
 from typing import Any, Mapping
 
 
@@ -529,6 +530,7 @@ def list_events(
     return _fetchall_dicts(connection.execute(sql, tuple(parameters)))
 
 
+@synchronized_case_event_writer('student_cases','case_events')
 def append_event(
     connection: sqlite3.Connection,
     values: Mapping[str, Any],

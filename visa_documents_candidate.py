@@ -8,6 +8,7 @@ Extraction is deliberately labelled deterministic: suggestions are not decisions
 from contextlib import contextmanager
 from datetime import date, datetime
 import json
+from business_changes.visa_domains import synchronized_visa_write
 import re
 
 from workflow_visa_events import record_first_valid_visa_decision
@@ -87,6 +88,7 @@ def _audit(conn, case_id, document_id, action, before, after, actor_user_id, occ
                     VALUES(?,?,?,?,?,?,?)''', (case_id, document_id, action, _json(before), _json(after), actor_user_id, occurred_at))
 
 
+@synchronized_visa_write
 def register_document(conn, case_id, *, file_path, original_name, version, sha256,
                       actor_user_id, occurred_at, student_document_id=None, category=None, for_deletion=False,
                       category_confirmed=True):
@@ -132,6 +134,7 @@ def register_document(conn, case_id, *, file_path, original_name, version, sha25
     return document
 
 
+@synchronized_visa_write
 def mark_submitted(conn, case_id, document_id, *, actor_user_id, occurred_at, supersedes_id=None):
     """Pin the exact prepared version; superseding is explicit and retains history."""
     _actor(conn, actor_user_id, occurred_at)
@@ -156,6 +159,7 @@ def mark_submitted(conn, case_id, document_id, *, actor_user_id, occurred_at, su
     return submission
 
 
+@synchronized_visa_write
 def set_document_archived(conn, case_id, document_id, *, archived, actor_user_id, occurred_at):
     _actor(conn, actor_user_id, occurred_at)
     if not isinstance(archived, bool):
@@ -234,7 +238,7 @@ def propose_letter(text):
         kind, decision = 'grant', 'grant'
     elif re.search(r'health|medical|examination request', lowered):
         kind, decision = 'medical', ''
-    elif re.search(r'lodgement receipt|acknowledgement of application|application acknowledgement|acknowledge letter|application received', lowered):
+    elif re.search(r'lodgement receipt|acknowledgement of application|application acknowledgement|acknowledge letter|application received', lowered) or re.search(r'\bwe received your [^\n]{0,100}visa application on\s+', lowered):
         kind, decision = 'lodgement_receipt', ''
     else:
         kind, decision = 'unknown', ''
@@ -242,7 +246,7 @@ def propose_letter(text):
         'grant': r'(?:date of grant|visa grant date|grant date)',
         'refusal': r'(?:date of decision|decision date|date of refusal|refusal date)',
         'medical': r'(?:date of (?:letter|issue)|letter date|issue date|date(?=\s*[:：]|\s*$))',
-        'lodgement_receipt': r'(?:date of lodgement|lodgement date|application date|date of (?:letter|issue)|date(?=\s*[:：]|\s*$))',
+        'lodgement_receipt': r'(?:date of lodgement|lodgement date|date of application|application date|date of (?:letter|issue)|date(?=\s*[:：]|\s*$))',
     }
     decision_date = _text_date(_label_value(lines, labels[kind])) if decision else ''
     if decision:
@@ -260,6 +264,7 @@ def propose_letter(text):
                 official_date=official, length_of_stay=length, expiry_date=expiry, medical_completed_date='')
 
 
+@synchronized_visa_write
 def save_extraction(conn, case_id, document_id, *, text, actor_user_id, occurred_at):
     _actor(conn, actor_user_id, occurred_at)
     _document(conn, case_id, document_id)
@@ -294,6 +299,27 @@ def save_extraction(conn, case_id, document_id, *, text, actor_user_id, occurred
 
 
 def _retired_extraction_ids(conn, case_id):
+    if conn.execute('PRAGMA query_only').fetchone()[0]:
+        from snapshot_read_cache import memoized_read
+
+        def load_cases():
+            if not _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_logs'"):
+                return {}
+            cases = {}
+            for row in _rows(conn, """SELECT record_id,
+                json_extract(new_value,'$.visa_case_id') AS visa_case_id
+                FROM audit_logs
+                WHERE module_name='visa_management'
+                  AND action_type='visa_letter_extraction_retired'"""):
+                # Keep SQLite's JSON value type and convert IDs only after
+                # selecting the caller's case. A malformed foreign ID must
+                # not invalidate this case's historical evidence.
+                if row['visa_case_id'] is not None:
+                    cases.setdefault(row['visa_case_id'], []).append(row['record_id'])
+            return cases
+
+        cases = memoized_read(conn, ('visa_retired_extractions_by_case',), load_cases)
+        return {int(value) for value in cases.get(case_id, ())} if case_id is not None else set()
     if not _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_logs'"):
         return set()
     return {
@@ -314,6 +340,7 @@ def active_letter_extractions(conn, case_id):
     return [row for row in rows if row["document_id"] in active_ids and row["id"] not in retired_ids]
 
 
+@synchronized_visa_write
 def retire_letter_extraction(conn, case_id, extraction_id, *, reason, occurred_at):
     case = _case(conn, case_id)
     reason = str(reason or "").strip()
@@ -335,6 +362,7 @@ def retire_letter_extraction(conn, case_id, extraction_id, *, reason, occurred_a
              _json({"visa_case_id": case_id, "extraction_id": extraction_id, "reason": reason}), occurred_at))
 
 
+@synchronized_visa_write
 def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occurred_at):
     """Append a staff review, then decide through canonical authority atomically.
 
@@ -430,6 +458,12 @@ def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occur
             if current_result is None:
                 from visa_document_lifecycle import case_projection
                 current_result={'effective_result':case_projection(conn,case_id)['result_status']}
+            from business_changes.runtime import enabled
+            if (enabled(conn) and kind=='grant' and project_decision and current_result
+                    and current_result['effective_result']=='Pending' and not current_result.get('manual_override')):
+                # This explicit Staff confirmation is the authority being
+                # established here; a prior upload's projection stays Pending.
+                current_result=dict(current_result,effective_result='Granted')
             project_decision = project_decision and bool(current_result and current_result['effective_result'] == label)
         if project_decision:
             if student_decision:
@@ -464,3 +498,14 @@ def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occur
                 result = _row(conn, 'SELECT * FROM visa_case_confirmed_decisions WHERE id=?', (cursor.lastrowid,))
         _audit(conn, case_id, document['id'], 'letter_confirmed', json.loads(extraction['proposed_json']), effective, actor_user_id, occurred_at)
     return result
+
+
+@synchronized_visa_write
+def correct_grant_date(conn,case_id,value,*,actor_user_id,occurred_at):
+    """Correct a date without creating a Grant result or changing source identity."""
+    from visa_processing_dates import _valid
+    _actor(conn,actor_user_id,occurred_at);_case(conn,case_id)
+    date_value=_valid(value,None)
+    with _atomic(conn):
+        _audit(conn,case_id,None,'grant_date_corrected',{}, {'value':date_value},actor_user_id,occurred_at)
+    return date_value

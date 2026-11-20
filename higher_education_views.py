@@ -15,7 +15,8 @@ def _value(row, key, default=""):
     return default if value is None else value
 
 
-def render_higher_education_workspace(*, providers, relationships, plans, applications, csrf, can_manage, cycles=(), plan_items=(), offers=(), temporary_shares=(), can_review=False, pathways=(), courses=(), can_view_legacy_commission=False, legacy_commission_writes_closed=False):
+def render_higher_education_workspace(*, providers, relationships, plans, applications, csrf, can_manage, cycles=(), plan_items=(), offers=(), temporary_shares=(), can_review=False, pathways=(), courses=(), can_view_legacy_commission=False, legacy_commission_writes_closed=False, command_fields=None):
+    command_fields=command_fields or (lambda *args,**kwargs:'')
     universities = [row for row in providers if _value(row, "provider_type") == "University" and _value(row, "active_status") == "Active"]
     university_options = "".join(f'<option value="{esc(_value(row, "id"))}">{esc(_value(row, "provider_name"))}</option>' for row in universities)
     university_cards = "".join(
@@ -42,14 +43,17 @@ def render_higher_education_workspace(*, providers, relationships, plans, applic
 
     def plan_item_card(item, confirmed):
         submit = ""
-        if confirmed:
+        application_status=_value(item,'current_application_status')
+        submitted=bool(application_status and application_status!='Draft')
+        item_status=application_status_label(application_status) if submitted else ('待递交' if confirmed else application_status_label(_value(item,'status') or 'Draft'))
+        if confirmed and can_manage and not submitted:
             channel_fields = '<select name="submission_channel"><option value="Direct">直接递交</option></select>'
             if can_view_legacy_commission:
                 channel_fields = '<select name="submission_channel"><option value="Direct">直接递交</option><option value="Master Agent">主代理递交</option></select><input name="master_agent_id" placeholder="主代理编号">'
-            submit = f'<form method="post" action="/higher-education/plan-items/{esc(_value(item, "id"))}/submit"><input type="hidden" name="csrf" value="{esc(csrf)}"><input name="intake" value="{esc(_value(item, "intake"))}" required>{channel_fields}<button class="primary compact">标记已递交</button></form>'
-        remove = "" if confirmed else f'''<form method="post" action="/higher-education/plan-items/{esc(_value(item, "id"))}/remove"><input type="hidden" name="csrf" value="{esc(csrf)}"><button class="ghost compact" type="submit">移除</button></form>'''
+            submit = f'<form method="post" action="/higher-education/plan-items/{esc(_value(item, "id"))}/submit">{command_fields("submit_item", _value(item, 'id'))}<input type="hidden" name="csrf" value="{esc(csrf)}"><input name="intake" value="{esc(_value(item, "intake"))}" required>{channel_fields}<button class="primary compact">标记已递交</button></form>'
+        remove = "" if confirmed or submitted or not can_manage else f'''<form method="post" action="/higher-education/plan-items/{esc(_value(item, "id"))}/remove">{command_fields("remove_item", _value(item, 'id'))}<input type="hidden" name="csrf" value="{esc(csrf)}"><button class="ghost compact" type="submit">移除</button></form>'''
         return f'''<article class="he-university-application" data-mobile-card="university-application">
-          <span class="he-badge">{esc(application_status_label(_value(item, "status") or "Draft"))}</span><h3>{esc(_value(item, "provider_name") or ("大学 #" + str(_value(item, "provider_id"))))}</h3>
+          <span class="he-badge">{esc(item_status)}</span><h3>{esc(_value(item, "provider_name") or ("大学 #" + str(_value(item, "provider_id"))))}</h3>
           <dl><div><dt>升学路径</dt><dd>{esc(_value(item, "pathway_name") or course_type_label(_value(item, "course_type")))}</dd></div><div><dt>课程 / 专业</dt><dd>{esc(_value(item, "course_name"))}</dd></div><div><dt>入学时间</dt><dd>{esc(_value(item, "intake") or "未设置")}</dd></div></dl>{remove}{submit}
         </article>'''
 
@@ -58,21 +62,21 @@ def render_higher_education_workspace(*, providers, relationships, plans, applic
         confirmed = _value(plan, "status") == "Confirmed"
         item_cards = "".join(plan_item_card(item, confirmed) for item in items_by_plan.get(plan_id, [])) or '<p class="muted-line">尚无大学申请。</p>'
         add_form = ""
-        if not confirmed:
-            add_form = f'''<form class="he-add-university-form" method="post" action="/higher-education/plans/{plan_id}/items" data-he-university-form>
+        if not confirmed and can_manage:
+            add_form = f'''<form class="he-add-university-form" method="post" action="/higher-education/plans/{plan_id}/items" data-he-university-form>{command_fields("add_item", plan_id)}
               <input type="hidden" name="csrf" value="{esc(csrf)}"><h3>添加大学</h3>
               <label>大学<select name="provider_id" required data-he-university-select><option value="">请选择大学</option>{university_options}</select></label>
               <label>升学路径<select name="pathway_combination_id" required data-he-pathway-select disabled><option value="">请先选择大学</option></select></label>
               <label>课程 / 专业<input name="course_name" list="he-course-library-{plan_id}" placeholder="搜索课程 / 专业" autocomplete="off" required data-he-course-input><datalist id="he-course-library-{plan_id}" data-he-course-list></datalist><small>找不到？可添加新课程 / 专业，保存后自动加入该大学课程库。</small></label>
               <label>课程层级<select name="course_level" data-he-course-level required><option value="">请先选择升学路径</option></select></label>
               <label>入学时间<input name="intake" placeholder="例如：2027年2月" required></label><button class="primary">添加大学</button>
-            </form><form method="post" action="/higher-education/plans/{plan_id}/confirm"><input type="hidden" name="csrf" value="{esc(csrf)}"><button class="secondary">确认高等教育学校方案</button></form>'''
+            </form><form method="post" action="/higher-education/plans/{plan_id}/confirm">{command_fields("confirm_plan", plan_id)}<input type="hidden" name="csrf" value="{esc(csrf)}"><button class="secondary">确认高等教育学校方案</button></form>'''
         return f'''<article class="he-plan" data-mobile-card="plan"><header><div><span class="eyebrow">学生 {esc(_value(plan, "student_id"))}</span><h2>高等教育学校方案 #{plan_id}</h2></div><span class="he-badge">{esc(application_status_label(_value(plan, "status")))}</span></header><div class="he-default-pathway"><span>家长选择的升学路径</span><strong>默认升学路径： {esc(_value(plan, "default_pathway_code") or "未记录")}</strong><small>每所大学可采用不同的实际升学路径。</small></div><div class="he-university-grid">{item_cards}</div>{add_form}</article>'''
 
     plan_cards = "".join(plan_card(plan) for plan in plans) or '<p class="muted-line">尚无高等教育学校方案。</p>'
     create_plan = ""
     if can_manage:
-        create_plan = f'<form class="panel he-create-plan" method="post" action="/higher-education/plans/create"><input type="hidden" name="csrf" value="{esc(csrf)}"><h2>新建高等教育学校方案</h2><label>当前高等教育申请周期<select name="application_cycle_id" required><option value="">请选择学生</option>{cycle_options}</select></label><button class="primary">新建学校方案</button></form>'
+        create_plan = f'<form class="panel he-create-plan" method="post" action="/higher-education/plans/create">{command_fields("create_plan", cycles=[_value(row, "id") for row in cycles])}<input type="hidden" name="csrf" value="{esc(csrf)}"><h2>新建高等教育学校方案</h2><label>当前高等教育申请周期<select name="application_cycle_id" required><option value="">请选择学生</option>{cycle_options}</select></label><button class="primary">新建学校方案</button></form>'
 
     offers_by_application = {}
     for offer in offers:
@@ -84,26 +88,30 @@ def render_higher_education_workspace(*, providers, relationships, plans, applic
 
     def application_card(row):
         application_id = int(_value(row, "id", 0))
-        offer_actions = "".join(f'<form method="post" action="/higher-education/offers/{esc(_value(offer, "id"))}/accept"><input type="hidden" name="csrf" value="{esc(csrf)}"><span>Offer #{esc(_value(offer, "id"))} · {esc(application_status_label(_value(offer, "status")))}</span>' + ('<button class="primary compact">接受 Offer</button>' if _value(offer, "status") == "Received" else '') + '</form>' for offer in offers_by_application.get(application_id, []))
+        offer_actions = "".join(f'<form method="post" action="/higher-education/offers/{esc(_value(offer, "id"))}/accept">{command_fields("accept_offer", _value(offer, 'id'))}<input type="hidden" name="csrf" value="{esc(csrf)}"><span>Offer #{esc(_value(offer, "id"))} · {esc(application_status_label(_value(offer, "status")))}</span>' + ('<button class="primary compact">接受 Offer</button>' if _value(offer, "status") == "Received" else '') + '</form>' for offer in offers_by_application.get(application_id, []))
+        if not can_manage:
+            offer_actions = "".join(f'<p>Offer #{esc(_value(offer, "id"))} · {esc(application_status_label(_value(offer, "status")))}</p>' for offer in offers_by_application.get(application_id, []))
+        record_offer = f'<form method="post" action="/higher-education/applications/{application_id}/offers">{command_fields("record_offer", application_id)}<input type="hidden" name="csrf" value="{esc(csrf)}"><button>记录 Offer</button></form>' if can_manage else ""
+        coe_link = f'<form method="post" action="/higher-education/applications/{application_id}/coe-links">{command_fields("link_coe", application_id)}<input type="hidden" name="csrf" value="{esc(csrf)}"><input name="coe_oshc_id" required><button>关联 CoE</button></form>' if can_manage else ""
         legacy_archive = ""
         if can_view_legacy_commission:
             share_actions = "".join(
                 f'<div class="he-legacy-share"><span>Temporary share {esc(_value(share, "share_percent"))}% · {esc(_value(share, "status"))}</span>'
                 + (
                     f'<form method="post" action="/higher-education/temporary-shares/{esc(_value(share, "id"))}/review"><input type="hidden" name="csrf" value="{esc(csrf)}"><button name="decision" value="Approved">Approve</button></form>'
-                    if can_review and not legacy_commission_writes_closed and _value(share, "status") == "Pending"
+                    if can_manage and can_review and not legacy_commission_writes_closed and _value(share, "status") == "Pending"
                     else ""
                 )
                 + "</div>"
                 for share in shares_by_application.get(application_id, [])
             )
             write_forms = ""
-            if not legacy_commission_writes_closed:
+            if can_manage and not legacy_commission_writes_closed:
                 share_form = f'<form method="post" action="/higher-education/applications/{application_id}/temporary-shares"><input type="hidden" name="csrf" value="{esc(csrf)}"><input name="share_percent" required><input name="evidence" required><button>Submit Share</button></form>' if _value(row, "submission_channel") == "Master Agent" else ""
                 commission_form = f'<form method="post" action="/higher-education/applications/{application_id}/commission-lines"><input type="hidden" name="csrf" value="{esc(csrf)}"><input name="teaching_provider_id" required><select name="source_type"><option>Agreement</option><option>Temporary Share</option></select><input name="source_id" required><button>Create Commission Line</button></form>'
                 write_forms = share_form + commission_form
             legacy_archive = f'<section class="he-legacy-commission"><h4>Legacy HE Commission Archive</h4>{share_actions}{write_forms}</section>'
-        return f'''<article class="he-card" data-mobile-card="application"><span class="he-badge">{esc(application_status_label(_value(row, "status")))}</span><h3>{esc(_value(row, "provider_name"))}</h3><p>{esc(_value(row, "pathway_name") or course_type_label(_value(row, "course_type")))} · {esc(_value(row, "course_name"))} · {esc(_value(row, "intake"))}</p><form method="post" action="/higher-education/applications/{application_id}/offers"><input type="hidden" name="csrf" value="{esc(csrf)}"><button>记录 Offer</button></form>{offer_actions}<form method="post" action="/higher-education/applications/{application_id}/coe-links"><input type="hidden" name="csrf" value="{esc(csrf)}"><input name="coe_oshc_id" required><button>关联 CoE</button></form>{legacy_archive}</article>'''
+        return f'''<article class="he-card" data-mobile-card="application"><span class="he-badge">{esc(application_status_label(_value(row, "status")))}</span><h3>{esc(_value(row, "provider_name"))}</h3><p>{esc(_value(row, "pathway_name") or course_type_label(_value(row, "course_type")))} · {esc(_value(row, "course_name"))} · {esc(_value(row, "intake"))}</p>{record_offer}{offer_actions}{coe_link}{legacy_archive}</article>'''
 
     application_cards = "".join(application_card(row) for row in applications) or '<p class="muted-line">尚无已递交的大学申请。</p>'
     legacy_cutover_notice = ""

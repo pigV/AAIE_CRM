@@ -17,6 +17,9 @@ def result_stage(case, result):
     """Do not infer lodgement/medical completion from an attachment's presence."""
     case, result = dict(case), dict(result or {})
     value = str(result.get('effective_result') or 'Pending')
+    if result.get('requires_review'):
+        return dict(key='review',label='签证材料需核实',action='核对有效材料和原确认记录',target='visa-result-dates',
+                    hint='历史下签或人工记录已保留，当前材料或正式确认依据需要核实。请核对后处理。',tone='warning')
     if result.get('conflict'):
         return dict(key='conflict', label='结果待核对', action='核对冲突结果与原始文件',
                     target='visa-result-dates', hint='检测到结果证据冲突，请核对来源后处理。', tone='warning')
@@ -83,7 +86,7 @@ def render_result_materials(handler, student_id, case, rows):
               <div class="visa-result-item-head"><div><strong>{escape(name)}</strong><small>{escape(h.visa_material_owner_type_label(item['owner_type']))} · {len(files)} 个文件</small></div>
               <label>材料状态{h.visa_material_status_select_html(item,form_id)}</label></div>
               <div class="visa-result-item-actions">{upload}</div>
-              <details class="visa-result-item-details" data-result-item-details><summary>查看文件与备注</summary>
+              <details class="visa-result-item-details" data-result-item-details data-business-sync-key="result-item-details-{iid}"><summary>查看文件与备注</summary>
                 {files_html}<label>备注<textarea rows="2" name="notes_{iid}" form="{form_id}" aria-label="{escape(name)}备注">{escape(str(item['notes'] or ''))}</textarea></label>
                 <small>{escape(h.visa_material_purpose_label(item['purpose']))} · {escape(h.visa_material_required_status_label(item['required_status']))}</small>
               </details></article>''')
@@ -96,6 +99,7 @@ def render_result_materials(handler, student_id, case, rows):
       <div class="visa-result-heading"><div><h2>Visa Result / S56 / 签证结果</h2><p>按办理阶段整理文件。已收到不代表已审核或已确认结果。</p></div>
         <a class="secondary button-link" data-result-resume href="{escape(batch)}">Smart Batch Upload / 智能批量上传</a></div>
       <form id="{form_id}" method="post" action="{base}/material-items" data-result-save>
+        {getattr(h,'business_change_checklist_hidden_fields',lambda case_id:'')(case['id'])}
         <input type="hidden" name="csrf" value="{escape(h.csrf)}"><input type="hidden" name="visa_tab" value="visa_result">
         <input type="hidden" name="return_anchor" value="visa-result-s56"></form>
       {''.join(groups)}
@@ -109,7 +113,7 @@ def render_result_workspace(case, result, materials_html, processing_html, lodge
     if not dict(case).get('student_id') and target=='visa-result-lodgement':target='visa-result-case-documents'
     navigation=''.join(f'<a href="#visa-result-group-{key}" data-result-jump>{label}</a>' for key,label,_ in GROUPS if key!='other')
     extra=(f'<details class="visa-result-case-documents" id="visa-result-case-documents"><summary>案件文件与递交版本 / Prepared · IMMI Submitted</summary>{case_documents}</details>' if case_documents else '')
-    return f'''<link rel="stylesheet" href="/assets/visa-material-workspace.css?v=1"><link rel="stylesheet" href="/assets/visa-result-workspace.css?v=1"><script src="/assets/visa-result-workspace.js?v=1" defer></script>
+    return f'''<link rel="stylesheet" href="/assets/visa-material-workspace.css?v=1"><link rel="stylesheet" href="/assets/visa-result-workspace.css?v=1"><script src="/assets/visa-result-workspace.js?v=3" defer></script>
       <div class="visa-result-workspace" data-visa-result-workspace data-case-id="{int(case['id'])}" data-stage="{stage['key']}">
         <section class="visa-result-current visa-result-{stage['tone']}"><div><span>当前结果记录</span><h2>{escape(stage['label'])}</h2><p>{escape(stage['hint'])}</p></div><a class="primary button-link" href="#{target}" data-result-jump>{escape(stage['action'])}</a></section>
         <nav class="visa-result-nav" aria-label="结果页分区">{navigation}<a href="#visa-result-dates" data-result-jump>关键日期与结果核对</a></nav>

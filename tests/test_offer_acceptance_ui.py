@@ -24,6 +24,8 @@ class OfferPanelUiTests(unittest.TestCase):
         try:
             app_module.db = self.DbStub()
             handler = object.__new__(app_module.CRMHandler)
+            handler.business_changes_enabled=lambda:False
+            handler.user={'id':1,'username':'viewer','role_name':'View Only','permissions_json':'[]'}
             handler.csrf = "csrf-token"
             offers = [
                 {
@@ -74,7 +76,8 @@ class StudentTabOrderTests(unittest.TestCase):
     def test_declared_student_tab_order_matches_confirmed_workflow(self):
         import app as app_module
 
-        source = inspect.getsource(app_module.CRMHandler.student_detail)
+        # The shared snapshot wrapper delegates layout to its retained owner.
+        source = inspect.getsource(app_module.CRMLegacyHandler.student_detail)
         expected = [
             '("applications", "申请材料"',
             '("contracts", "合同"',

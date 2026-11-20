@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from business_changes.case_events import synchronized_case_event_writer
 
 
 def case_row(connection, case_id):
@@ -22,6 +23,7 @@ def list_case_rows(connection, student_id):
     ).fetchall()
 
 
+@synchronized_case_event_writer('progression_cases','progression_case_events')
 def append_event(
     connection, *, case_id, event_type, actor_user_id, created_at,
     entity_type=None, entity_id=None, old_value=None, new_value=None,

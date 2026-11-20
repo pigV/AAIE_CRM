@@ -125,13 +125,13 @@ class RuntimeControllerTests(unittest.TestCase):
                 stack.enter_context(patch.object(control,name,return_value=value))
             stack.enter_context(patch.object(control.ManagedRuntime,"from_configuration"))
             stack.enter_context(patch.object(control.school_map_tile_control,"start"))
-            builder=stack.enter_context(patch.object(control.build_document_ocr,"build"))
+            worker=stack.enter_context(patch.object(control,"run_startup_worker",side_effect=[{"ready":True},{"prepared":True},{"ready":False}]))
             stack.enter_context(patch.object(control,"runtime_file"))
             stack.enter_context(patch.object(control.subprocess,"Popen",return_value=child))
             cleanup=stack.enter_context(patch.object(control,"cleanup_started",return_value=[]))
             with self.assertRaises(control.RuntimeControlError):
                 control.start(self.cfg)
-            builder.assert_called_once_with(data_root=self.cfg.root, source_root=self.cfg.source_root)
+            self.assertEqual(["preflight","ocr","final_status"],[call.args[1] for call in worker.call_args_list])
             cleanup.assert_called_once()
 
 

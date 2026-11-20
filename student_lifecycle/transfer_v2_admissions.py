@@ -4,9 +4,10 @@ from contextlib import closing
 from dataclasses import dataclass
 import json
 from pathlib import Path
+from business_changes.transfer import record_transfer_change
 import sqlite3
 from typing import Callable
-from uuid import uuid4
+from business_changes.identities import stable_command_identity,find_command_identity
 
 from workflow_offer_events import (
     WorkflowEventConflictError,
@@ -70,7 +71,7 @@ class TransferV2CoeConfirmation:
 
 
 def _default_uid(prefix: str) -> str:
-    return f"{prefix}:{uuid4().hex}"
+    return stable_command_identity(prefix)
 
 
 class TransferV2AdmissionsService:
@@ -200,10 +201,8 @@ class TransferV2AdmissionsService:
         command_type: str,
         payload_json: str,
     ) -> sqlite3.Row | None:
-        row = connection.execute(
-            "SELECT * FROM transfer_v2_command_receipts WHERE event_uid=?",
-            (event_uid,),
-        ).fetchone()
+        row = find_command_identity(connection,'transfer_v2_command_receipts','event_uid',event_uid,
+            conflict_error=TransferV2AdmissionsValidationError)
         if row is None:
             return None
         if row["command_type"] != command_type or row["request_json"] != payload_json:
@@ -242,6 +241,8 @@ class TransferV2AdmissionsService:
                 timestamp,
             ),
         )
+        record_transfer_change(connection,event_type='transfer.admissions_changed',cycle_id=cycle_id,
+            actor_user_id=actor_user_id,idempotency_key=event_uid,stamp=timestamp)
 
     @staticmethod
     def _offer_state_from_row(row: sqlite3.Row) -> TransferV2OfferState:

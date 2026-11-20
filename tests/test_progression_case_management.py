@@ -1987,7 +1987,7 @@ class ProgressionRouteTests(ProgressionServiceTests):
         )
         with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute(
-                """CREATE TABLE audit_logs(
+                """CREATE TABLE IF NOT EXISTS audit_logs(
                     id INTEGER PRIMARY KEY,user_id INTEGER,username TEXT,
                     action_type TEXT,module_name TEXT,module_key TEXT,
                     record_id TEXT,file_path TEXT,old_value TEXT,new_value TEXT,

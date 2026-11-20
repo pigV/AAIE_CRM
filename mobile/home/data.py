@@ -120,17 +120,26 @@ def _reminders(db, user: dict, can_access: Callable) -> tuple[ReminderSummary, .
     )
 
 
-def _stage_summaries(db, load_stages: Callable) -> tuple[StageSummary, ...]:
-    connection = db.connect()
+def _stage_summaries(db, load_stages: Callable, *, connection=None, cycles_only=False) -> tuple[StageSummary, ...]:
+    owned = connection is None
+    connection = db.connect() if owned else connection
     try:
         definitions = application_stage_definitions_for_connection(connection)
-        students: Iterable = load_stages(connection)
+        students: Iterable = tuple(load_stages(connection, cycles_only=True) if cycles_only else load_stages(connection))
     except Exception:
+        if not owned:raise
         return ()
     finally:
         release = getattr(db, "_release_connection", None) or getattr(db, "release", None)
-        if release:
+        if owned and release:
             release(connection)
+    if cycles_only:
+        # Keep actionable states returned by the shared classifier, including
+        # review states added after the original Mobile stage definitions.
+        known={key for key,_ in definitions}
+        definitions=tuple(definitions)+tuple(dict.fromkeys(
+            (str(student.stage.key),str(student.stage.label)) for student in students
+            if student.stage.key and student.stage.key not in known))
     counts = {key: 0 for key, _label in definitions}
     for student in students:
         key = str(student.stage.key or "")
@@ -156,9 +165,9 @@ def _document_shortcuts(user: dict, can_access: Callable) -> tuple[DocumentShort
     )
 
 
-def load_mobile_home_data(db, user: dict, can_access: Callable, load_stages: Callable) -> MobileHomeData:
+def load_mobile_home_data(db, user: dict, can_access: Callable, load_stages: Callable, *, connection=None, cycles_only=False) -> MobileHomeData:
     return MobileHomeData(
         reminders=_reminders(db, user, can_access),
-        stages=_stage_summaries(db, load_stages) if can_access(user, "students") else (),
+        stages=_stage_summaries(db, load_stages, connection=connection, cycles_only=cycles_only) if can_access(user, "students") else (),
         documents=_document_shortcuts(user, can_access),
     )

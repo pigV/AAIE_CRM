@@ -23,7 +23,37 @@ def _columns(conn, table):
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def _load_higher_education_facts(conn,ids,state):
+    from business_changes.runtime import enabled
+    if not enabled(conn) or 'education_stream' not in _columns(conn,'application_cycles'):return
+    marks=_placeholders(ids)
+    rows=conn.execute(f'''SELECT id,cycle_type FROM application_cycles
+        WHERE id IN ({marks}) AND education_stream='higher_education' ''',ids).fetchall()
+    if not rows:return
+    higher_ids=tuple(int(row[0]) for row in rows);higher_marks=_placeholders(higher_ids)
+    for cycle_id,cycle_type in rows:
+        values=state[int(cycle_id)]
+        values['education_stream']='higher_education'
+        # Progression retains its explicit business classification/contract gate.
+        if cycle_type=='initial':values['contract_gate_status']='not_required'
+        values.update(plan_exists=False,plan_sent=False,plan_confirmed=False,submitted_application_count=0)
+    if _columns(conn,'higher_education_plans') and _columns(conn,'higher_education_plan_items'):
+        for cycle_id,exists,has_items,confirmed in conn.execute(f'''SELECT p.application_cycle_id,
+            count(DISTINCT p.id),count(i.id),max(CASE WHEN p.status IN ('Confirmed','Converted') THEN 1 ELSE 0 END)
+            FROM higher_education_plans p LEFT JOIN higher_education_plan_items i ON i.plan_id=p.id
+            WHERE p.application_cycle_id IN ({higher_marks}) AND p.status IN ('Draft','Confirmed','Converted')
+            GROUP BY p.application_cycle_id''',higher_ids):
+            state[int(cycle_id)].update(plan_exists=bool(exists),plan_sent=bool(has_items),plan_confirmed=bool(confirmed))
+    if _columns(conn,'higher_education_applications'):
+        for cycle_id,count in conn.execute(f'''SELECT application_cycle_id,count(*) FROM higher_education_applications
+            WHERE application_cycle_id IN ({higher_marks}) AND is_current=1
+            AND lower(status) NOT IN ('draft','withdrawn') GROUP BY application_cycle_id''',higher_ids):
+            state[int(cycle_id)]['submitted_application_count']=int(count)
+
+
 def _load_student_visa_facts(conn, ids, state):
+    from business_changes.runtime import enabled
+    unified_visa = enabled(conn)
     marks = _placeholders(ids)
     columns = _columns(conn, "visa_cases")
     decisions = {
@@ -51,12 +81,16 @@ def _load_student_visa_facts(conn, ids, state):
         case = dict(zip(keys, row))
         cycle_id = case["application_cycle_id"]
         if (str(case["student_id"]) != state[cycle_id]["student_id"] or case.get("archived_at")
-                or str(case.get("status") or "").strip().lower() in {"draft", "withdrawn", "cancelled"}
+                or (not unified_visa and str(case.get("status") or "").strip().lower() in {"draft", "withdrawn", "cancelled"})
                 or not is_student_visa_case(case)):
             continue
         case_id = case["id"]
         decision = decisions.get((cycle_id, case_id))
         result, source_event = current.get(case_id, (None, None))
+        if unified_visa:
+            from visa_business_state import resolve_case_state
+            authority = resolve_case_state(conn,case)
+            result, source_event = authority['result'], authority['source_event_id']
         if result is not None:
             decision = {"Granted": "grant", "Refused": "refusal"}.get(result)
         case.update(effective_result=result, source_event_id=source_event)
@@ -70,6 +104,8 @@ def _load_student_visa_facts(conn, ids, state):
             or bool(case.get("lodgement_recorded_at") and
                     (case.get("lodged_by_user_id") or str(case.get("lodged_by_name") or "").strip()))
         )
+        if unified_visa:
+            lodged = authority['formally_lodged']
         if not (lodged or decision):
             continue
         # A new draft must not displace the student's latest evidenced application.
@@ -465,6 +501,7 @@ def load_workflow_facts(
                 values["final_school_coe_confirmed"] = True
                 values["final_school_coe_issue"] = None
 
+    _load_higher_education_facts(conn, ids, state)
     _load_student_visa_facts(conn, ids, state)
 
     return {cycle_id: WorkflowFacts(**values) for cycle_id, values in state.items()}

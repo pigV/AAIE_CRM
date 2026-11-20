@@ -250,6 +250,7 @@
 
   const initDynamicPanel = (root = document) => {
     hydrateLazyImages(root);
+    if (typeof initStudentNameSearch === "function") initStudentNameSearch(root);
     if (typeof initDateInputMasks === "function") initDateInputMasks(root);
     if (typeof initOfferPanel === "function") initOfferPanel(root);
     if (typeof initStudentDetailAjaxForms === "function") initStudentDetailAjaxForms(root);
@@ -258,6 +259,10 @@
     if (typeof initContractTypeForms === "function") initContractTypeForms(root);
     if (typeof initTransferSchoolPickers === "function") initTransferSchoolPickers(root);
   };
+  document.addEventListener('aaie:business-fragment-rendered', event => {
+    const root = event.detail && event.detail.root;
+    if (root && root.isConnected) initDynamicPanel(root);
+  });
 
   const fetchLazyTabPanel = async (panel) => {
     const response = await fetch(panel.dataset.lazyTabUrl, {
@@ -273,6 +278,7 @@
     panel.innerHTML = await fetchLazyTabPanel(panel);
     panel.dataset.lazyTabLoaded = "true";
     initDynamicPanel(panel);
+    document.dispatchEvent(new CustomEvent('aaie:business-fragments-ready'));
   };
 
   const refreshLazyTabPanel = async (panel) => {
@@ -320,6 +326,7 @@
       }
       buttons.forEach((button) => button.classList.toggle("active", button.dataset.tab === name));
       panels.forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === name));
+      document.dispatchEvent(new CustomEvent('aaie:business-fragments-ready'));
       panels.filter((panel) => panel.dataset.panel === name).forEach((panel) => loadLazyTabPanel(panel));
       if (updateUrl) {
         const url = new URL(window.location.href);
@@ -521,13 +528,16 @@
     input.addEventListener("change", openSelectedSchool);
   });
 
-  qa("[data-student-name-search]").forEach((input) => {
+  const initStudentNameSearch = (root = document) => {
+  qa("[data-student-name-search]", root).forEach((input) => {
+    if (input.dataset.studentSearchBound === "1") return;
     const form = input.closest("form");
     const sourceId = input.dataset.studentSuggestionsId || "";
     const source = sourceId ? document.getElementById(sourceId) : null;
     const field = input.closest(".filter-search-field") || input.parentElement;
     const suggestionsRoot = field ? q("[data-student-search-suggestions]", field) : null;
     if (!form || !source || !suggestionsRoot) return;
+    input.dataset.studentSearchBound = "1";
     let suggestions = [];
     try {
       suggestions = JSON.parse(source.textContent || "[]");
@@ -625,11 +635,13 @@
       event.preventDefault();
       submitSelectedStudent(visibleSuggestions[Number(button.dataset.studentSuggestionIndex)]);
     });
-    document.addEventListener("click", (event) => {
-      if (field && !field.contains(event.target)) closeSuggestions();
+    field.addEventListener("focusout", (event) => {
+      if (!field.contains(event.relatedTarget)) closeSuggestions();
     });
     closeSuggestions();
   });
+  };
+  initStudentNameSearch(document);
 
   qa("[data-school-radius-name-input]").forEach((input) => {
     const form = input.closest("form");
@@ -2965,11 +2977,26 @@
     select.addEventListener("change", () => updateExtractionReview(select));
   });
 
+  const businessFormStamp = data => JSON.stringify(Array.from(data, ([key, value]) => [key,
+    typeof value === 'string' ? value : [value.name, value.size, value.lastModified]]));
+  const acceptBusinessReceipt = (form, submittedStamp, data) => {
+    if (!data.business_receipt) return;
+    const unchanged = businessFormStamp(new FormData(form)) === submittedStamp;
+    for (const key of ['business_command_key', 'business_expected_version']) {
+      const field = form.querySelector(`[name="${key}"]`), value = data.business_receipt[key];
+      if (field && typeof value === 'string') field.value = value;
+    }
+    if (unchanged) delete form.dataset.businessSyncDirty;
+    window.dispatchEvent(new CustomEvent('aaie:business-change'));
+  };
+
   const saveOfferForm = async (form) => {
     if (typeof form.reportValidity === "function" && !form.reportValidity()) return false;
+    const submittedData = new FormData(form);
+    const submittedStamp = businessFormStamp(submittedData);
     const row = form.closest(".student-file-record") || form.closest("tr") || document;
     const status = row.querySelector("[data-save-status]");
-    const button = document.querySelector(`[form="${CSS.escape(form.id)}"]`) || form.querySelector('button[type="submit"], button:not([type])');
+    const button = document.querySelector(`button[form="${CSS.escape(form.id)}"]`) || form.querySelector('button[type="submit"], button:not([type])');
     const originalText = button?.textContent || "保存";
     if (status) status.textContent = "保存中...";
     if (button) {
@@ -2979,7 +3006,7 @@
     try {
       const response = await fetch(form.action, {
         method: "POST",
-        body: new FormData(form),
+        body: submittedData,
         credentials: "same-origin",
         headers: {
           "Accept": "application/json",
@@ -2990,6 +3017,7 @@
       if (!response.ok || data.ok === false) {
         throw new Error(data.error || data.message || "保存失败");
       }
+      acceptBusinessReceipt(form, submittedStamp, data);
       if (status) status.textContent = "已保存";
       row.classList.add("row-saved");
       setTimeout(() => {
@@ -3136,6 +3164,7 @@
 
   const saveStudentDetailAjaxForm = async (form) => {
     if (typeof form.reportValidity === "function" && !form.reportValidity()) return false;
+    const submittedData = new FormData(form), submittedStamp = businessFormStamp(submittedData);
     const panel = form.closest("[data-panel]");
     const status = q("[data-save-status]", form) || q("[data-save-status]", form.closest(".student-file-record") || form);
     const submitter = document.activeElement?.closest?.("button");
@@ -3151,7 +3180,7 @@
     try {
       const response = await fetch(form.action, {
         method: "POST",
-        body: new FormData(form),
+        body: submittedData,
         credentials: "same-origin",
         headers: {
           "Accept": "application/json",
@@ -3162,6 +3191,7 @@
       if (!response.ok || data.ok === false) {
         throw new Error(data.error || data.message || "保存失败");
       }
+      acceptBusinessReceipt(form, submittedStamp, data);
       if (status) status.textContent = "已保存";
       if (data.message) showCrmToast({ kind: "success", title: "保存成功", message: data.message });
       form.closest("dialog")?.close();

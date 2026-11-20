@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import sqlite3
+from business_changes.offers import synchronized_offer_write
 
 
 class WorkflowEventError(RuntimeError):
@@ -172,6 +173,7 @@ def resolve_offer_received_identity(
     return existing
 
 
+@synchronized_offer_write
 def record_offer_received(
     conn: sqlite3.Connection,
     application_cycle_id: int,
@@ -313,6 +315,7 @@ def _acceptance(row) -> FinalAcceptance:
     )
 
 
+@synchronized_offer_write
 def select_final_acceptance(
     conn: sqlite3.Connection,
     application_cycle_id: int,
@@ -427,6 +430,7 @@ def _offer_state_event(row) -> OfferStateEvent:
     )
 
 
+@synchronized_offer_write
 def record_offer_state(
     conn: sqlite3.Connection,
     offer_received_event_id: int,
@@ -543,6 +547,7 @@ def _append_acceptance_history(
     )
 
 
+@synchronized_offer_write
 def withdraw_final_acceptance(
     conn: sqlite3.Connection,
     application_cycle_id: int,
@@ -576,6 +581,7 @@ def withdraw_final_acceptance(
     )
 
 
+@synchronized_offer_write
 def change_final_acceptance(
     conn: sqlite3.Connection,
     application_cycle_id: int,
@@ -685,6 +691,7 @@ FROM final_school_submission_events
 """
 
 
+@synchronized_offer_write
 def record_final_school_submission(
     conn: sqlite3.Connection,
     final_acceptance_id: int,

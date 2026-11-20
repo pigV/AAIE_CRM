@@ -116,13 +116,14 @@ class RevenueRepository:
             result_json = canonical_json(result)
             aggregate_uid = result.get("uid") or result.get("aggregate_uid")
             occurred_at = self.now()
+            receipt_uid = new_uid("idem")
             self.connection.execute(
                 """INSERT INTO revenue_idempotency_receipts(
                      uid,idempotency_key,command_type,aggregate_type,aggregate_uid,
                      request_hash,result_json,actor_user_id,occurred_at
                    ) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (
-                    new_uid("idem"), key, command_type, aggregate_type, aggregate_uid,
+                    receipt_uid, key, command_type, aggregate_type, aggregate_uid,
                     request_hash, result_json, actor_user_id, occurred_at,
                 ),
             )
@@ -144,6 +145,8 @@ class RevenueRepository:
                     command_type, result_json, occurred_at,
                 ),
             )
+            from business_changes.revenue import publish_revenue_receipt
+            publish_revenue_receipt(self.connection,receipt_uid)
             return result
 
     def get_by_uid(self, table: str, uid: str) -> dict | None:

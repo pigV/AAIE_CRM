@@ -1,6 +1,8 @@
 """Explicit, sandboxed Admin/Parent lifecycle for separated code and data."""
 import argparse
 from contextlib import contextmanager
+from contextvars import ContextVar
+import math
 import fcntl
 import json
 import os
@@ -32,11 +34,128 @@ from school_report_browser import sandbox_rules as school_report_browser_sandbox
 PYTHON = "/Users/faqiang/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
 ROLES = ("admin", "parent")
 SERVICE_STARTUP_TIMEOUT = 60
+TOTAL_STARTUP_TIMEOUT = 900
+STARTUP_CLEANUP_TIMEOUT = 30
+_STARTUP_BUDGET = ContextVar("runtime_startup_budget", default=None)
 HEALTH_REQUEST_TIMEOUT = 2
 
 
 class RuntimeControlError(RuntimeError):
     pass
+
+
+class StartupBudget:
+    """One monotonic budget shared by all phases; cleanup has a separate grace."""
+    def __init__(self, timeout):
+        if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+            raise RuntimeControlError("A finite positive startup timeout is required")
+        self.timeout = timeout
+        self.started = time.monotonic()
+        self.deadline = self.started + timeout
+        self.current_phase = "startup"
+        self.phases = []
+
+    def remaining(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeControlError(
+                f"{self.current_phase} total startup timeout after {self.timeout}s"
+            )
+        return remaining
+
+    @contextmanager
+    def phase(self, name):
+        self.current_phase = name
+        started = time.monotonic()
+        print(json.dumps({"startup_phase": name, "event": "started",
+                          "elapsed_seconds": round(started-self.started, 3),
+                          "remaining_seconds": round(self.remaining(), 3)}), file=sys.stderr, flush=True)
+        completed = False
+        try:
+            yield
+            self.remaining()
+            completed = True
+        finally:
+            elapsed = time.monotonic()-started
+            outcome = "completed" if completed else "failed"
+            self.phases.append({"phase":name,"elapsed_seconds":round(elapsed,3),"outcome":outcome})
+            print(json.dumps({"startup_phase":name,"event":outcome,
+                              "elapsed_seconds":round(elapsed,3)}), file=sys.stderr, flush=True)
+
+
+def bounded_timeout(cap):
+    budget = _STARTUP_BUDGET.get()
+    return min(cap, budget.remaining()) if budget is not None else cap
+
+
+@contextmanager
+def startup_cleanup_budget():
+    budget = StartupBudget(STARTUP_CLEANUP_TIMEOUT)
+    budget.current_phase = "startup cleanup"
+    token = _STARTUP_BUDGET.set(budget)
+    try:
+        yield
+    finally:
+        _STARTUP_BUDGET.reset(token)
+
+
+def startup_worker_command(config, phase):
+    command = [PYTHON, "-B", str(config.source_root/"tools/runtime_startup_worker.py"),
+               "--config",str(config.path),"--phase",phase,"--config-sha256",config.config_sha256]
+    if config.mode == "production":
+        command.append("--allow-production-control")
+    return command
+
+
+def run_startup_worker(config, phase, *, timeout):
+    """Bound SQLite/native work without changing global migration semantics.
+
+    The fresh worker owns one session. Compiler descendants stay in that group;
+    only this Popen-owned group may be signalled after an expired phase.
+    """
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise RuntimeControlError(f"{phase} total startup timeout")
+    deadline = time.monotonic()+timeout
+    command = startup_worker_command(config,phase)
+    proc = subprocess.Popen(command,cwd=config.source_root,
+        env={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin", "PYTHONDONTWRITEBYTECODE":"1", "PYTHONNOUSERSITE":"1"},
+        stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+        text=True,start_new_session=True)
+    try:
+        stdout,stderr = proc.communicate(timeout=max(.001,deadline-time.monotonic()))
+    except BaseException as exc:
+        # A live Popen child cannot be a reused PID. Verify its session group
+        # before signalling; no saved or user-supplied PID is trusted here.
+        with startup_cleanup_budget():
+            if proc.poll() is None:
+                if os.getpgid(proc.pid) != proc.pid:
+                    raise RuntimeControlError(f"{phase} worker group identity mismatch; no signal sent") from exc
+                os.killpg(proc.pid,signal.SIGTERM)
+                try:
+                    proc.communicate(timeout=bounded_timeout(1))
+                except subprocess.TimeoutExpired:
+                    pass
+            # A compiler may close the worker's pipes and ignore TERM after
+            # the leader exits. The still-live group retains this owned PGID.
+            if process_group_alive(proc.pid):
+                os.killpg(proc.pid,signal.SIGKILL)
+            proc.communicate(timeout=bounded_timeout(1))
+            if process_group_alive(proc.pid):
+                raise RuntimeControlError(f"{phase} worker cleanup incomplete") from exc
+        if isinstance(exc,subprocess.TimeoutExpired):
+            raise RuntimeControlError(f"{phase} worker timeout after {timeout}s") from exc
+        raise
+    if time.monotonic() >= deadline:
+        raise RuntimeControlError(f"{phase} worker timeout after {timeout}s")
+    if proc.returncode:
+        raise RuntimeControlError(f"{phase} worker failed; complete validation did not pass")
+    try:
+        result=json.loads(stdout)
+    except (ValueError,TypeError):
+        raise RuntimeControlError(f"{phase} worker returned an invalid result") from None
+    if not isinstance(result,dict):
+        raise RuntimeControlError(f"{phase} worker returned an invalid result")
+    return result
 
 
 def require_control_authority(config, allow_production):
@@ -88,7 +207,7 @@ def validate_process_identity(config, role, record, observed, started):
 
 def observe(pid, column):
     result = subprocess.run(["/bin/ps", "-ww", "-p", str(pid), "-o", column + "="],
-                            capture_output=True, text=True, check=False)
+                            capture_output=True, text=True, check=False, timeout=bounded_timeout(5))
     if result.returncode and (result.returncode != 1 or result.stderr.strip()):
         raise RuntimeControlError("Process inspection failed; no lifecycle action permitted")
     return result.stdout.strip()
@@ -179,21 +298,22 @@ def start_managed_map(adapter):
             if proc.poll() is not None:
                 raise RuntimeControlError("Map exited; inspect runtime map log")
             try:
-                if school_map_tile_control.health(adapter).get("pid") != proc.pid:
+                if school_map_tile_control.health(adapter, timeout=bounded_timeout(3)).get("pid") != proc.pid:
                     raise RuntimeControlError("Map listener PID mismatch")
                 return
             except (OSError, ValueError):
-                time.sleep(.15)
+                time.sleep(bounded_timeout(.15))
         raise RuntimeControlError("Map startup timed out")
     except BaseException as exc:
-        errors = cleanup_started(config, [("map", proc)], False, adapter)
+        with startup_cleanup_budget():
+            errors = cleanup_started(config, [("map", proc)], False, adapter)
         if errors:
             raise RuntimeControlError("Map startup cleanup incomplete:" + ",".join(errors)) from exc
         raise
 
 
 def process_group_alive(pgid):
-    result = subprocess.run(["/bin/ps", "-axo", "pgid=,stat="], capture_output=True, text=True)
+    result = subprocess.run(["/bin/ps", "-axo", "pgid=,stat="], capture_output=True, text=True, timeout=bounded_timeout(5))
     if result.returncode:
         raise RuntimeControlError("Process group inspection failed")
     return any(len(parts := line.split()) == 2 and parts[0] == str(pgid)
@@ -212,7 +332,7 @@ def cleanup_started(config, processes, map_started, adapter, *, process_groups=F
                     os.killpg(proc.pid, signal.SIGTERM)
                 else:
                     proc.terminate()
-                proc.wait(timeout=5)
+                proc.wait(timeout=bounded_timeout(5))
             if process_groups:
                 for _ in range(50):
                     if not process_group_alive(proc.pid):
@@ -443,7 +563,7 @@ def lifecycle_lock(config):
 def health(config, role, pid, *, timeout=HEALTH_REQUEST_TIMEOUT):
     port = config.admin_port if role == "admin" else config.parent_port
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(f"http://127.0.0.1:{port}/health", timeout=timeout) as response:
+    with opener.open(f"http://127.0.0.1:{port}/health", timeout=bounded_timeout(timeout)) as response:
         value = json.load(response)
     expected = {"status": "ok", "environment": config.mode, "service": role, "port": port,
                 "pid": pid, "database_path": str(config.db),
@@ -519,60 +639,67 @@ def stop_one(config, role, *, process_group=False):
     raise RuntimeControlError("Service did not stop; no force kill")
 
 
-def start(config):
-    require_gate(config)
-    result = preflight(config, check_ports=True, owned_ports_only=True)
-    if not result["ready"]:
-        raise RuntimeControlError("runtime_not_ready:" + ",".join(result["errors"]))
-    adapter = ManagedRuntime.from_configuration(config)
-    if any(state_path(config, role).exists() for role in ROLES):
-        raise RuntimeControlError("Saved PID state exists; inspect status before start")
-    if canonical(config.root / "map_tile_service/pid.json").exists():
-        raise RuntimeControlError("Saved map helper state exists; inspect before start")
-    # Managed uploads never compile Swift inside the service sandbox.
-    # Prepare the exact helper before starting any managed child.
-    try:
-        build_document_ocr.build(data_root=config.root, source_root=config.source_root)
-    except RuntimeError as exc:
-        raise RuntimeControlError(str(exc)) from exc
-    profiles = {}
-    for role in ROLES:
-        name = "runtime-admin.sb" if role == "admin" else "runtime.sb"
-        profile = canonical(config.root / "config" / name)
-        with runtime_file(config, profile, "w") as stream:
-            stream.write(sandbox_profile(config, allow_school_radius=role == "admin"))
-        profiles[role] = profile
+def start(config, *, timeout=TOTAL_STARTUP_TIMEOUT):
+    budget = StartupBudget(timeout)
+    token = _STARTUP_BUDGET.set(budget)
     started_processes = []
     map_started = False
+    adapter = None
     try:
-        school_map_tile_control.start(adapter)
-        map_started = True
+        with budget.phase("preflight"):
+            result = run_startup_worker(config,"preflight",timeout=budget.remaining())
+            if not result["ready"]:
+                raise RuntimeControlError("runtime_not_ready:" + ",".join(result["errors"]))
+        adapter = ManagedRuntime.from_configuration(config)
+        if any(state_path(config, role).exists() for role in ROLES):
+            raise RuntimeControlError("Saved PID state exists; inspect status before start")
+        if canonical(config.root / "map_tile_service/pid.json").exists():
+            raise RuntimeControlError("Saved map helper state exists; inspect before start")
+        with budget.phase("ocr"):
+            run_startup_worker(config,"ocr",timeout=budget.remaining())
+        profiles = {}
+        with budget.phase("sandbox_profiles"):
+            for role in ROLES:
+                name = "runtime-admin.sb" if role == "admin" else "runtime.sb"
+                profile = canonical(config.root / "config" / name)
+                with runtime_file(config, profile, "w") as stream:
+                    stream.write(sandbox_profile(config, allow_school_radius=role == "admin"))
+                profiles[role] = profile
+        with budget.phase("map"):
+            school_map_tile_control.start(adapter)
+            map_started = True
         for role in ROLES:
-            config.check_current()
-            with runtime_file(config, config.root / f"logs/{role}.log", "ab") as log:
-                proc = subprocess.Popen(
-                    ["/usr/bin/sandbox-exec", "-f", str(profiles[role]), *process_command(config, role)],
-                    cwd=config.source_root, env=environment(config, allow_school_radius=role == "admin"),
-                    stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-            # Popen owns this child. Cleanup below never trusts a PID file.
-            started_processes.append((role, proc))
-            birth = observe(proc.pid, "lstart")
-            if not birth:
-                raise RuntimeControlError(f"{role} exited; inspect its runtime log")
-            record = dict(pid=proc.pid, started=birth, role=role,
-                          config_sha256=config.config_sha256, data_root=str(config.root))
-            with runtime_file(config, state_path(config, role), "x") as state:
-                json.dump(record, state)
-            wait_for_service_health(config, role, proc, timeout=SERVICE_STARTUP_TIMEOUT)
-        result = status(config)
-        if not result["ready"]:
-            raise RuntimeControlError("Final service health failed")
+            with budget.phase(role):
+                config.check_current()
+                with runtime_file(config, config.root / f"logs/{role}.log", "ab") as log:
+                    proc = subprocess.Popen(
+                        ["/usr/bin/sandbox-exec", "-f", str(profiles[role]), *process_command(config, role)],
+                        cwd=config.source_root, env=environment(config, allow_school_radius=role == "admin"),
+                        stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+                started_processes.append((role, proc))
+                birth = observe(proc.pid, "lstart")
+                if not birth:
+                    raise RuntimeControlError(f"{role} exited; inspect its runtime log")
+                record = dict(pid=proc.pid, started=birth, role=role,
+                              config_sha256=config.config_sha256, data_root=str(config.root))
+                with runtime_file(config, state_path(config, role), "x") as state:
+                    json.dump(record, state)
+                wait_for_service_health(config, role, proc, timeout=budget.remaining())
+        with budget.phase("final_status"):
+            result = run_startup_worker(config,"final_status",timeout=budget.remaining())
+            if not result["ready"]:
+                raise RuntimeControlError("Final service health failed")
+        result["startup"] = {"total_budget_seconds":timeout,
+            "elapsed_seconds":round(time.monotonic()-budget.started,3),"phases":budget.phases}
         return result
     except BaseException as exc:
-        errors = cleanup_started(config, started_processes, map_started, adapter)
+        with startup_cleanup_budget():
+            errors = cleanup_started(config, started_processes, map_started, adapter)
         if errors:
             raise RuntimeControlError("Startup cleanup incomplete:" + ",".join(errors)) from exc
         raise
+    finally:
+        _STARTUP_BUDGET.reset(token)
 
 
 def stop(config):

@@ -68,3 +68,17 @@ def read_legacy_letter_text(path,pdf_reader):
         raise ValueError('Use a readable PDF or UTF-8 text letter for deterministic extraction.')
     except (PdfReadError,OSError,UnicodeError) as exc:
         raise ValueError('The source letter cannot be read. Review the original file before extraction.') from exc
+
+
+def read_legacy_letter_bytes(filename,data,pdf_reader):
+    """Equivalent deterministic extraction from already authorized upload bytes."""
+    from io import BytesIO
+    from pypdf.errors import PdfReadError
+    if not isinstance(data,bytes):raise ValueError('Source letter bytes are required.')
+    try:
+        suffix=Path(filename).suffix.lower()
+        if suffix=='.pdf':return '\n'.join(page.extract_text() or '' for page in pdf_reader(BytesIO(data)).pages)
+        if suffix=='.txt':return data.decode('utf-8')
+        raise ValueError('Use a readable PDF or UTF-8 text letter for deterministic extraction.')
+    except (PdfReadError,OSError,UnicodeError) as exc:
+        raise ValueError('The source letter cannot be read. Review the original file before extraction.') from exc

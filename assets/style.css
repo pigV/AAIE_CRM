@@ -12208,3 +12208,8 @@ body.backup-running .backup-control-card.is-backup-running .backup-control-panel
   display: block; width: 100%; max-width: 520px; height: auto; margin-inline: auto;
 }
 .school-radius-search-page .school-radius-leaflet-map[hidden] { display: none; }
+
+/* Keep the list's draft action hidden until a pending edit needs it. */
+.business-sync-toolbar [data-business-sync-discard-current][hidden] {
+  display: none !important;
+}

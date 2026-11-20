@@ -31,6 +31,8 @@ def is_student_visa_case(case):
 
 def load_student_visa_grant_records(conn: sqlite3.Connection, *, today: date):
     """Return qualifying grant records for each Melbourne date window."""
+    from business_changes.runtime import enabled
+    unified_visa = enabled(conn)
     present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     students = {str(row["student_id"]) for row in _rows(conn, "SELECT * FROM students")
                 if not row.get("deleted_at")}
@@ -62,6 +64,11 @@ def load_student_visa_grant_records(conn: sqlite3.Connection, *, today: date):
         cycle_id = case.get("application_cycle_id")
         if cycle_id is not None and cycle_students.get(cycle_id) != student_id:
             continue
+        if unified_visa:
+            from visa_business_state import resolve_case_state
+            authority = resolve_case_state(conn,case)
+            if authority['status']!='granted':
+                continue
         owned_events = [event for event in events.get(case["id"], ())
                         if str(event.get("student_id") or "") == student_id
                         and event.get("application_cycle_id") == case.get("application_cycle_id")]
@@ -69,7 +76,9 @@ def load_student_visa_grant_records(conn: sqlite3.Connection, *, today: date):
             continue
         grant_dates = [event.get(date_column) for event in owned_events
                        if event["decision_type"] == "grant"]
-        if (has_material_projection and not case.get("archived_at")
+        if unified_visa:
+            grant_dates = [authority['grant_date']] if authority['grant_date'] else []
+        if (not unified_visa and has_material_projection and not case.get("archived_at")
                 and case["id"] not in retained_refusals
                 and (grant_dates or case["id"] not in current_refusals)):
             # Reuse the case page authority/date rules using saved proposals and

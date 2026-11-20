@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from html import escape
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 import sqlite3
 
 from revenue.read_models import RevenueReadModels, exception_code_label
@@ -1145,6 +1145,9 @@ def render_school_claim_candidates(schools, school_id, rows, csrf, *, selection=
 def render_school_claim_draft(batch, draft, csrf, token, *, simulation=True, allow_issue=False):
     from revenue.school_invoice_views import render_school_invoice_preview
 
+    composer_href = "/revenue/school-commission-invoices?" + urlencode({
+        "entity_id": draft["entity_id"], "claims": ",".join(draft["claim_uids"]),
+    })
     previews = ""
     if len(batch["claims"]) > 1:
         previews = "".join(
@@ -1160,6 +1163,7 @@ def render_school_claim_draft(batch, draft, csrf, token, *, simulation=True, all
       {render_school_invoice_preview(draft, csrf, token, simulation=simulation, allow_issue=allow_issue)}
       <section class="revenue-panel">
         {previews}
+        <a class="button-link primary" href="{escape(composer_href, quote=True)}">继续编辑 Invoice / 加手工明细</a>
         <a href="/revenue/school-commission-candidates?school_id={int(batch["school_id"])}">返回学校清单</a>
       </section></main>"""
 
@@ -1841,15 +1845,15 @@ def render_revenue_workspace(
             f'<a class="revenue-secondary-link" href="{escape(href, quote=True)}">{escape(label)}</a>'
             for label, href in data["school_contract_links"]
         )
-    invoice_href = data.get("school_invoice_href")
-    if invoice_href and not mobile:
-        school_contract_button += (
-            f'<a class="revenue-primary-link" href="{escape(invoice_href, quote=True)}">开学校 Invoice</a>'
-        )
     template_href = data.get("commission_invoice_template_href")
     template_button = (
         f'<a class="revenue-secondary-link" href="{escape(template_href, quote=True)}">佣金发票模板</a>'
         if template_href and not mobile else ""
+    )
+    invoice_href = data.get("school_invoice_href")
+    invoice_button = (
+        f'<a class="revenue-primary-link" href="{escape(invoice_href, quote=True)}">开学校 Invoice</a>'
+        if invoice_href and not mobile else ""
     )
     system_tools = (
         '<nav class="revenue-panel revenue-system-tools" aria-label="收入与佣金系统设置">'
@@ -1866,7 +1870,7 @@ def render_revenue_workspace(
         <p>统一查看收费与佣金档案、客户收费、直接佣金、一级代理、合同与对账。</p></div>
         <div class="revenue-dashboard-actions">
           <a class="revenue-primary-link" href="{escape(cases_href, quote=True)}">查看收费与佣金档案</a>
-          {school_contract_button}{template_button}
+          {invoice_button}{school_contract_button}{template_button}
         </div>
       </header>
       <section class="revenue-metrics" aria-label="收入与佣金摘要">{metrics}</section>

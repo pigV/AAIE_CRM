@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from business_changes.lifecycle import synchronized_lifecycle_write
 
 from application_cycle import CycleConflictError
 
@@ -18,6 +19,7 @@ from .ports import LifecycleGateway
 from . import repository
 
 
+@synchronized_lifecycle_write
 def start_case_lifecycle(
     connection: sqlite3.Connection,
     gateway: LifecycleGateway,
@@ -130,6 +132,7 @@ def start_case_lifecycle(
     )
 
 
+@synchronized_lifecycle_write
 def create_lifecycle_draft(
     connection: sqlite3.Connection, *, student_id: str, lifecycle_type: str,
     actor_user_id: int, owner_user_id: int, idempotency_key: str,
@@ -191,6 +194,7 @@ def create_lifecycle_draft(
     return result
 
 
+@synchronized_lifecycle_write
 def activate_lifecycle(
     connection: sqlite3.Connection, gateway: LifecycleGateway, *, case_id: int,
     actor_user_id: int, idempotency_key: str, occurred_at: str,
@@ -290,6 +294,7 @@ def activate_lifecycle(
     return result
 
 
+@synchronized_lifecycle_write
 def cancel_lifecycle(
     connection: sqlite3.Connection, gateway: LifecycleGateway, *, case_id: int,
     actor_user_id: int, reason: str, idempotency_key: str, occurred_at: str,
@@ -341,6 +346,7 @@ def cancel_lifecycle(
     return result
 
 
+@synchronized_lifecycle_write
 def complete_operational_case(
     connection: sqlite3.Connection, *, case_id: int, actor_user_id: int,
     idempotency_key: str, occurred_at: str,
@@ -378,6 +384,7 @@ def complete_operational_case(
     return result
 
 
+@synchronized_lifecycle_write
 def close_lifecycle(
     connection: sqlite3.Connection, gateway: LifecycleGateway, *, case_id: int,
     outcome: str, actor_user_id: int, idempotency_key: str, occurred_at: str,

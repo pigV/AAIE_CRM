@@ -11,6 +11,7 @@ from final_school_requirements import load_optional_steps, outstanding_steps
 from security import is_expired
 from visa_dashboard_retry import load_retries, retry_key
 from workflow_facts import load_workflow_facts
+from snapshot_read_cache import memoized_read
 
 
 STAGES = (
@@ -18,6 +19,7 @@ STAGES = (
     ("02_contract_creation", "等待建立合同", "contracts"),
     ("contract_preparation", "准备签署", "contracts"),
     ("03_contract_signature", "等待家长签署", "contracts"),
+    ("waiting_school_plan", "等待制作学校方案", "school_plans"),
     ("06_school_application_submission", "准备学校申请", "school_plans"),
     ("07_school_response", "等待学校发 Offer", "school_plans"),
     ("08_offer_acceptance", "等待家长接受 Offer", "offer"),
@@ -27,12 +29,15 @@ STAGES = (
     ("11_visa_result", "等待签证结果", "visa"),
 )
 
+# Material-integrity issues are shown separately, not as application stages.
+DISTRIBUTION_HIDDEN_STAGES = frozenset({"visa_result_needs_review"})
+
 
 SCHOOL_APPLICATION_CLOSED = "school_application_closed"
 VISA_GRANTED = "visa_granted"
 OFFER_EXPIRED = "offer_expired"
 WAITING_SCHOOL_RESPONSE = {"submitted", "interview", "test", "waiting_list", "additional_documents"}
-PROFILE_ONLY_STAGES = {SCHOOL_APPLICATION_CLOSED, "contract_link_inactive", "waiting_school_plan", OFFER_EXPIRED, VISA_GRANTED}
+PROFILE_ONLY_STAGES = {SCHOOL_APPLICATION_CLOSED, "contract_link_inactive", OFFER_EXPIRED, VISA_GRANTED}
 
 
 # The intake stage precedes the Transfer V2 cycle that will consume the contract.
@@ -60,18 +65,39 @@ STAGE_DETAILS = {
     key: (index, label, destination)
     for index, (key, label, destination) in enumerate(STAGES, 1)
 }
+STAGE_DETAILS["visa_result_needs_review"] = (len(STAGES) + 1, "签证材料需核实", "visa")
 
 
 def held_case_cycles(connection, cycle_ids):
     if not cycle_ids:
         return {}
     marks = ",".join("?" for _ in cycle_ids)
-    return dict(connection.execute(
+    held = dict(connection.execute(
         f"""SELECT cycle.id,detail.status FROM application_cycles cycle JOIN student_cases detail
                  ON detail.id=cycle.source_student_case_id AND detail.student_id=cycle.student_id
               WHERE cycle.id IN ({marks}) AND detail.status IN
                     ('paused','cancelled','failed','archived','completed')""", cycle_ids
     ))
+    # Completing education work does not close its separately owned Visa.
+    # Other terminal/paused Case states and formally closed cycles stay held.
+    from business_changes.runtime import enabled
+    completed=tuple(cycle for cycle,status in held.items() if status=='completed')
+    fields={row[1] for row in connection.execute('PRAGMA table_info(visa_cases)')} if completed else set()
+    if completed and enabled(connection) and {'application_cycle_id','archived_at','student_id'}<=fields:
+        from visa_business_state import resolve_case_state
+        marks=','.join('?' for _ in completed)
+        seen=set()
+        for case in _rows(connection,f"""SELECT visa.* FROM visa_cases visa
+            JOIN application_cycles cycle ON cycle.id=visa.application_cycle_id AND cycle.student_id=visa.student_id
+            WHERE cycle.id IN ({marks}) AND cycle.status='active' AND cycle.cycle_type='progression'
+              AND visa.archived_at IS NULL ORDER BY visa.id DESC""",completed):
+            if not is_student_visa_case(case) or case['application_cycle_id'] in seen:continue
+            seen.add(case['application_cycle_id'])
+            state=resolve_case_state(connection,case)
+            if state['result']=='Pending' and str(case.get('status') or '').strip().lower() not in {
+                    'closed','cancelled','canceled','withdrawn','refused'}:
+                held.pop(case['application_cycle_id'],None)
+    return held
 
 
 def load_confirmed_cycle_stages(connection, projection, *, additional_cycle_ids=()):
@@ -89,7 +115,71 @@ def load_confirmed_cycle_stages(connection, projection, *, additional_cycle_ids=
     visible = load_dashboard_stages(
         connection, tuple(cycle for cycle in cycle_ids if cycle not in transfer_v2_ids and cycle not in held)
     )
+    from business_changes.runtime import enabled
+    if enabled(connection) and cycle_ids:
+        from visa_business_state import visa_consistency_issues
+        owners={row[1] for row in connection.execute('SELECT id,student_id FROM application_cycles WHERE id IN ('
+            +','.join('?' for _ in cycle_ids)+')',cycle_ids) if row[1]}
+        for issue in visa_consistency_issues(connection,student_ids=owners):
+            if issue['cycle_id'] in cycle_ids and issue['cycle_id'] not in held and issue['cycle_id'] not in transfer_v2_ids:
+                visible[issue['cycle_id']]=('visa_result_needs_review',issue['message'])
     return {**visible, **dict.fromkeys(held)}
+
+
+def _received_progression_offer_cycles(connection, cycle_ids, today):
+    """Reviewed owned Offer files count before a pathway is accepted.
+
+    The accepted-pathway bridge deliberately creates its canonical event later.
+    Do not invent event IDs or treat an unbound case label as evidence here.
+    """
+    ids=tuple(sorted(set(int(value) for value in cycle_ids)))
+    if not ids:return frozenset()
+    def load():
+        required={
+            'offers':{'id','student_id','application_cycle_id','school_id','school_name','offer_status','offer_expiry_date','offer_file_path'},
+            'progression_case_offers':{'case_id','target_application_id','existing_offer_id','student_document_id','offer_status','expiry_date','created_by','created_at'},
+            'student_documents':{'id','student_id','document_type','file_path','file_size','is_active','document_status','voided_at'},
+        }
+        for table,fields in required.items():
+            columns=memoized_read(connection,('progression_offer_columns',table),
+                lambda table=table:frozenset(row[1] for row in connection.execute('PRAGMA table_info('+table+')')))
+            if not fields<=columns:return frozenset()
+        marks=','.join('?' for _ in ids)
+        rows=connection.execute(f'''
+            SELECT cycle.id,case_offer.expiry_date,legacy.offer_expiry_date,
+                   legacy.school_id,target.institution_id,legacy.school_name,target.institution_name_snapshot
+              FROM application_cycles cycle
+              JOIN student_cases owned ON owned.id=cycle.source_student_case_id
+                   AND owned.student_id=cycle.student_id AND owned.case_type='progression'
+              JOIN progression_case_offers case_offer ON case_offer.case_id=owned.id
+              JOIN progression_target_applications target ON target.id=case_offer.target_application_id
+                   AND target.case_id=owned.id
+              JOIN offers legacy ON legacy.id=case_offer.existing_offer_id
+                   AND legacy.student_id=cycle.student_id AND legacy.application_cycle_id=cycle.id
+              JOIN student_documents document ON document.id=case_offer.student_document_id
+                   AND document.student_id=cycle.student_id
+             WHERE cycle.id IN ({marks}) AND cycle.cycle_type='progression' AND cycle.status='active'
+               AND lower(case_offer.offer_status) IN ('received','accepted')
+               AND case_offer.created_by IS NOT NULL AND trim(coalesce(case_offer.created_at,''))<>''
+               AND lower(trim(coalesce(legacy.offer_status,''))) NOT IN
+                   ('void','voided','cancelled','canceled','rejected','declined','withdrawn','superseded','expired','invalid_record')
+               AND document.is_active=1 AND document.document_status='active' AND document.voided_at IS NULL
+               AND lower(document.document_type) IN ('offer','signedoffer','offeracceptance')
+               AND document.file_size>0 AND trim(coalesce(legacy.offer_file_path,''))<>''
+               AND document.file_path=legacy.offer_file_path
+               AND NOT EXISTS (
+                   SELECT 1 FROM offer_received_events event
+                    WHERE event.application_cycle_id=cycle.id AND event.legacy_offer_id=legacy.id
+                      AND lower(coalesce((SELECT state.state FROM offer_received_event_state_events state
+                           WHERE state.offer_received_event_id=event.id
+                           ORDER BY state.occurred_at DESC,state.id DESC LIMIT 1),'active'))
+                          IN ('void','withdrawn','superseded','invalid_record'))
+        ''',ids)
+        return frozenset(row[0] for row in rows
+            if ((row[3] is not None and row[4] is not None and row[3]==row[4])
+                or str(row[5] or '').strip().casefold()==str(row[6] or '').strip().casefold())
+            and all(not value or (business_date_iso(value) or '')>=today for value in row[1:3]))
+    return memoized_read(connection,('received_progression_offer_cycles',ids,today),load)
 
 
 def resolve_dashboard_stage(*, form_live=False, form_submitted=False, contract=None, contract_required=True,
@@ -117,7 +207,7 @@ def resolve_dashboard_stage(*, form_live=False, form_submitted=False, contract=N
         return None
     if contract == "live":
         return "03_contract_signature", ""
-    if contract == "ready":
+    if contract in {"ready", "draft"}:
         return "contract_preparation", ""
     if contract == "inactive_link":
         return "contract_link_inactive", "签署链接已失效，等待重发"
@@ -146,7 +236,12 @@ def _contract_status(row):
     return "ready" if row["contract_status"] == "Active" else "draft"
 
 
-def _visa_status(row):
+def _visa_status(row, connection=None):
+    if connection is not None:
+        from business_changes.runtime import enabled
+        if enabled(connection):
+            from visa_business_state import resolve_case_state
+            return resolve_case_state(connection,row)['status']
     if not is_student_visa_case(row):
         return None
     status = str(row.get("status") or "").strip().lower()
@@ -354,7 +449,7 @@ def load_dashboard_stages(connection, cycle_ids):
          WHERE cycle.id IN ({marks}) AND visa.archived_at IS NULL
          ORDER BY coalesce(visa.actual_lodgement_date,'') DESC,visa.id DESC
     """, cycle_ids):
-        status = _visa_status(row)
+        status = _visa_status(row,connection)
         resumed = retry_key(row)
         if status in {"refused", "withdrawn"} and resumed and visa_retries.get(
             (row["id"], str(row["student_id"]))
@@ -364,6 +459,7 @@ def load_dashboard_stages(connection, cycle_ids):
             visas.setdefault(row["application_cycle_id"], status)
 
     today = datetime.now(ZoneInfo("Australia/Melbourne")).date().isoformat()
+    received_progression_offers = _received_progression_offer_cycles(connection,cycle_ids,today)
     contract_decisions = stage_decisions(connection, "cycle_contract_requirement_confirmed", cycle_ids)
     pathway_returns = stage_decisions(connection, "progression_school_return_confirmed", cycle_ids)
     stages = {}
@@ -386,7 +482,7 @@ def load_dashboard_stages(connection, cycle_ids):
         valid_offer = any(
             not offer["offer_expiry_date"] or (expiry_dates[offer["id"]] or "") >= today
             for offer in current_offers
-        )
+        ) or cycle_id in received_progression_offers
         accepted = bool(choice and choice["active"])
         pathway = pathway_components.get(cycle_id, ())
         confirmed_coe = bool(fact.final_school_coe_confirmed)

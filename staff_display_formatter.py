@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextlib import nullcontext
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -28,20 +29,21 @@ def _normalized_user_ids(user_ids: Iterable[Any]) -> tuple[int, ...]:
 def load_staff_display_map(
     database_path: str | Path,
     user_ids: Iterable[Any],
+    *, connection=None,
 ) -> dict[int, str]:
     """Load all requested employee labels with one users-table query."""
     normalized_ids = _normalized_user_ids(user_ids)
     if not normalized_ids:
         return {}
     placeholders = ",".join("?" for _item in normalized_ids)
-    with sqlite3.connect(Path(database_path).resolve()) as connection:
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
+    with (nullcontext(connection) if connection is not None else sqlite3.connect(Path(database_path).resolve())) as connection:
+        cursor = connection.execute(
             f"""SELECT id,username,display_name,is_active
                   FROM users
                  WHERE id IN ({placeholders})""",
             normalized_ids,
-        ).fetchall()
+        )
+        rows=[dict(zip((column[0] for column in cursor.description),row)) for row in cursor.fetchall()]
     staff_map = {}
     for row in rows:
         name = str(row["display_name"] or row["username"] or "").strip()

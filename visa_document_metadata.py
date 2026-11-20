@@ -5,6 +5,7 @@ single override authority; classification always uses the immutable upload name.
 from contextlib import contextmanager
 from datetime import datetime
 import json
+from business_changes.visa_domains import synchronized_visa_write
 import re
 import unicodedata
 
@@ -54,6 +55,7 @@ def list_rules(conn):
     cur=conn.execute('SELECT * FROM visa_document_keyword_rules ORDER BY priority,length(normalized_keyword) DESC,id');names=[d[0] for d in cur.description]
     return [dict(zip(names,r)) for r in cur.fetchall()]
 
+@synchronized_visa_write
 def classify_document(conn,case_id,document_id,*,actor_user_id,occurred_at):
     _actor(conn,actor_user_id,occurred_at)
     with _atomic(conn):
@@ -72,6 +74,7 @@ def classify_document(conn,case_id,document_id,*,actor_user_id,occurred_at):
         result=effective_metadata(conn,case_id,document_id);_audit(conn,case_id,document_id,'document_classified',before,result,actor_user_id,occurred_at)
         return result
 
+@synchronized_visa_write
 def edit_document_metadata(conn,case_id,document_id,*,display_name=None,category=None,actor_user_id,occurred_at):
     _actor(conn,actor_user_id,occurred_at)
     if display_name is not None:

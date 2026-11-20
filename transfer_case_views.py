@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import record_picker_and_uploader
+from contextlib import nullcontext
 
 from html import escape
 import json
@@ -394,6 +395,7 @@ def render_transfer_case_tab(
     school_choices: Iterable[Mapping[str, Any]] = (),
     city_choices: Iterable[Mapping[str, Any]] = (),
     entry_contract_id: int | None = None,
+    connection=None,
 ) -> str:
     student = {"student_id": str(student_id)}
     if not student_capabilities.can_view_transfer_cases(user, student, flags=flags):
@@ -404,8 +406,8 @@ def render_transfer_case_tab(
         ContractSelectorSchemaUnavailable, list_contract_candidates, load_optional_current_for_display,
     )
     try:
-        with sqlite3.connect(database_path) as selector_connection:
-            selector_connection.row_factory = sqlite3.Row
+        with (nullcontext(connection) if connection is not None else sqlite3.connect(database_path)) as selector_connection:
+            if connection is None:selector_connection.row_factory = sqlite3.Row
             contract_candidates = list_contract_candidates(
                 selector_connection, student_id=str(student_id),
                 contract_type=TRANSFER_APPLICATION_CONTRACT,
@@ -416,15 +418,16 @@ def render_transfer_case_tab(
     except ContractSelectorSchemaUnavailable:
         return student_case_views._schema_unavailable("转学记录")
     try:
-        cases = service.list_transfer_cases(str(student_id))
+        cases = service.list_transfer_cases(str(student_id),connection=connection)
     except TransferCaseError:
         return student_case_views.render_student_case_tab(
             database_path,
             str(student_id),
             "transfer_cases",
+            connection=connection,
         )
     active_case = common_service.get_active_case_for_student(
-        database_path, str(student_id)
+        database_path, str(student_id),connection=connection
     )
     create_html = ""
     if (
@@ -440,6 +443,7 @@ def render_transfer_case_tab(
     staff_map = load_staff_display_map(
         database_path,
         (case.owner_user_id for case in cases),
+        connection=connection,
     )
     case_html = (
         "".join(_case_card(student_id, case, staff_map) for case in cases)

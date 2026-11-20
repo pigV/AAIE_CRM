@@ -15,6 +15,9 @@ from typing import Iterable
 from student_lifecycle.transfer_v2_projection import load_transfer_v2_projection
 
 
+PENDING_TRANSFER_WITHDRAWN = "pending_transfer_withdrawn"
+
+
 PENDING_LABEL = "等待转学合同签署"
 READY_LABEL = "转学合同已完成 · 待建立转学记录"
 ACTIVE_PREFIX = "转学中 · "
@@ -87,6 +90,15 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
     }
 
 
+def pending_transfer_was_withdrawn(connection, contract_id):
+    if not {"action_type", "contract_id"} <= _columns(connection, "audit_logs"):
+        return False
+    return connection.execute(
+        "SELECT 1 FROM audit_logs WHERE action_type=? AND contract_id=? LIMIT 1",
+        (PENDING_TRANSFER_WITHDRAWN, str(contract_id)),
+    ).fetchone() is not None
+
+
 def _current_contract_rows(
     connection: sqlite3.Connection, student_ids: tuple[str, ...]
 ) -> dict[str, sqlite3.Row]:
@@ -148,7 +160,10 @@ def _current_contract_rows(
         # Only the newest valid Transfer contract can be the current contract.
         # An older unbound Draft must not overtake a later consumed completed
         # contract and resurrect a cancelled/completed lifecycle as pending.
-        result[student_id] = row if row[6] is None and row[7] is None else None
+        result[student_id] = (
+            row if row[6] is None and row[7] is None and row[2] != "Revoked"
+            and not pending_transfer_was_withdrawn(connection, row[0]) else None
+        )
     return {student_id: row for student_id, row in result.items() if row is not None}
 
 

@@ -1,10 +1,12 @@
 """Immutable, evidence-bound Visa AI proposals; never confirms a decision."""
 import json
 from visa_documents_candidate import _actor, _document, _atomic, _audit, _row, _json, propose_letter, submitted_documents
+from business_changes.visa_domains import synchronized_visa_write
 
 def _manifest(rows):
  return sorted((int(r['document_id']),int(r['version']),r['sha256']) for r in rows)
 
+@synchronized_visa_write
 def save_ai_letter(conn,case_id,document_id,envelope,*,actor_user_id,occurred_at):
  _actor(conn,actor_user_id,occurred_at);doc=_document(conn,case_id,document_id)
  expected=[{'document_id':doc['id'],'version':doc['version'],'sha256':doc['sha256']}]
@@ -18,6 +20,7 @@ def save_ai_letter(conn,case_id,document_id,envelope,*,actor_user_id,occurred_at
   _audit(conn,case_id,document_id,'ai_letter_extracted',{},dict(envelope,extraction_id=row['id']),actor_user_id,occurred_at)
  return row
 
+@synchronized_visa_write
 def save_ai_analysis(conn,case_id,envelope,*,actor_user_id,occurred_at):
  _actor(conn,actor_user_id,occurred_at)
  current=submitted_documents(conn,case_id)

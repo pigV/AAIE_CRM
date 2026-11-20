@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import sqlite3
+from business_changes.transfer_binding import synchronized_transfer_binding
 
 from student_lifecycle.adapters import OfferContextAdapter
 from student_lifecycle.errors import LifecycleIntegrityError
@@ -203,6 +204,7 @@ def _link_record(
     ).lastrowid)
 
 
+@synchronized_transfer_binding(TransferV2BusinessRecordError)
 def bind_authoritative_offer(
     connection: sqlite3.Connection,
     *,
@@ -316,6 +318,7 @@ def _append_paid_state(
     )
 
 
+@synchronized_transfer_binding(TransferV2BusinessRecordError)
 def bind_authoritative_payment(
     connection: sqlite3.Connection,
     *, student_id: str, branch_id: int, payment_id: int, document_id: int | None,
@@ -363,6 +366,7 @@ def bind_authoritative_payment(
     )
 
 
+@synchronized_transfer_binding(TransferV2BusinessRecordError)
 def confirm_authoritative_payment(
     connection: sqlite3.Connection,
     *,
@@ -424,6 +428,7 @@ def confirm_authoritative_payment(
     )
 
 
+@synchronized_transfer_binding(TransferV2BusinessRecordError)
 def bind_authoritative_coe(
     connection: sqlite3.Connection,
     *, student_id: str, branch_id: int, coe_oshc_id: int, document_id: int | None,

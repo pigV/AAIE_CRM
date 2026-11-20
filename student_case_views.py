@@ -251,6 +251,7 @@ def render_student_case_tab(
     database_path: str | Path,
     student_id: str,
     tab_key: str,
+    *, connection=None,
 ) -> str:
     if type(tab_key) is not str or tab_key not in _TAB_DETAILS:
         raise ValueError("unsupported Student Case tab")
@@ -261,6 +262,7 @@ def render_student_case_tab(
             Path(database_path).resolve(),
             str(student_id),
             details["case_type"],
+            connection=connection,
         )
     except StudentCaseError:
         return _schema_unavailable(details["title"])

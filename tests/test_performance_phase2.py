@@ -118,13 +118,29 @@ class TopbarHealthCacheTests(unittest.TestCase):
             "active_users_snapshot",
             side_effect=[{"count": 1}, {"count": 2}],
         ) as active, mock.patch.object(app_module.time, "monotonic", return_value=100.0):
-            handler.api_topbar_status("GET")
-            handler.api_topbar_status("GET")
+            # This test measures the normal health-cache branch. Staging has
+            # its own explicit health provider; do not accidentally measure it.
+            with mock.patch.object(app_module, "STAGING", None):
+                handler.api_topbar_status("GET")
+                handler.api_topbar_status("GET")
 
         self.assertEqual(health.call_count, 1)
         self.assertEqual(active.call_count, 2)
         self.assertEqual(handler.responses[0][1]["active_users"]["count"], 1)
         self.assertEqual(handler.responses[1][1]["active_users"]["count"], 2)
+
+    def test_staging_health_stays_on_its_explicit_provider(self):
+        import app as app_module
+        handler = self.handler(app_module)
+        staging = SimpleNamespace(health_snapshot=mock.Mock(return_value={
+            "headline": "Synthetic staging healthy", "overall_ok": True}))
+        with mock.patch.object(app_module, "STAGING", staging), mock.patch.object(
+            app_module, "cached_system_health_snapshot") as normal, mock.patch.object(
+            app_module, "active_users_snapshot", return_value={"count": 1}):
+            handler.api_topbar_status("GET")
+        staging.health_snapshot.assert_called_once_with()
+        normal.assert_not_called()
+        self.assertEqual("Synthetic staging healthy", handler.responses[0][1]["health"]["headline"])
 
     def test_concurrent_topbar_requests_coalesce_one_health_refresh(self):
         import app as app_module
@@ -296,6 +312,12 @@ class ContractCentreQueryTests(unittest.TestCase):
                 def __init__(self, delegate):
                     self.delegate = delegate
                     self.signature_queries = 0
+
+                def connect(self):
+                    return self.delegate.connect()
+
+                def _release_connection(self, connection):
+                    return self.delegate._release_connection(connection)
 
                 def one(self, sql, params=()):
                     if "FROM contract_signatures" in sql:

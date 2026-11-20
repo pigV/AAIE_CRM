@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import sqlite3
+from business_changes.module_policy import synchronized_module_disposition
 from typing import Mapping
 
 
@@ -392,6 +393,7 @@ def _payload(disposition: ModuleDisposition) -> tuple:
     )
 
 
+@synchronized_module_disposition
 def record_module_disposition(
     connection: sqlite3.Connection,
     *,

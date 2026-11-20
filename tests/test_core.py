@@ -40664,6 +40664,12 @@ c.save()
             original_delete = app_module.delete_upload_review
             with mock.patch.object(app_module, "delete_upload_review", wraps=original_delete) as cleanup:
                 handler.upload_review_cancel("POST", "MISMATCHED-STUDENT", token)
+                cleanup.assert_not_called()
+                self.assertEqual(handler.response_status, 400)
+                self.assertTrue(folder.exists())
+                self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM upload_review_items WHERE status='NeedsReview'")["count"], 2)
+                self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM audit_logs WHERE action_type='upload_review_cancelled'")["count"], 0)
+                handler.upload_review_cancel("POST", env["student_id"], token)
             cleanup.assert_called_once_with(token)
             self.assertEqual(env["db"].one("SELECT COUNT(*) count FROM upload_review_items WHERE status='Cancelled'")["count"], 2)
             self.assertEqual(env["db"].one("SELECT status FROM upload_sessions")["status"], "Cancelled")
@@ -40679,9 +40685,6 @@ c.save()
                 self._upload_review_handler(env["admin"]).upload_review_cancel("POST", env["student_id"], token)
             self.assertTrue(folder.exists())
             self.assertEqual(env["db"].one("SELECT status FROM upload_sessions ORDER BY id DESC LIMIT 1")["status"], "Cancelled")
-            source = inspect.getsource(app_module.CRMHandler.upload_review_cancel)
-            self.assertNotIn("student_id) != str(metadata", source)
-            self.assertNotIn("Reject", source)
 
     def test_generic_upload_review_behavior_group_8_replay_idor_and_failure_boundaries(self):
         with isolated_upload_review_regression_environment("group-8") as env:

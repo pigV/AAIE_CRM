@@ -1,5 +1,7 @@
 """Choose the exact active cycle owned by the student's Visa Case."""
 
+from business_changes.visa_domains import synchronized_visa_write
+
 def active_visa_cycles(connection, student_id):
     columns = {row[1] for row in connection.execute("PRAGMA table_info(application_cycles)")}
     if not {"id", "student_id", "status", "sequence_no", "cycle_type", "education_stream"}.issubset(columns):
@@ -28,6 +30,7 @@ def resolve_visa_cycle(connection, student_id, requested="", *, infer_single=Tru
     raise ValueError("请选择签证案件所属的申请周期")
 
 
+@synchronized_visa_write
 def link_recorded_visa_grant(connection, student_id, case_id, requested_cycle, *, actor, timestamp):
     """Bind a locked grant to an active cycle and audit it in the same transaction."""
     if not requested_cycle:

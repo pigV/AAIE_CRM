@@ -267,7 +267,10 @@ class UniversitiesCreateReturnTests(unittest.TestCase):
         try:
             with patch.object(app, "HigherEducationRepository") as repository:
                 repository.return_value.create_provider.return_value = 101
-                handler.higher_education_provider_create("POST")
+                # This unit isolates the retained return URL with a fake DB.
+                # The current staff transaction uses a real DB in
+                # test_business_change_higher_education_master_staff.py.
+                app.CRMLegacyHandler.higher_education_provider_create(handler,"POST")
         finally:
             app.db = original_db
 

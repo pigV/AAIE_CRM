@@ -7,6 +7,8 @@ from pathlib import Path
 import sqlite3
 from typing import Callable
 from uuid import uuid4
+from business_changes.transfer import record_transfer_change
+from business_changes.identities import stable_command_identity,find_command_identity
 
 from revenue.cycle_integration import ensure_revenue_case_for_cycle
 from revenue.operational_integration import process_revenue_contract_completion
@@ -72,6 +74,9 @@ class TransferV2Service:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
+
+    def _command_uid(self,prefix):
+        return stable_command_identity(prefix) if self.uid_factory is _default_uid else self.uid_factory(prefix)
 
     @staticmethod
     def _required_text(value: object, label: str) -> str:
@@ -495,6 +500,7 @@ class TransferV2Service:
                 actor_user_id=int(actor_user_id),
                 occurred_at=timestamp,
             )
+            record_transfer_change(connection,event_type='transfer.created',cycle_id=cycle_id,actor_user_id=actor_user_id,idempotency_key=key,stamp=timestamp,previous_cycle_ids=(takeover_cycle_id,))
             connection.commit()
         return self.load_overview(cycle_id)
 
@@ -565,15 +571,20 @@ class TransferV2Service:
 
         key = self._required_text(idempotency_key, "idempotency key")
         timestamp = self.clock()
-        branch_uid = self.uid_factory(f"transfer-v2-add-branch-{cycle_id}-{key}")
+        branch_uid = self._command_uid(f"transfer-v2-add-branch-{cycle_id}-{key}")
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._require_actor(connection, actor_user_id)
-            replay = connection.execute(
-                "SELECT id FROM transfer_school_applications WHERE branch_uid=?",
-                (branch_uid,),
-            ).fetchone()
+            replay = find_command_identity(connection,'transfer_school_applications','branch_uid',branch_uid,
+                conflict_error=TransferV2ValidationError)
             if replay is not None:
+                same = (int(replay['application_cycle_id'])==int(cycle_id)
+                    and replay['school_id']==target.school_id
+                    and str(replay['school_name_snapshot'] or '').strip()==str(target.school_name or '').strip())
+                if target.school_id is None:
+                    same = same and all((replay[column] or None)==(str(value or '').strip() or None)
+                        for column,value in (('school_state_snapshot',target.state),('school_region_snapshot',target.region),('school_type_snapshot',target.school_type)))
+                if not same:raise TransferV2ValidationError('idempotency key conflicts with an earlier Target School request')
                 connection.commit()
                 return self.load_overview(int(cycle_id))
             cycle = repository.cycle_case_row(connection, int(cycle_id))
@@ -684,6 +695,7 @@ class TransferV2Service:
                     int(actor_user_id), key, timestamp,
                 ),
             )
+            record_transfer_change(connection,event_type='transfer.branch_added',cycle_id=cycle_id,branch_id=branch_id,actor_user_id=actor_user_id,idempotency_key=key,stamp=timestamp)
             connection.commit()
         return self.load_overview(int(cycle_id))
 
@@ -746,6 +758,7 @@ class TransferV2Service:
                         timestamp,
                     ),
                 )
+                record_transfer_change(connection,event_type='transfer.branch_removed',cycle_id=cycle_id,branch_id=branch_id,actor_user_id=actor_user_id,idempotency_key=key,stamp=timestamp)
             connection.commit()
         return self.load_overview(int(cycle_id))
 
@@ -761,15 +774,13 @@ class TransferV2Service:
         if new_source_label not in TRANSFER_SOURCE_LABELS:
             raise TransferV2ValidationError("invalid Transfer source label")
         key = self._required_text(idempotency_key, "idempotency key")
-        event_uid = self.uid_factory(f"transfer-v2-origin-{key}")
+        event_uid = self._command_uid(f"transfer-v2-origin-{key}")
         timestamp = self.clock()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._require_actor(connection, actor_user_id)
-            replay = connection.execute(
-                "SELECT 1 FROM transfer_v2_origin_events WHERE event_uid=?",
-                (event_uid,),
-            ).fetchone()
+            replay = find_command_identity(connection,'transfer_v2_origin_events','event_uid',event_uid,
+                conflict_error=TransferV2ValidationError)
             row = repository.cycle_case_row(connection, int(cycle_id))
             if row is None or int(row["v2_version"] or 0) != 2:
                 raise TransferV2NotFound("Transfer V2 Cycle not found")
@@ -789,6 +800,9 @@ class TransferV2Service:
                     "Transfer 来源由建立时的 Parent intake / Existing 双证据锁定"
                 )
             if replay is not None:
+                if (int(replay['application_cycle_id'])!=int(cycle_id) or replay['new_source_label']!=new_source_label
+                        or (replay['note'] or None)!=(str(note or '').strip() or None)):
+                    raise TransferV2ValidationError('idempotency key conflicts with an earlier origin request')
                 connection.commit()
                 return self.load_overview(int(cycle_id))
             previous = str(row["transfer_source_label"])
@@ -813,6 +827,7 @@ class TransferV2Service:
                     str(note or "").strip() or None, int(actor_user_id), timestamp, timestamp,
                 ),
             )
+            record_transfer_change(connection,event_type='transfer.origin_changed',cycle_id=cycle_id,actor_user_id=actor_user_id,idempotency_key=key,stamp=timestamp)
             connection.commit()
         return self.load_overview(int(cycle_id))
 
@@ -830,18 +845,20 @@ class TransferV2Service:
     ) -> int:
         key = self._required_text(idempotency_key, "idempotency key")
         name = self._required_text(proposed_name, "proposed school name")
-        request_uid = self.uid_factory(f"transfer-v2-school-library-{key}")
+        request_uid = self._command_uid(f"transfer-v2-school-library-{key}")
         timestamp = self.clock()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._require_actor(connection, actor_user_id)
-            replay = connection.execute(
-                "SELECT id FROM transfer_school_library_requests WHERE request_uid=?",
-                (request_uid,),
-            ).fetchone()
+            replay = find_command_identity(connection,'transfer_school_library_requests','request_uid',request_uid,
+                conflict_error=TransferV2ValidationError)
             if replay is not None:
+                expected=(int(cycle_id),int(branch_id) if branch_id is not None else None,name,
+                    *(str(value or '').strip() or None for value in (proposed_state,proposed_region,proposed_school_type)))
+                previous=tuple(replay[column] for column in ('application_cycle_id','branch_id','proposed_name','proposed_state','proposed_region','proposed_school_type'))
+                if previous!=expected:raise TransferV2ValidationError('idempotency key conflicts with an earlier school library request')
                 connection.commit()
-                return int(replay[0])
+                return int(replay["id"])
             cycle = repository.cycle_case_row(connection, int(cycle_id))
             if cycle is None or int(cycle["v2_version"] or 0) != 2:
                 raise TransferV2NotFound("Transfer V2 Cycle not found")
@@ -886,5 +903,6 @@ class TransferV2Service:
                     int(actor_user_id),timestamp,
                 ),
             ).lastrowid)
+            record_transfer_change(connection,event_type='transfer.school_library_requested',cycle_id=cycle_id,branch_id=branch_id,actor_user_id=actor_user_id,idempotency_key=key,stamp=timestamp)
             connection.commit()
             return request_id

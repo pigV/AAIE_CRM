@@ -3,6 +3,7 @@ from __future__ import annotations
 from html import escape
 import json
 import sqlite3
+from contextlib import nullcontext
 from uuid import uuid4
 
 from lifecycle_workspace_ui import (
@@ -297,11 +298,12 @@ def _contract_gate_status(
 def render_progression_case_tab(
     database_path, student_id, user, flags, *, csrf, staff_users,
     school_choices=(), entry_business_type="", entry_contract_id=None,
+    connection=None,
 ):
     service = ProgressionCaseService(database_path)
     try:
-        with sqlite3.connect(database_path) as selector_connection:
-            selector_connection.row_factory = sqlite3.Row
+        with (nullcontext(connection) if connection is not None else sqlite3.connect(database_path)) as selector_connection:
+            if connection is None:selector_connection.row_factory = sqlite3.Row
             contract_candidates = list_contract_candidates(
                 selector_connection, student_id=str(student_id),
                 contract_type=LOCAL_STUDENT_APPLICATION_CONTRACT,
@@ -311,7 +313,7 @@ def render_progression_case_tab(
             )
     except ContractSelectorSchemaUnavailable:
         return transfer_case_views.student_case_views._schema_unavailable("升学记录")
-    cases = service.list_cases(student_id)
+    cases = service.list_cases(student_id,connection=connection)
     drafts = [item for item in cases if item.status == "draft" and item.case_outcome is None]
     active = [item for item in cases if item.status != "draft" and item.case_outcome is None]
     historical = [item for item in cases if item.case_outcome is not None]

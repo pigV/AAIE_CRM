@@ -42,30 +42,33 @@ def coordinate_confirmed_upload(
     actor_user_id: int,
     actor_permissions: Collection[str],
     flags: StudentCaseFeatureFlags,
+    caller_transaction=None,
 ) -> ConfirmationCoordinationResult:
     context = record_picker_and_uploader.upload_context_from_form(stored_form)
     if context is None:
         return ConfirmationCoordinationResult("none", False)
-    if isinstance(context, record_picker_and_uploader.ProgressionUploadContext):
+    progression = isinstance(context, record_picker_and_uploader.ProgressionUploadContext)
+    if not progression and confirmed_upload.business_record_id is None:
+        raise ValueError("Transfer上传未生成可关联的正式业务记录")
+    def coordinate(transaction):
+        transaction_options = {'caller_transaction': transaction} if transaction is not None else {}
         record_picker_and_uploader.complete_upload_and_link(
             database_path,
             stored_form=stored_form,
-            canonical_record_id=None,
+            canonical_record_id=None if progression else confirmed_upload.business_record_id,
             canonical_document_id=confirmed_upload.document_id,
             actor_user_id=actor_user_id,
             actor_permissions=actor_permissions,
             flags=flags,
+            **transaction_options,
         )
-        return ConfirmationCoordinationResult("progression", True)
-    if confirmed_upload.business_record_id is None:
-        raise ValueError("Transfer上传未生成可关联的正式业务记录")
-    record_picker_and_uploader.complete_upload_and_link(
-        database_path,
-        stored_form=stored_form,
-        canonical_record_id=confirmed_upload.business_record_id,
-        canonical_document_id=confirmed_upload.document_id,
-        actor_user_id=actor_user_id,
-        actor_permissions=actor_permissions,
-        flags=flags,
-    )
-    return ConfirmationCoordinationResult("transfer", True)
+        return ConfirmationCoordinationResult('progression' if progression else 'transfer', True)
+    if caller_transaction is None:
+        return coordinate(None)
+    # A coordinator may call more than one retained service (document + OSHC
+    # arrangement). Its own savepoint prevents a caught second failure from
+    # committing the first service's link inside the caller's transaction.
+    from business_changes.service_connection import ServiceConnection
+    with ServiceConnection(caller_transaction, database_path) as transaction:
+        transaction.execute('BEGIN IMMEDIATE')
+        return coordinate(transaction)

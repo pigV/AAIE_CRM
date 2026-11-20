@@ -21,6 +21,7 @@ class SchoolPlanCardSummary:
     final_school_name: str = ""
     submitted_count: int = 0
     has_application_cycle: bool | None = None
+    application_cycle_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,17 @@ class StudentDetailCardSummary:
     created_date: str
     schools: SchoolPlanCardSummary
     next_reminder: StudentFollowupNote | None = None
+
+
+def has_current_school_workflow(projection, schools: SchoolPlanCardSummary) -> bool:
+    """Current, cycle-owned school work outranks a stale profile service label."""
+    return bool(
+        getattr(projection, "state", None) == "active"
+        and getattr(projection, "cycle_id", None) is not None
+        and getattr(schools, "application_cycle_id", None) == projection.cycle_id
+        and schools.has_application_cycle is True
+        and (schools.names or schools.is_final or schools.submitted_count)
+    )
 
 
 def load_student_detail_workflow_projection(connection, student_id: str):
@@ -48,6 +60,28 @@ def load_student_detail_workflow_projection(connection, student_id: str):
         for row in load_current_workflow_projection(connection, cycle_ids=cycle_ids)
         if row.student_id == target
     )
+
+
+def _canonical_school_submissions(connection,cycle_id,student_id,confirmed_ids):
+    """Current-cycle formal commands take precedence over mirrored old flags.
+
+    Legacy-only rows remain readable, but an explicit canonical retraction must
+    never be revived by a stale legacy `submitted` value. No source is rewritten.
+    """
+    if not confirmed_ids:return {}
+    tables={row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('private_school_applications','public_application_groups','public_application_preferences')")}
+    result={}
+    if 'private_school_applications' in tables:
+        for row in connection.execute('''SELECT confirmed_school_id,status,submitted_at
+            FROM private_school_applications WHERE application_cycle_id=? AND student_id=?''',(cycle_id,student_id)):
+            if row[0] in confirmed_ids:result[row[0]]=row[1]!='not_submitted' and bool(row[2])
+    if {'public_application_groups','public_application_preferences'}<=tables:
+        for row in connection.execute('''SELECT preference.confirmed_school_id,application.status,application.submitted_at
+            FROM public_application_groups application JOIN public_application_preferences preference
+                ON preference.public_application_group_id=application.id
+            WHERE application.application_cycle_id=? AND application.student_id=?''',(cycle_id,student_id)):
+            if row[0] in confirmed_ids:result[row[0]]=row[1]!='draft' and bool(row[2])
+    return result
 
 
 def _load_school_plan_card_summary(connection, student_id: str) -> SchoolPlanCardSummary:
@@ -81,10 +115,12 @@ def _load_school_plan_card_summary(connection, student_id: str) -> SchoolPlanCar
                        WHERE report.application_cycle_id=?
                          AND report.cycle_is_current=1
                 )
-                  AND cs.is_selected=1
+                  AND cs.is_selected=1 AND cs.student_id=?
                 ORDER BY cs.report_id,cs.id""",
-            (cycle_id,),
+            (cycle_id,student_id),
         ).fetchall()
+        formal=_canonical_school_submissions(connection,cycle_id,student_id,{row[0] for row in rows})
+        submitted=lambda row:formal.get(row[0],str(row[2])=='submitted')
         names, offers, waiting, not_submitted = [], [], [], []
         seen = set()
         for row in rows:
@@ -93,7 +129,7 @@ def _load_school_plan_card_summary(connection, student_id: str) -> SchoolPlanCar
             if key and key not in seen:
                 seen.add(key)
                 names.append(name)
-                if str(row[2]) != "submitted":
+                if not submitted(row):
                     not_submitted.append(name)
                 elif str(row[3]) == "offer_received" and row[4] is not None:
                     from application_cycle import list_matching_offers_for_confirmed_school
@@ -108,16 +144,16 @@ def _load_school_plan_card_summary(connection, student_id: str) -> SchoolPlanCar
                         offers.append(name)
                 elif str(row[3]) == "pending":
                     waiting.append(name)
-        submitted_count = sum(str(row[2]) == "submitted" for row in rows)
+        submitted_count = sum(submitted(row) for row in rows)
         if accepted is not None:
             name = " ".join(str(accepted[0] or "").strip().split())
             return SchoolPlanCardSummary((name,) if name else (), is_final=True,
                 final_school_name=name, submitted_count=submitted_count,
-                has_application_cycle=True)
+                has_application_cycle=True, application_cycle_id=cycle_id)
         return SchoolPlanCardSummary(tuple(names[:3]), max(len(names) - 3, 0),
             offer_received_names=tuple(offers), waiting_result_names=tuple(waiting),
             not_submitted_names=tuple(not_submitted), submitted_count=submitted_count,
-            has_application_cycle=True)
+            has_application_cycle=True, application_cycle_id=cycle_id)
 
     accepted_offer = connection.execute(
         """SELECT o.school_name

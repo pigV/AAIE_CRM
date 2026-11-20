@@ -18,7 +18,7 @@ CANONICAL_MATERIAL = {
 }
 
 
-def material_category(link, source):
+def material_category(link, source, *, manual_grant=False):
     """Saved checklist scope/type is evidence; filenames and OCR are never types."""
     if (link.get('document_category') != 'Visa Result / S56'
             or link.get('used_in_this_case') != 1
@@ -28,12 +28,15 @@ def material_category(link, source):
     if kind == 'IMMI Grant Letter / IMMI Refusal Letter':
         # This checklist slot contains either outcome. The saved upload type
         # disambiguates it; the combined slot itself does not confirm a Grant.
-        return 'grant_letter' if source.get('document_type') == 'VisaGrantLetter' else None
+        return 'grant_letter' if source.get('document_type') == 'VisaGrantLetter' or (
+            manual_grant and source.get('document_type') == 'VisaMaterialChecklist') else None
     return CANONICAL_MATERIAL.get(kind)
 
 
 def tables(conn):
-    return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    from snapshot_read_cache import memoized_read
+    return memoized_read(conn,('visa_schema_tables',),lambda:frozenset(
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")))
 
 
 def active_documents(conn, case_id):
@@ -41,6 +44,8 @@ def active_documents(conn, case_id):
     if not case or case.get('archived_at'):
         return []
     present = tables(conn)
+    from visa_business_state import audited_legacy_manual_grant, legacy_manual_source_matches
+    manual=audited_legacy_manual_grant(conn,case)
     registered = _rows(conn, 'SELECT * FROM visa_case_documents WHERE visa_case_id=?', (case_id,)) if 'visa_case_documents' in present else []
     owned = {d['student_document_id'] for d in registered if d.get('student_document_id')}
     candidates = [d for d in registered if not d.get('archived_at')]
@@ -63,11 +68,12 @@ def active_documents(conn, case_id):
     for doc in candidates:
         sid = doc.get('student_document_id')
         source = _row(conn, 'SELECT * FROM student_documents WHERE id=?', (sid,)) if sid else None
-        if sid and (not source or source['student_id'] != case.get('student_id') or not source.get('is_active') or str(source.get('document_status') or 'active').lower() in INACTIVE):
+        if sid and (not source or source['student_id'] != case.get('student_id') or not source.get('is_active') or source.get('voided_at') or str(source.get('document_status') or 'active').lower() in INACTIVE):
             continue
         category = LEGACY.get(source.get('document_type'),'other') if source else 'other'
         linked = links.get(sid, [])
-        confirmed = {material_category(link, source or {}) for link in linked} - {None}
+        manual_grant=bool(manual and legacy_manual_source_matches(conn,case,sid,manual=manual))
+        confirmed = {material_category(link, source or {}, manual_grant=manual_grant) for link in linked} - {None}
         authority_category = next(iter(confirmed)) if len(confirmed) == 1 else None
         selected_category = None
         manual_category=False
@@ -228,7 +234,44 @@ def case_projection(conn, case_id, *, read_text=None):
     acknowledgement = choices['acknowledge_sent_on']
     acknowledge_letter_date = acknowledgement[0]['value'] if len(acknowledgement) == 1 and acknowledgement[0]['status'] == 'detected' else ''
     result = 'Granted' if grants else 'Pending'
-    return {'documents':docs,'workflow_status':'已完成' if grants else '审理中' if ack else '未开始','result_status':result,'grant_date':grant_date,'official_decision':official,'acknowledge_letter_date':acknowledge_letter_date,'processing':processing}
+    if not grants:
+        from visa_business_state import confirmed_legacy_outcome
+        historical = confirmed_legacy_outcome(conn, case or {})
+        if historical:
+            result = historical['result']
+            grant_date = historical['grant_date']
+            official['grant_date'] = grant_date
+    # Explicit, audited staff outcomes survive material projection. A bare
+    # legacy case.status is not an override, and a Granted override still
+    # requires current confirmed Grant evidence after a source is withdrawn.
+    if 'visa_result_status_current' in present:
+        current = _row(conn, 'SELECT * FROM visa_result_status_current WHERE visa_case_id=?', (case_id,))
+        if current and current.get('manual_override'):
+            manual_result = current.get('effective_result')
+            if manual_result in {'Pending', 'Refused', 'Withdrawn'}:
+                result = manual_result
+            elif manual_result == 'Granted' and grants:
+                result = 'Granted'
+    from business_changes.runtime import enabled
+    unified=enabled(conn)
+    auto_detected_result='Granted' if any(proposal.get('document_kind')=='grant' and proposal.get('decision_type')=='grant'
+        for document,proposal in grants) else None
+    if unified and result=='Granted':
+        from visa_business_state import has_confirmed_current_grant,confirmed_legacy_outcome
+        independent=confirmed_legacy_outcome(conn,case or {})
+        if not has_confirmed_current_grant(conn,case or {},[document for document,proposal in grants]) and not (
+                independent and independent['result']=='Granted'):
+            result='Pending'
+    if result != 'Granted':
+        grant_date = ''
+        official['grant_date'] = ''
+    if unified:
+        from visa_business_state import formal_lodgement
+        ack=ack or formal_lodgement(case or {})
+        recorded_grant_date=(json.loads(manual['after_json']).get('value') or '') if manual else (
+            grant_date or (case or {}).get('grant_date') or '')
+    return {'documents':docs,'workflow_status':'已完成' if result in {'Granted','Refused','Withdrawn'} else '审理中' if ack else '未开始','result_status':result,'grant_date':grant_date,'official_decision':official,'acknowledge_letter_date':acknowledge_letter_date,'processing':processing,
+            **({'auto_detected_result':auto_detected_result,'recorded_grant_date':recorded_grant_date} if unified else {})}
 
 
 def student_projection(conn, student_id):

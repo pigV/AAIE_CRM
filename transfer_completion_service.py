@@ -8,6 +8,7 @@ records and current persisted links created after Upload Review.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
@@ -398,8 +399,8 @@ class TransferCompletionService:
             payment_status=payment_status,
         )
 
-    def evaluate_transfer_completion(self, case_id: int):
-        with self._connect() as connection:
+    def evaluate_transfer_completion(self, case_id: int, *, connection=None):
+        with (nullcontext(connection) if connection is not None else self._connect()) as connection:
             return self._evaluate(connection, int(case_id))
 
     @staticmethod

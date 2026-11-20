@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from business_changes.fact_binding import synchronized_fact_binding
 
 
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
@@ -28,6 +29,7 @@ def _current_cycle_id(connection: sqlite3.Connection, student_id: str) -> int | 
     return int(rows[0][0])
 
 
+@synchronized_fact_binding
 def bind_coe_oshc_to_current_cycle(
     connection: sqlite3.Connection,
     *,
@@ -77,6 +79,7 @@ def resolve_coe_application_cycle(connection, student_id, application_cycle_id=N
     return int(row[0])
 
 
+@synchronized_fact_binding
 def record_current_payment_evidence(
     connection: sqlite3.Connection,
     *,

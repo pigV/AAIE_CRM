@@ -56,8 +56,8 @@ def prepare(c):
     (folder/'sandbox.sb').write_text(sandbox_profile(c))
 
 
-def health(c):
-    with urllib.request.urlopen(f'http://127.0.0.1:{port(c)}/health', timeout=3) as response:
+def health(c, *, timeout=3):
+    with urllib.request.urlopen(f'http://127.0.0.1:{port(c)}/health', timeout=timeout) as response:
         value = json.load(response)
     if any(value.get(key) != expected for key, expected in {
         'status': 'ok', 'service': 'school-map-tiles', 'root': str(root(c))}.items()):

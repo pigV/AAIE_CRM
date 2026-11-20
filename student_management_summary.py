@@ -54,6 +54,13 @@ def _management_stage(
     """Present one canonical lifecycle without re-deriving its business stage."""
     state = getattr(lifecycle_item, "state", None)
     lifecycle_type = getattr(lifecycle_item, "cycle_type", None)
+    if state in {"error", "needs_review"}:
+        return (
+            str(getattr(lifecycle_item, "stage_key", None) or stage.key or "workflow_error"),
+            str(getattr(lifecycle_item, "stage_label", None) or stage.label or "申请阶段异常"),
+            int(getattr(lifecycle_item, "stage_order", None) or stage.index or 999),
+            lifecycle_type,
+        )
     if state in {"contract_pending", "ready"} and lifecycle_type == "transfer":
         return (
             str(getattr(lifecycle_item, "stage_key", None) or state),
@@ -85,12 +92,14 @@ def _management_stage(
         )
     if not has_cycle_schema and stage.excluded_reason == "尚未生成家长表单 Link":
         return "not_started", "尚未开始申请", 0, None
+    if state=='needs_review' and getattr(lifecycle_item,'stage_key',None)=='visa_case_cycle_unassigned':
+        return lifecycle_item.stage_key,lifecycle_item.stage_label,lifecycle_item.stage_order,None
     if state == "closed" and lifecycle_type == "initial" and str(
         getattr(lifecycle_item, "outcome", None) or outcome
     ) == "completed":
         return "closed", "申请已结案", 100, "initial"
     if state == "closed" and getattr(lifecycle_item, "stage_key", None) in {
-        "visa_granted", "visa_refused", "visa_withdrawn",
+        "visa_granted", "visa_refused", "visa_withdrawn", "visa_result_needs_review",
     }:
         return (
             lifecycle_item.stage_key, lifecycle_item.stage_label,
@@ -112,7 +121,7 @@ def _management_stage(
                 school = final_school or "最终学校待确认"
                 return "transfer_completed", f"转学完成 · {school}", 100, "transfer"
             return "transfer_closed", "转学已结案", 100, "transfer"
-        if outcome in {"granted", "active"} or has_visa:
+        if outcome in {"granted", "active"}:
             return "granted", "已下签", 100, lifecycle_type
         if outcome == "refused":
             return "refused", "已拒签", 100, lifecycle_type
@@ -279,6 +288,7 @@ def load_student_management_summary_map(
             student_id in visa_dates,
             str(final_offer.get("school_name") or ""),
         )
+        review_current=stage_key in {'visa_result_needs_review','visa_case_cycle_unassigned'}
         name = " ".join(
             value for value in (
                 str(student.get("passport_first_name") or "").strip(),
@@ -297,7 +307,7 @@ def load_student_management_summary_map(
             ),
             created_at=str(student.get("created_date") or ""),
             offer_course_start_date=str(final_offer.get("course_start_date") or ""),
-            visa_grant_date=visa_dates.get(student_id, ""),
+            visa_grant_date="" if review_current else visa_dates.get(student_id, ""),
             lifecycle_type=lifecycle_type,
         )
     return summaries

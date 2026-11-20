@@ -133,15 +133,19 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
           <div class="visa-material-list">{''.join(item_html)}</div></details>''')
     batch_link = (f'<a class="secondary button-link" data-material-resume href="{escape(batch_url)}">Smart Batch Upload / 智能批量上传</a>'
                   if show_smart_batch else '')
+    initialize_link = (f'<form method="post" action="{base}/material-items/init">'
+        f'<input type="hidden" name="csrf" value="{escape(h.csrf)}">'
+        '<button class="secondary" type="submit">更新材料清单</button></form>'
+        if getattr(h, 'business_changes_enabled', lambda: False)() else '')
     extra_options = ''.join(f'<option value="{key}"'+(' selected' if key==active_filter else '')+f'>{label}</option>'
                             for key,label in [('all','全部材料'),('required_unfinished','必交未完成'),('unfinished','全部未完成'),
                                               ('uploaded','已收到'),('not_applicable','不适用'),('missing','未收到'),
                                               ('required','必交'),('conditional','条件材料'),('optional','可选')])
     return f'''
       <link rel="stylesheet" href="/assets/visa-material-workspace.css?v=1">
-      <script src="/assets/visa-material-workspace.js?v=1" defer></script>
+      <script src="/assets/visa-material-workspace.js?v=3" defer></script>
       <section class="panel visa-material-checklist-panel visa-material-workspace" id="{panel}" data-visa-material-workspace data-case-id="{case_id}" data-initial-filter="{escape(active_filter)}">
-        <div class="panel-head"><div><h2>{escape(title)}</h2><p>{escape(description)}</p></div><div class="row-actions">{batch_link}</div></div>
+        <div class="panel-head"><div><h2>{escape(title)}</h2><p>{escape(description)}</p></div><div class="row-actions">{initialize_link}{batch_link}</div></div>
         <div class="visa-material-quick-filters">{''.join(quick_filters)}</div>
         <div class="visa-material-workspace-toolbar">
           <label class="visa-material-search-label">搜索材料<input type="search" data-material-search placeholder="护照 / Passport / 文件名" aria-label="搜索材料和文件名"></label>
@@ -149,6 +153,7 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
           <button type="button" class="secondary" data-material-clear>清除搜索与筛选</button>
         </div>
         <form id="{form_id}" method="post" action="{base}/material-items" data-material-save>
+          {getattr(h,'business_change_checklist_hidden_fields',lambda case_id:'')(case_id)}
           <input type="hidden" name="csrf" value="{escape(h.csrf)}"><input type="hidden" name="visa_tab" value="material_checklist">
           <input type="hidden" name="return_anchor" value="{panel}"><input type="hidden" name="material_filter" value="{escape(active_filter)}">
         </form>

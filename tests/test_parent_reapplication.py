@@ -32,7 +32,7 @@ class ParentReapplicationTests(unittest.TestCase):
                     "20260813_018_higher_education_application_module.sql",
                     "20260813_019_higher_education_module_v2.sql",
                 ):
-                    connection.executescript((Path("migrations") / migration).read_text())
+                    connection.executescript((Path(__file__).resolve().parents[1] / "migrations" / migration).read_text())
                 actor_id = connection.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
                 connection.execute(
                     """INSERT INTO students(student_id,passport_first_name,passport_last_name,

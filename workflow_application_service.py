@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import sqlite3
+from business_changes.applications import synchronized_application_write
 
 from school_plan_lifecycle import ActivationResult, PlanScope
 
@@ -92,6 +93,7 @@ FROM private_school_applications
 """
 
 
+@synchronized_application_write
 def ensure_independent_school_application(
     conn: sqlite3.Connection,
     application_cycle_id: int,
@@ -198,6 +200,7 @@ def ensure_independent_school_application(
     )
 
 
+@synchronized_application_write
 def submit_independent_school_application(
     conn: sqlite3.Connection,
     context: CanonicalApplicationContext,
@@ -227,6 +230,7 @@ def submit_independent_school_application(
     return context
 
 
+@synchronized_application_write
 def create_public_group_from_confirmation(
     conn: sqlite3.Connection,
     application_cycle_id: int,
@@ -306,6 +310,7 @@ def create_public_group_from_confirmation(
     )
 
 
+@synchronized_application_write
 def submit_public_group(
     conn: sqlite3.Connection,
     group_id: int,
@@ -343,6 +348,7 @@ def submit_public_group(
     )
 
 
+@synchronized_application_write
 def retract_public_group_submission(
     conn: sqlite3.Connection,
     group_id: int,
@@ -380,6 +386,7 @@ def retract_public_group_submission(
     )
 
 
+@synchronized_application_write
 def create_private_application(
     conn: sqlite3.Connection,
     application_cycle_id: int,
@@ -437,6 +444,7 @@ def create_private_application(
     )
 
 
+@synchronized_application_write
 def submit_private_application(
     conn: sqlite3.Connection,
     application_id: int,
@@ -466,6 +474,7 @@ def submit_private_application(
     )
 
 
+@synchronized_application_write
 def retract_private_application_submission(
     conn: sqlite3.Connection,
     application_id: int,
@@ -497,6 +506,7 @@ def retract_private_application_submission(
     )
 
 
+@synchronized_application_write
 def record_school_result(
     conn: sqlite3.Connection,
     *,
@@ -563,6 +573,7 @@ def record_school_result(
     raise WorkflowApplicationError(f"unsupported application source: {kind}")
 
 
+@synchronized_application_write
 def activate_public_plan(
     conn: sqlite3.Connection,
     application_cycle_id: int,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime
 from html import escape
@@ -355,6 +356,7 @@ def build_student_transfer_summary(
     *,
     database_path: str | Path | None = None,
     flags: StudentCaseFeatureFlags | None = None,
+    connection=None,
 ) -> StudentTransferSummary | None:
     """Build one permission-aware summary without changing Transfer data."""
     student = {"student_id": str(student_id)}
@@ -362,9 +364,10 @@ def build_student_transfer_summary(
         return None
     path = Path(database_path or Path(__file__).parent / "database" / "aaie_crm.db")
     service = TransferCaseService(path)
-    cases = service.list_transfer_cases(str(student_id))
+    read_options = {'connection': connection} if connection is not None else {}
+    cases = service.list_transfer_cases(str(student_id), **read_options)
     applications_by_case = {
-        item.case_id: service.list_transfer_school_applications(item.case_id)
+        item.case_id: service.list_transfer_school_applications(item.case_id, **read_options)
         for item in cases
     }
     completion = TransferCompletionService(path)
@@ -372,7 +375,7 @@ def build_student_transfer_summary(
     for item in cases:
         if int(item.active_slot) != 1:
             continue
-        evaluation = completion.evaluate_transfer_completion(item.case_id)
+        evaluation = completion.evaluate_transfer_completion(item.case_id, **read_options)
         completion_by_case[item.case_id] = (
             bool(evaluation.is_ready_to_complete),
             evaluation.missing_requirements,
@@ -382,7 +385,7 @@ def build_student_transfer_summary(
     cycle_by_case = {}
     projection_by_cycle = {}
     transfer_state = None
-    with sqlite3.connect(path) as connection:
+    with (nullcontext(connection) if connection is not None else closing(sqlite3.connect(path))) as connection:
         connection.row_factory = sqlite3.Row
         if case_ids:
             marks = ",".join("?" for _ in case_ids)

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from business_changes.transfer import record_transfer_change
 
 from contextlib import closing
 from dataclasses import dataclass
@@ -665,6 +666,9 @@ class TransferV2CompletionService:
                 payload,int(actor_user_id),timestamp,timestamp,
             ),
         )
+        record_transfer_change(connection,
+            event_type='transfer.completed' if command=='complete_transfer' else 'transfer.application_completed',
+            cycle_id=cycle_id,actor_user_id=actor_user_id,idempotency_key=event_uid,stamp=timestamp)
 
     @staticmethod
     def _active_acceptance(

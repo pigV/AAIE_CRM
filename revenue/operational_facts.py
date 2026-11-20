@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass,asdict,replace
 from datetime import date
 import re
 
@@ -268,7 +268,7 @@ class RevenueOperationalFacts:
         student_id = _value(row, "student_id")
         if not student_id and cycle_id is not None:
             student_id, _cycle = self._cycle_identity(cycle_id)
-        return CoeFact(
+        fact=CoeFact(
             id=row["id"], application_cycle_id=cycle_id, student_id=student_id,
             provider=_value(row, "coe_provider", _value(row, "school_name")),
             course=_value(row, "coe_course"), start_date=_value(row, "coe_start_date"),
@@ -277,6 +277,12 @@ class RevenueOperationalFacts:
             main_course_name=_value(row, "letter_main_course_name"),
             version=self._version(row, "created_at"),
         )
+        from business_changes.runtime import enabled
+        if enabled(self.connection):
+            from business_changes.commands import digest
+            values=asdict(fact);values.pop('version')
+            return replace(fact,version='coe_'+digest(values))
+        return fact
 
     def higher_education_application(self, application_id: int) -> HigherEducationApplicationFact:
         row = self._require("higher_education_applications", application_id)

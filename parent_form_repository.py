@@ -5,6 +5,7 @@ import sqlite3
 
 from application_cycle import record_application_lifecycle_event
 from workflow_cutover import is_workflow_v2_active
+from business_changes.parent_links import publish_parent_link_change
 
 
 ACCESS_EVENT_TYPES = frozenset({"opened", "authenticated"})
@@ -108,6 +109,8 @@ class ParentFormRepository:
                     student_id=student_id,
                     parent_form_token=token,
                 )
+            publish_parent_link_change(conn,token=token,event_type='parent_form.link_created',
+                actor_id=created_by,occurred_at=created_at)
         return self.get_link(token)
 
     def invalidate_if_writable(self, token, stamp):
@@ -120,7 +123,10 @@ class ParentFormRepository:
                      AND invalidated_at IS NULL""",
                 (stamp, token),
             )
-            return cursor.rowcount == 1
+            changed = cursor.rowcount == 1
+            if changed:
+                publish_parent_link_change(conn,token=token,event_type='parent_form.link_revoked',occurred_at=stamp)
+            return changed
 
     def regenerate_link(
         self,
@@ -198,6 +204,8 @@ class ParentFormRepository:
                     student_id=old_link["student_id"],
                     parent_form_token=new_token,
                 )
+            publish_parent_link_change(conn,token=new_token,event_type='parent_form.link_regenerated',
+                actor_id=created_by,occurred_at=stamp)
             return conn.execute(
                 "SELECT * FROM parent_form_tokens WHERE token=?",
                 (new_token,),

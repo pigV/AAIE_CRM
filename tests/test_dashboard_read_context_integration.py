@@ -38,6 +38,7 @@ class DashboardSummaryReadContextTests(unittest.TestCase):
                        wraps=load_current_workflow_projection) as loader:
                 with DashboardReadContext(database) as context:
                     connection = context.connection
+                    self.assertEqual(1,connection.execute('PRAGMA query_only').fetchone()[0])
                     before = tuple(connection.iterdump())
                     # Other Dashboard cards have already loaded the shared projection.
                     load_stage_distribution(connection, read_context=context)

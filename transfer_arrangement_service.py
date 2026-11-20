@@ -340,12 +340,17 @@ class TransferArrangementService:
         *,
         timeout: float = 5.0,
         clock: Callable[[], str] = now_iso,
+        caller_transaction=None,
     ):
         self.database_path = Path(database_path)
+        self._caller_transaction = caller_transaction
         self.timeout = timeout
         self.clock = clock
 
     def _connect(self) -> sqlite3.Connection:
+        if self._caller_transaction is not None:
+            from business_changes.service_connection import ServiceConnection
+            return ServiceConnection(self._caller_transaction, self.database_path)
         connection = sqlite3.connect(
             self.database_path,
             timeout=self.timeout,

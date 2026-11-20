@@ -70,6 +70,7 @@ def submit_original_operation(connection, fields, module_key, role="Staff", edit
             pass
 
     handler = object.__new__(app.CRMHandler)
+    handler.business_changes_enabled = lambda: False
     handler.user = fixture_user(role, editable)
     handler.form = fields
     result = {}
@@ -120,7 +121,7 @@ def fixture_user(role="Admin", editable=True):
                 module_permissions_json=json.dumps(["students", "applications", "payments", "visa"]))
 
 
-def build_fixture_page(role="Admin", editable=True, cycle_type="transfer", fail_lifecycle=False, *, consultant_id=2, withdrawal_projection=None, active_cycles=(), cycle_projection=None, visa_only=False):
+def build_fixture_page(role="Admin", editable=True, cycle_type="transfer", fail_lifecycle=False, *, consultant_id=2, withdrawal_projection=None, active_cycles=(), cycle_projection=None, visa_only=False, card_summary=None):
     """Execute the real GET renderer without SQLite, NAS, or Production rows."""
     student = dict(student_id="1001", passport_first_name="隔离", passport_last_name="学生",
                    form_data_json=json.dumps({"passport_first_name": "隔离", "passport_last_name": "学生"}),
@@ -136,7 +137,10 @@ def build_fixture_page(role="Admin", editable=True, cycle_type="transfer", fail_
                            upcoming_school=None, education_history=(), drafts=(), history=(current,))
     summary = app.StudentDetailCardSummary("1001", "waiting_contract", "等待建立合同", "2026-10-07",
                                           app.SchoolPlanCardSummary(()))
+    if card_summary is not None:
+        summary = card_summary
     handler = object.__new__(app.CRMHandler)
+    handler.business_changes_enabled = lambda: False
     handler.user = fixture_user(role, editable)
     handler.csrf = "isolated-issue2-csrf"
     handler.headers = {}
@@ -147,8 +151,8 @@ def build_fixture_page(role="Admin", editable=True, cycle_type="transfer", fail_
     handler.student_detail_row = lambda student_id: student
     if visa_only:
         handler.student_latest_visa_case = lambda student_id: {"status": "Lodged", "result_status": "Pending"}
-        handler.user["permissions_json"] = json.dumps(["students.view","students.edit","contracts.manage"])
-        handler.user["module_permissions_json"] = json.dumps(["students","applications","visa","payments","student_contracts"])
+        handler.user["permissions_json"] = json.dumps(["*"])
+        handler.user["module_permissions_json"] = json.dumps(["students","applications","visa","payments","student_contracts","school_plan_reports","offer","coe_oshc"])
     handler.message = lambda: ("", "success")
     captured = {}
     handler.send_html = lambda html, **kwargs: captured.update(html=html)
@@ -219,6 +223,7 @@ class StudentDetailInternalOutputTests(unittest.TestCase):
 
     def test_withdrawal_form_allows_the_delegated_manager(self):
         handler = object.__new__(app.CRMHandler)
+        handler.business_changes_enabled = lambda: False
         handler.user = fixture_user("Manager + Student Cases")
         handler.csrf = "fixture-csrf"
         handler.require = lambda permission: app.allowed(handler.user, permission)
@@ -256,6 +261,35 @@ class StudentDetailInternalOutputTests(unittest.TestCase):
             self.assertNotIn(f'data-tab="{key}"', html)
         self.assertNotIn("制作学校方案", html)
         self.assertNotIn("等待建立合同", html)
+
+    def school_progress_with_visa_only_profile(self,*,projection_cycle=173,school_cycle=173,state='active'):
+        schools=SimpleNamespace(names=('Mount Waverley Heights Primary School',),remaining_count=0,is_final=False,
+            offer_received_names=(),waiting_result_names=('Mount Waverley Heights Primary School',),
+            not_submitted_names=(),final_school_name='',submitted_count=1,has_application_cycle=True,
+            application_cycle_id=school_cycle)
+        summary=app.StudentDetailCardSummary('1001','07_school_response','等待学校发 Offer','2026-10-15',schools)
+        projection=SimpleNamespace(cycle_id=projection_cycle,cycle_type='initial',state=state,
+            stage_key='07_school_response',stage_label='等待学校发 Offer',diagnostic='',outcome=None)
+        return build_fixture_page(cycle_type='initial',visa_only=True,withdrawal_projection=projection,card_summary=summary)
+
+    def test_current_school_application_overrides_stale_visa_only_display(self):
+        html=self.school_progress_with_visa_only_profile()
+        self.assertIn('等待学校发 Offer',html)
+        self.assertNotIn('签证 · 审理中',html)
+        for key in ('school_plans','offer','payments','coe'):
+            self.assertIn(f'data-tab="{key}"',html)
+        self.assertIn('制作学校方案',html)
+
+    def test_old_school_cycle_cannot_override_current_visa_only_display(self):
+        html=self.school_progress_with_visa_only_profile(projection_cycle=174,school_cycle=173)
+        self.assertIn('签证 · 审理中',html)
+        self.assertNotIn('data-tab="school_plans"',html)
+        self.assertNotIn('制作学校方案',html)
+
+    def test_closed_school_cycle_cannot_override_visa_only_display(self):
+        html=self.school_progress_with_visa_only_profile(state='closed')
+        self.assertIn('签证 · 审理中',html)
+        self.assertNotIn('data-tab="school_plans"',html)
 
     def test_existing_detail_styles_do_not_depend_on_removed_panel(self):
         css = (Path(__file__).resolve().parents[1] / "assets/ui-premium-v2.css").read_text()

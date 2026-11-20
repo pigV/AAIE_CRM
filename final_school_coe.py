@@ -4,6 +4,7 @@ from datetime import date, datetime
 import json
 import re
 from zoneinfo import ZoneInfo
+from business_changes.coe import synchronized_coe_confirmation
 
 
 def school_coe_rows(conn, cycle_ids):
@@ -82,6 +83,7 @@ def eligibility_reason(row, today=None):
     return "CoE 提供方与当前最终学校不匹配，请先核对学校主数据"
 
 
+@synchronized_coe_confirmation
 def confirm_school_coe(conn, student_id, acceptance_id, coe_id, actor_id, stamp):
     cycle = conn.execute(
         "SELECT application_cycle_id FROM cycle_final_acceptances WHERE id=? AND student_id=?",

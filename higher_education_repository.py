@@ -3,6 +3,8 @@
 import sqlite3
 
 from revenue.access_policy import legacy_he_writes_closed
+from business_changes.higher_education import synchronized_higher_education_write
+from business_changes.higher_education_masters import synchronized_higher_education_master
 
 
 COURSE_TYPES = frozenset({"Foundation", "Diploma", "Bachelor", "Postgraduate", "Package"})
@@ -68,6 +70,7 @@ class HigherEducationRepository:
     def __init__(self, connection):
         self.conn = connection
 
+    @synchronized_higher_education_master
     def create_provider(self, name, provider_type, actor_user_id, occurred_at, *, source_url=None, evidence=None, review_status="Pending"):
         provider_name = _required(name, "provider_name")
         if provider_type not in {"University", "Pathway Provider"}:
@@ -85,6 +88,18 @@ class HigherEducationRepository:
             raise HigherEducationConflict(str(exc)) from exc
         return int(cursor.lastrowid)
 
+    @synchronized_higher_education_master
+    def update_university(self,provider_id,name,active_status,actor_user_id,occurred_at,*,short_name=None,state=None,city=None,source_url=None):
+        provider_name=_required(name,'provider_name')
+        if active_status not in {'Active','Inactive'}:raise HigherEducationValidationError('valid university name and status are required')
+        changed=self.conn.execute('''UPDATE higher_education_providers
+            SET provider_name=?,normalized_name=?,short_name=?,state=?,city=?,active_status=?,source_url=?,
+                updated_by_user_id=?,updated_at=? WHERE id=? AND provider_type='University' ''',
+            (provider_name,' '.join(provider_name.casefold().split()),short_name,state,city,active_status,source_url,
+             actor_user_id,occurred_at,provider_id)).rowcount
+        if changed!=1:raise HigherEducationValidationError('university does not exist')
+
+    @synchronized_higher_education_master
     def link_pathway(self, university_id, pathway_provider_id, relationship_type, actor_user_id, occurred_at, *, effective_from=None, effective_to=None, source_url=None, evidence=None):
         if relationship_type not in {"Direct", "Partner"}:
             raise HigherEducationValidationError("unsupported relationship_type")
@@ -107,6 +122,7 @@ class HigherEducationRepository:
             raise HigherEducationConflict(str(exc)) from exc
         return int(cursor.lastrowid)
 
+    @synchronized_higher_education_master
     def review_provider(self, provider_id, decision, actor_user_id, occurred_at):
         if decision not in {"Approved", "Rejected"}:
             raise HigherEducationValidationError("unsupported provider review decision")
@@ -117,6 +133,7 @@ class HigherEducationRepository:
         if not changed:
             raise HigherEducationConflict("provider is not pending review")
 
+    @synchronized_higher_education_master
     def create_pathway_combination(self, university_id, pathway_code, display_name, final_course_level, actor_user_id, occurred_at, *, source_url=None, evidence=None):
         if final_course_level not in {"Foundation", "Diploma", "Bachelor", "Master"}:
             raise HigherEducationValidationError("unsupported final course level")
@@ -142,6 +159,7 @@ class HigherEducationRepository:
             raise HigherEducationConflict(str(exc)) from exc
         return int(cursor.lastrowid)
 
+    @synchronized_higher_education_master
     def add_pathway_segment(self, pathway_combination_id, segment_order, provider_id, course_level, actor_user_id, occurred_at, *, source_url=None, evidence=None):
         if course_level not in {"Foundation", "Diploma", "Bachelor", "Master"}:
             raise HigherEducationValidationError("unsupported pathway segment level")
@@ -177,6 +195,7 @@ class HigherEducationRepository:
             sql += " AND active_status='Active'"
         return self.conn.execute(sql + " ORDER BY display_name,id", (university_id,)).fetchall()
 
+    @synchronized_higher_education_master
     def create_or_get_course(self, university_id, course_name, course_level, actor_user_id, occurred_at, *, specialisation=None):
         if course_level not in COURSE_LEVELS:
             raise HigherEducationValidationError("unsupported course level")
@@ -219,6 +238,7 @@ class HigherEducationRepository:
             (university_id, f"%{normalized_query}%", f"{normalized_query}%", max(1, min(int(limit), 100))),
         ).fetchall()
 
+    @synchronized_higher_education_master
     def merge_course(self, duplicate_course_id, canonical_course_id, actor_user_id, occurred_at):
         duplicate = self.conn.execute(
             "SELECT university_id,course_level FROM higher_education_courses WHERE id=?",
@@ -253,6 +273,7 @@ class HigherEducationRepository:
             (canonical_course_id, actor_user_id, occurred_at, duplicate_course_id),
         )
 
+    @synchronized_higher_education_master
     def set_course_status(self, course_id, active_status, actor_user_id, occurred_at):
         if active_status not in {"Active", "Inactive"}:
             raise HigherEducationValidationError("unsupported course status")
@@ -264,6 +285,7 @@ class HigherEducationRepository:
         if cursor.rowcount != 1:
             raise HigherEducationValidationError("course does not exist")
 
+    @synchronized_higher_education_write
     def create_plan(self, cycle_id, actor_user_id, occurred_at):
         v2_schema = _has_column(self.conn, "students", "parent_requested_pathway")
         pathway_select = "s.parent_requested_pathway" if v2_schema else "NULL"
@@ -290,6 +312,7 @@ class HigherEducationRepository:
             raise HigherEducationValidationError(str(exc)) from exc
         return int(cursor.lastrowid)
 
+    @synchronized_higher_education_write
     def add_plan_item(self, plan_id, provider_id, course_type, course_name, intake, actor_user_id, occurred_at, *, pathway_combination_id=None, course_id=None):
         if course_type not in COURSE_TYPES:
             raise HigherEducationValidationError("unsupported course_type")
@@ -333,7 +356,8 @@ class HigherEducationRepository:
             )
         return int(cursor.lastrowid)
 
-    def remove_draft_plan_item(self, item_id):
+    @synchronized_higher_education_write
+    def remove_draft_plan_item(self, item_id, *, actor_user_id=None, occurred_at=None):
         row = self.conn.execute(
             """SELECT i.id,p.status
                FROM higher_education_plan_items i
@@ -352,6 +376,7 @@ class HigherEducationRepository:
             raise HigherEducationValidationError("submitted university application cannot be removed")
         self.conn.execute("DELETE FROM higher_education_plan_items WHERE id=?", (item_id,))
 
+    @synchronized_higher_education_write
     def confirm_plan(self, plan_id, actor_user_id, occurred_at):
         pathway_rows = self.conn.execute(
             """SELECT c.id,c.final_course_level,
@@ -394,12 +419,20 @@ class HigherEducationRepository:
             course_id=row["course_id"] if "course_id" in row.keys() else None,
         )
 
+    @synchronized_higher_education_write
     def create_application(self, cycle_id, provider_id, course_type, course_name, intake, channel, actor_user_id, occurred_at, *, source_plan_item_id=None, master_agent_id=None, pathway_combination_id=None, course_id=None):
         if course_type not in COURSE_TYPES:
             raise HigherEducationValidationError("unsupported course_type")
         intake = _required(intake, "intake")
         if channel not in {"Direct", "Master Agent"} or (channel == "Master Agent" and master_agent_id is None):
             raise HigherEducationValidationError("valid submission channel is required")
+        if source_plan_item_id is not None:
+            source=self.conn.execute('''SELECT p.application_cycle_id,p.status FROM higher_education_plan_items i
+                JOIN higher_education_plans p ON p.id=i.plan_id WHERE i.id=?''',(source_plan_item_id,)).fetchone()
+            if source is None or int(source['application_cycle_id'])!=int(cycle_id):
+                raise HigherEducationValidationError('source plan item is outside the application cycle')
+            if source['status']!='Confirmed':
+                raise HigherEducationValidationError('plan must be confirmed before submission')
         try:
             if _has_column(self.conn, "higher_education_applications", "pathway_combination_id"):
                 cursor = self.conn.execute(
@@ -475,6 +508,7 @@ class HigherEducationRepository:
             raise HigherEducationConflict(str(exc)) from exc
         return int(cursor.lastrowid)
 
+    @synchronized_higher_education_write
     def record_offer(
         self,
         application_id,
@@ -525,6 +559,7 @@ class HigherEducationRepository:
                 raise HigherEducationConflict(str(exc)) from exc
         return offer_id
 
+    @synchronized_higher_education_write
     def accept_offer(self, offer_id, actor_user_id, occurred_at):
         row = self.conn.execute(
             """SELECT o.status,a.application_cycle_id FROM higher_education_offers o
@@ -625,6 +660,7 @@ class HigherEducationRepository:
             raise HigherEducationConflict(str(exc)) from exc
         return int(cursor.lastrowid)
 
+    @synchronized_higher_education_write
     def link_coe(self, application_id, coe_oshc_id, actor_user_id, occurred_at, *, package_segment_id=None):
         scope = "Package Segment" if package_segment_id is not None else "Whole Application"
         try:

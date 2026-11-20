@@ -62,6 +62,13 @@ def document_workspace_html(case_id, csrf, documents, submissions, extractions, 
     conflict='<p class="visa-result-conflict" role="alert">Conflicting Grant and Refusal evidence requires Staff review.</p>' if result.get('conflict') else ''
     result_card=f'<div class="visa-result-summary"><div><span>Current Result</span><strong>{escape(str(result.get("effective_result") or "Pending"))}</strong></div><div><span>Authority</span><strong>{authority}</strong></div><div><span>Auto Detected Result</span><strong>{escape(str(result.get("auto_detected_result") or "Not detected"))}</strong></div></div>{conflict}'
     current_result=str(result.get('effective_result') or 'Pending')
+    recorded=str(result.get('recorded_result') or current_result)
+    if result.get('manual_override') or result.get('authority')=='legacy':
+        if recorded in {'Pending','Granted','Refused','Withdrawn'}:
+            if recorded!=current_result:
+                label='原人工结果记录' if result.get('manual_override') else '原结果记录'
+                result_card+=f'<p role="status">{label}：{escape(recorded)}；当前有效结果：{escape(current_result)}。原记录已保留，请核对来源后更正。</p>'
+            current_result=recorded
     result_options=''.join(f'<option'+(' selected' if item==current_result else '')+f'>{item}</option>' for item in ('Pending','Granted','Refused','Withdrawn'))
     correction=form('correct-result-status',f'<label>Correct Result<select name="result_status">{result_options}</select></label><label>Reason<input name="reason" required maxlength="500"></label><button>Save correction</button>')
     if compact_result_controls:
@@ -94,7 +101,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
     def _visa_check_upload(self, case, data, category=None, exclude_source_id=None, *, connection=None):
         from visa_document_lifecycle import check_upload
         g=self._visa_runtime()
-        with (nullcontext(connection) if connection is not None else g['db'].transaction()) as conn:
+        with (nullcontext(connection) if connection is not None else self._visa_read_scope()) as conn:
             check_upload(conn,int(case['id']),hashlib.sha256(data).hexdigest(),category,
                          read_bytes=lambda d:self._visa_document_path(case,d).read_bytes(),exclude_source_id=exclude_source_id)
 
@@ -190,6 +197,26 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
             self.error_page('Visa Candidate migration 037 is required. Contact the release owner.',503);return False
         return True
 
+    def _visa_require_current_write(self,connection,case_id,*,prepared_case=None):
+        from business_changes.authorization import current_staff
+        from business_changes.commands import TransactionView
+        from business_changes.materials import _owned_case
+        g=self._visa_runtime()
+        actor=current_staff(connection,self.user['id'])
+        view=TransactionView(connection,'bc_visa_authorization')
+        with g['db'].business_scope(view):
+            if not g['can_save_visa_record'](actor):
+                raise PermissionError('你没有修改当前签证案件的权限。')
+        case=connection.execute('SELECT student_id FROM visa_cases WHERE id=?',(case_id,)).fetchone()
+        if case is None:raise ValueError('Visa Case not found.')
+        owned=_owned_case(connection,str(case[0] or ''),case_id)
+        if prepared_case is not None:
+            before=dict(prepared_case)
+            if any(before.get(key)!=owned.get(key) for key in ('student_id','application_cycle_id','applicant_id')):
+                from business_changes.commands import VersionConflict
+                raise VersionConflict('案件归属已变化，请重新读取并识别。')
+        return owned,actor
+
     def visa_lodgement_auto_extract_result(self, case, student_document_id, file_type_value):
         """Create a review-only extraction proposal for a legacy Result upload."""
         if not case or self.visa_lodgement_file_type_value(file_type_value) not in {'grant_letter', 'refusal_letter'}:
@@ -221,14 +248,47 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
     def _visa_send(self,title,body):
         g=self._visa_runtime();return self.send_html(g['page'](title,body,self.user,self.csrf,'visa_management',g['nas'].status()))
 
+    def _visa_case_render(self,title,body,fragment_only=False):
+        return body if fragment_only else self._visa_send(title,body)
+
+    def _visa_fact_read_scope(self):
+        return (self._visa_read_scope() if getattr(self,'business_changes_enabled',lambda:False)()
+                else self._visa_runtime()['db'].transaction())
+
+    def _visa_projection_reader(self,case):
+        if getattr(self,'business_changes_enabled',lambda:False)():return lambda document:''
+        return lambda document:self._visa_read_text(dict(case),document)
+
+    def _visa_result_summary_read(self,connection,case):
+        from visa_result_status import result_summary
+        options={'read_text':lambda document:''} if getattr(self,'business_changes_enabled',lambda:False)() else {}
+        return result_summary(connection,int(case['id']),**options)
+
+    def _visa_read_scope(self):
+        db=self._visa_runtime()['db']
+        state=getattr(db,'_request_state',lambda:None)()
+        current=(state.get('business_connection') or state.get('connection')) if state is not None else None
+        if current is not None and current.in_transaction:return nullcontext(current)
+        return db.read_snapshot() if hasattr(db,'read_snapshot') else db.transaction()
+
     def _visa_display_case(self, case):
         db=self._visa_runtime()['db']
         if not db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'"):return case
-        from visa_result_status import result_summary
         from visa_document_lifecycle import case_projection
-        with db.transaction() as conn:
-            result=result_summary(conn,int(case['id']));projection=case_projection(conn,int(case['id']))
-        row=dict(case);row['result_status']=result['effective_result']
+        with self._visa_read_scope() as conn:
+            projection=case_projection(conn,int(case['id']),read_text=lambda document:'')
+            from business_changes.runtime import enabled
+            if enabled(conn):
+                from visa_business_state import formal_lodgement,retained_grant_needs_review
+                row=dict(case);row['result_status']=row['decision_status']=projection['result_status']
+                row['_business_needs_review']=retained_grant_needs_review(conn,dict(case),projection['result_status'])
+                if row['result_status'] in {'Granted','Refused','Withdrawn'}:row['status']=row['result_status']
+                elif formal_lodgement(row):
+                    row['status']='S56 Requested' if row.get('status')=='S56 Requested' else 'Lodged'
+                elif row.get('status') in {'Granted','Refused','Withdrawn','Lodged','Submitted','Pending'}:
+                    row['status']='Documents Preparing' if projection['documents'] else 'Information Collection'
+                return row
+        row=dict(case);row['result_status']=projection['result_status']
         if row.get('decision_status')=='Granted':row['decision_status']=row['result_status']
         if projection['result_status'] in {'Granted','Refused'}:row['status']=projection['result_status']
         elif row.get('status') in {'Granted','Refused'} and row['result_status'] not in {'Granted','Refused'}:
@@ -237,6 +297,18 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
 
     def student_visa_case_rows(self, student_id):
         return [self._visa_display_case(row) for row in super().student_visa_case_rows(student_id)]
+
+    def visa_management_kpis(self):
+        from business_changes.runtime import enabled
+        with self._visa_read_scope() as conn:
+            if enabled(conn):
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+                from visa_business_state import visa_case_kpis
+                values=visa_case_kpis(conn,today=datetime.now(ZoneInfo('Australia/Melbourne')).date())
+                return [('Visa Cases',values['total'],'当前未归档 case'),('进行中',values['active'],'按当前有效结果判定'),
+                    ('90 天内到期',values['expiring'],'只读日期提醒'),('Checklist 未完成',values['checklist_open'],'当前未归档 case 的待办材料项')]
+        return super().visa_management_kpis()
 
     def student_visa_result_display(self, case):
         return super().student_visa_result_display(self._visa_display_case(case)) if case else 'Pending'
@@ -321,8 +393,8 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         cache=state.setdefault('visa_display_projections',{}) if state is not None else {}
         if cid not in cache:
             from visa_document_lifecycle import case_projection
-            with db.transaction() as conn:
-                cache[cid]=case_projection(conn,cid,read_text=lambda d:self._visa_read_text(dict(case),d))
+            with self._visa_fact_read_scope() as conn:
+                cache[cid]=case_projection(conn,cid,read_text=self._visa_projection_reader(case))
         return cache[cid]
 
     def visa_processing_panel_html(self,case,*,compact=False):
@@ -335,7 +407,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         if compact:
             from visa_result_workspace_ui import result_processing_display
             summary=result_processing_display(summary,self.student_visa_result_display(case))
-        with db.transaction() as conn:
+        with self._visa_fact_read_scope() as conn:
             documents=[dict(r) for r in conn.execute('SELECT * FROM visa_case_documents WHERE visa_case_id=?',(cid,))]
         official=projection['official_decision']
         source=f'<a href="{escape(official["source_href"],quote=True)}">Review original official letter / retained record</a>' if official['source_href'] else ''
@@ -347,14 +419,15 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         from visa_result_workspace_ui import official_review_url
         html+=f'<p><a href="{escape(official_review_url(case),quote=True)}">Confirm official Visa decision</a></p>'
         html+=processing_dates_html(cid,self.csrf,summary,documents,compact=compact)
-        grant_form=f'<form method="post" action="/visa-management/cases/{cid}/workspace"><input type="hidden" name="csrf" value="{escape(self.csrf,quote=True)}"><input type="hidden" name="action" value="correct-grant-date"><label>Date of Grant<input type="date" name="grant_date" value="{escape(projection["grant_date"],quote=True)}"></label><button>Save Date of Grant</button></form>'
+        grant_value=projection.get('recorded_grant_date',projection['grant_date'] or dict(case).get('grant_date') or '') if getattr(self,'business_changes_enabled',lambda:False)() else projection['grant_date']
+        grant_form=f'<form method="post" action="/visa-management/cases/{cid}/workspace"><input type="hidden" name="csrf" value="{escape(self.csrf,quote=True)}"><input type="hidden" name="action" value="correct-grant-date"><label>Date of Grant<input type="date" name="grant_date" value="{escape(grant_value,quote=True)}"></label><button>Save Date of Grant</button></form>'
         html+=('<details class="visa-result-correction"><summary>更正 Date of Grant</summary>'+grant_form+'</details>') if compact else grant_form
         # The normal Case page shows business results and dates, without a
         # second document-analysis form. Explicit review stays in the workspace.
         result=None
         if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'"):
             from visa_result_status import result_summary
-            with db.transaction() as conn:result=result_summary(conn,cid)
+            with self._visa_fact_read_scope() as conn:result=self._visa_result_summary_read(conn,case)
         review_html=document_workspace_html(cid,self.csrf,[],[],[],result,show_official_review=False,compact_result_controls=compact)
         marker='<section class="panel" id="visa-result">'
         html+=marker+review_html.partition(marker)[2]
@@ -368,8 +441,15 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         result={'effective_result':self.student_visa_result_display(case)}
         if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'"):
             from visa_result_status import result_summary
-            with db.transaction() as connection:result=result_summary(connection,int(case['id']))
-        return render_result_workspace(dict(case),result,materials,processing,lodgement,case_documents)
+            with self._visa_fact_read_scope() as connection:result=self._visa_result_summary_read(connection,case)
+        from business_changes.runtime import enabled
+        with self._visa_read_scope() as connection:
+            if enabled(connection):
+                from visa_business_state import resolve_case_state
+                state=resolve_case_state(connection,dict(case))
+                result=dict(result,effective_result=state['result'],requires_review=state['requires_review'])
+        notice=getattr(self,'business_change_visa_consistency_html',lambda **kwargs:'')(case_id=int(case['id']))
+        return notice+render_result_workspace(dict(case),result,materials,processing,lodgement,case_documents)
 
     def visa_legacy_document_display_name(self,case_id,file):
         original=file['original_name'] or file['stored_name']
@@ -378,7 +458,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         if not db.one("SELECT 1 FROM sqlite_master WHERE name='visa_document_metadata'"):return original
         from visa_legacy_document_adapter import legacy_document_view
         try:
-            with db.transaction() as conn:return legacy_document_view(conn,int(case_id),int(file['id']))['display_name']
+            with self._visa_fact_read_scope() as conn:return legacy_document_view(conn,int(case_id),int(file['id']))['display_name']
         except ValueError:return original
 
     def visa_legacy_document_controls_html(self,case_id,file):
@@ -388,15 +468,17 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         from visa_legacy_document_adapter import legacy_document_view
         from visa_document_processing_ui import document_edit_html
         try:
-            with db.transaction() as conn:document=legacy_document_view(conn,int(case_id),int(file['id']))
+            with self._visa_fact_read_scope() as conn:document=legacy_document_view(conn,int(case_id),int(file['id']))
         except ValueError:return ''
         html=document_edit_html(case_id,self.csrf,document)
         html=html.replace(f'<input type="hidden" name="document_id" value="{int(document["id"])}">',f'<input type="hidden" name="legacy_student_document_id" value="{int(file["id"])}">')
         html=html.replace('value="edit-document"','value="legacy-edit"').replace('value="reclassify"','value="legacy-classify"').replace('value="archive-document"','value="legacy-delete"')
         return html
 
-    def visa_case_workspace(self,method,case_id):
+    def visa_case_workspace(self,method,case_id,*,fragment_only=False):
         if not self._visa_allowed():return
+        if method=='GET' and not fragment_only and getattr(self,'business_changes_enabled',lambda:False)():
+            return self.business_change_case_page('visa_case_workspace',case_id)
         if method not in {'GET','POST'}:return self.error_page('Method Not Allowed',405)
         g=self._visa_runtime();db=g['db'];case=db.one('SELECT * FROM visa_cases WHERE id=? AND archived_at IS NULL',(case_id,))
         if not case:return self.error_page('Visa Case not found',404)
@@ -404,6 +486,15 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
             import visa_documents_candidate as service
             from visa_applicant_candidate import link_student
             f=self.form;value=lambda key:g['form_text_value'](f,key);action=value('action');stamp=g['now_iso']();actor=self.user['id']
+            sync_enabled=getattr(self,'business_changes_enabled',lambda:False)()
+            if sync_enabled:
+                from business_changes.snapshots import read_scope
+                try:
+                    with read_scope(db) as connection:
+                        case,current_actor=self._visa_require_current_write(connection,case_id)
+                        actor=current_actor['id']
+                except PermissionError as exc:return self.error_page(str(exc),403)
+                except ValueError as exc:return self.error_page(str(exc),409)
             if action=='ai-extract':
                 return self.visa_case_ai_extract(case_id,value('document_id'))
             required_tables = {
@@ -421,6 +512,9 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                 return self.error_page('Visa document features are unavailable until the approved Visa-only migration is applied.', 503)
             try:
                 with db.transaction() as conn:
+                    if sync_enabled:
+                        case,current_actor=self._visa_require_current_write(conn,case_id)
+                        actor=current_actor['id']
                     if action in {'legacy-edit','legacy-classify','legacy-extract','legacy-delete'}:
                         from visa_legacy_document_adapter import register_linked_document
                         from visa_document_metadata import edit_document_metadata,classify_document
@@ -449,9 +543,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                         from visa_documents_candidate import set_document_archived
                         set_document_archived(conn,int(case_id),int(value('document_id')),archived=True,actor_user_id=actor,occurred_at=stamp)
                     elif action=='correct-grant-date':
-                        from visa_processing_dates import _valid
-                        date_value=_valid(value('grant_date'),None)
-                        service._audit(conn,int(case_id),None,'grant_date_corrected',{}, {'value':date_value},actor,stamp)
+                        service.correct_grant_date(conn,int(case_id),value('grant_date'),actor_user_id=actor,occurred_at=stamp)
                     elif action=='save-keyword-rule':
                         from visa_document_metadata import save_rule
                         save_rule(conn,keyword=value('keyword'),category=value('category'),priority=int(value('priority')),active=value('active')=='1',rule_id=int(value('rule_id')) if value('rule_id') else None,actor_user_id=actor,occurred_at=stamp)
@@ -548,21 +640,22 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                     tab = 'info_collection' if action == 'link-student' else 'visa_result'
                     workspace += f'?visa_tab={tab}'
                 return self.redirect(workspace)
+            except PermissionError as exc:return self.error_page(str(exc),403)
             except (ValueError,TypeError) as exc:return self.error_page(str(exc),400)
         documents=[dict(d) for d in db.all('SELECT * FROM visa_case_documents WHERE visa_case_id=? ORDER BY id DESC',(case_id,))]
         processing=None;rules=[]
         if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_document_metadata'"):
             from visa_document_metadata import effective_metadata, list_rules
             from visa_processing_dates import processing_summary
-            with db.transaction() as conn:
+            with self._visa_fact_read_scope() as conn:
                 for document in documents:document.update(effective_metadata(conn,int(case_id),document['id']))
                 rules=list_rules(conn)
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE name='visa_processing_date_extractions'").fetchone():
                     from visa_document_lifecycle import case_projection
-                    processing=case_projection(conn,int(case_id),read_text=lambda d:self._visa_read_text(dict(case),d))['processing']
+                    processing=case_projection(conn,int(case_id),read_text=self._visa_projection_reader(case))['processing']
         submitted=[dict(d) for d in db.all('SELECT * FROM visa_immi_submissions WHERE visa_case_id=? ORDER BY id DESC',(case_id,))]
         from visa_documents_candidate import active_letter_extractions
-        with db.transaction() as conn:
+        with self._visa_fact_read_scope() as conn:
             extractions = active_letter_extractions(conn, int(case_id))
         for extraction in extractions:
             source=next((doc for doc in documents if doc['id']==extraction['document_id']),None)
@@ -574,8 +667,14 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         result = None
         if db.one("SELECT 1 FROM sqlite_master WHERE name='visa_result_status_current'"):
             from visa_result_status import result_summary
-            with db.transaction() as conn:
-                result = result_summary(conn, int(case_id))
+            with self._visa_fact_read_scope() as conn:
+                result = self._visa_result_summary_read(conn,case)
+        from business_changes.runtime import enabled
+        with self._visa_read_scope() as conn:
+            if enabled(conn):
+                from visa_business_state import resolve_case_state
+                state=resolve_case_state(conn,dict(case))
+                result=dict(result or {},effective_result=state['result'],requires_review=state['requires_review'])
         official_decision_confirmed = bool(db.one(
             'SELECT 1 FROM visa_case_confirmed_decisions WHERE visa_case_id=?', (case_id,)
         ))
@@ -605,17 +704,19 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
             info = profile_panel + self.visa_information_collection_html('', case)
             evidence = self.visa_evidence_form_html('', case)
             if self.visa_only_materials_ready():
-                return self.visa_only_material_workspace(case, info, document_panel, evidence + analysis_link)
+                return (self.visa_only_material_workspace(case, info, document_panel, evidence + analysis_link,fragment_only=True) if fragment_only else
+                        self.visa_only_material_workspace(case, info, document_panel, evidence + analysis_link))
             header = '<section class="panel"><p>独立案件材料清单需要先应用数据库迁移。</p></section>'
-            return self._visa_send('Visa Case Workspace', header + info + document_panel + evidence + analysis_link)
+            return self._visa_case_render('Visa Case Workspace', header + info + document_panel + evidence + analysis_link,fragment_only)
 
         header = f"""<section class="panel"><a href="/visa-management">Visa Management Search</a>
             <h2>Visa Case #{case_id} · {escape(str(case['applicant_name'] or ''))}</h2>
             <p>Decision: {escape(str(self.student_visa_result_display(case)))}</p>
             <a href="/students/{quote(case['student_id'])}/visa-cases/{case_id}">Information Form / Checklist / Evidence</a></section>"""
-        return self._visa_send('Visa Case Workspace', header + document_panel + analysis_link)
+        notice=getattr(self,'business_change_visa_consistency_html',lambda **kwargs:'')(case_id=int(case_id))
+        return self._visa_case_render('Visa Case Workspace', header + notice + document_panel + analysis_link,fragment_only)
 
-    def visa_only_material_workspace(self, case, info, document_panel, evidence):
+    def visa_only_material_workspace(self, case, info, document_panel, evidence, *, fragment_only=False):
         case_id = case['id']
         name = escape(str(case['applicant_name'] or case['visa_case_name'] or ''))
         query = getattr(self, 'query', {}) or {}
@@ -646,7 +747,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         overview = f'<dl class="visa-management-detail-grid">{cards}</dl>'
         if active_tab in {'material_checklist','visa_result'}:
             overview = f'<details class="visa-material-case-details"><summary>展开案件详情</summary>{overview}</details>'
-        return self._visa_send('Visa Case Workspace', f"""
+        return self._visa_case_render('Visa Case Workspace', f"""
             <div class="visa-management-page{' visa-material-case-page' if active_tab in {'material_checklist','visa_result'} else ''}">{notice}
               <section class="panel visa-management-hero">
                 <div><h2>Visa Case #{case_id} · {name}</h2><p>Visa-only Applicant / 独立签证申请人</p></div>
@@ -658,7 +759,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
               </section>
               <nav class="visa-case-section-nav visa-case-tabs" aria-label="Visa Case tabs">{tabs}</nav>
               <section class="visa-case-tab-content" data-visa-active-tab="{escape(active_tab)}">{panels}</section>
-            </div>""")
+            </div>""",fragment_only)
 
     def visa_material_case_or_404(self,student_id,case_id):
         if student_id=='':
@@ -781,7 +882,8 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         archived={r['student_document_id'] for r in db.all('SELECT student_document_id FROM visa_case_documents WHERE visa_case_id=? AND archived_at IS NOT NULL',(case_id,))}
         return [row for row in rows if row['id'] not in archived]
 
-    def _visa_register_uploaded_document(self,case,document_id,*,connection=None,extract_letter=True):
+    def _visa_register_uploaded_document(self,case,document_id,*,connection=None,extract_letter=True,
+            prepared_bytes=None,prepared_text=None):
         from contextlib import nullcontext
         g=self._visa_runtime();db=g['db']
         read_one = db.one if connection is None else lambda sql, params=(): connection.execute(sql, params).fetchone()
@@ -790,7 +892,10 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         if not raw:return
         from visa_documents_candidate import register_document,save_extraction
         from visa_document_metadata import LEGACY
-        path=self._visa_document_path(dict(case),dict(raw));data=path.read_bytes()
+        if prepared_bytes is not None and not isinstance(prepared_bytes,bytes):
+            raise ValueError('Prepared Visa material must contain immutable bytes.')
+        path=self._visa_document_path(dict(case),dict(raw))
+        data=path.read_bytes() if prepared_bytes is None else prepared_bytes
         with (db.transaction() if connection is None else nullcontext(connection)) as conn:
             doc=register_document(conn,int(case['id']),student_document_id=int(document_id),file_path=str(path),original_name=raw['original_name'],version=int(dict(raw).get('version') or 1),sha256=hashlib.sha256(data).hexdigest(),category=LEGACY.get(dict(raw).get('document_type'),'other'),actor_user_id=self.user['id'],occurred_at=g['now_iso']())
             if not extract_letter:
@@ -805,17 +910,23 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                     (case['id'],document_id))
                 if draft:
                     return
-            text=self._visa_read_text(dict(case),doc)
+            text=self._visa_read_text(dict(case),doc) if prepared_text is None else prepared_text
             if text:save_extraction(conn,int(case['id']),doc['id'],text=text,actor_user_id=self.user['id'],occurred_at=g['now_iso']())
 
-    def visa_lodgement_sync_material_upload_to_visa_tab(self,case,item,document_id,filename):
-        result=super().visa_lodgement_sync_material_upload_to_visa_tab(case,item,document_id,filename)
-        self._visa_register_uploaded_document(case,document_id)
+    def visa_lodgement_sync_material_upload_to_visa_tab(self,case,item,document_id,filename,*,connection=None,
+            prepared_bytes=None,prepared_text=None):
+        result=super().visa_lodgement_sync_material_upload_to_visa_tab(case,item,document_id,filename,connection=connection)
+        self._visa_register_uploaded_document(case,document_id,connection=connection,
+            prepared_bytes=prepared_bytes,prepared_text=prepared_text)
         return result
 
-    def visa_lodgement_link_document_to_case(self,student_id,case,document_id,file_type_value,filename=''):
-        result=super().visa_lodgement_link_document_to_case(student_id,case,document_id,file_type_value,filename)
-        if case and document_id:self._visa_register_uploaded_document(case,document_id)
+    def visa_lodgement_link_document_to_case(self,student_id,case,document_id,file_type_value,filename='',*,
+            connection=None,prepared_bytes=None,prepared_text=None):
+        db=self._visa_runtime()['db']
+        with (db.business_scope(connection) if connection is not None else nullcontext()):
+            result=super().visa_lodgement_link_document_to_case(student_id,case,document_id,file_type_value,filename)
+        if case and document_id:self._visa_register_uploaded_document(case,document_id,connection=connection,
+            prepared_bytes=prepared_bytes,prepared_text=prepared_text)
         return result
 
     def _visa_text_from_document(self,case,document):
@@ -830,6 +941,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
     def visa_case_ai_extract(self,case_id,document_id):
         from visa_ai_candidate import provider_from_environment, VisaAIError
         from visa_ai_persistence import save_ai_letter
+        from business_changes.commands import VersionConflict
         g=self._visa_runtime();db=g['db']
         try:
             case=db.one('SELECT * FROM visa_cases WHERE id=? AND archived_at IS NULL',(case_id,))
@@ -842,15 +954,26 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
             envelope=provider.extract_letter(text,{'document_id':doc['id'],'version':doc['version'],'sha256':doc['sha256']})
             self._visa_document_path(dict(case),dict(doc))
             with db.transaction() as conn:
+                if getattr(self,'business_changes_enabled',lambda:False)():
+                    self._visa_require_current_write(conn,case_id,prepared_case=case)
                 save_ai_letter(conn,int(case_id),int(document_id),envelope,actor_user_id=self.user['id'],occurred_at=g['now_iso']())
             return self.redirect(f'/visa-management/cases/{case_id}/workspace')
+        except PermissionError as exc:return self.error_page(str(exc),403)
+        except VersionConflict as exc:return self.error_page(str(exc),409)
         except (ValueError,VisaAIError) as exc:return self.error_page(str(exc),400)
 
     def visa_submission_analysis(self,method,case_id):
+        from business_changes.commands import VersionConflict
         if method not in {'GET','POST'}:return self.error_page('Method Not Allowed',405)
         if not self._visa_allowed():return
         g=self._visa_runtime();db=g['db'];case=db.one('SELECT * FROM visa_cases WHERE id=? AND archived_at IS NULL',(case_id,))
         if not case:return self.error_page('Visa Case not found',404)
+        if method=='POST' and getattr(self,'business_changes_enabled',lambda:False)():
+            from business_changes.snapshots import read_scope
+            try:
+                with read_scope(db) as connection:case,_=self._visa_require_current_write(connection,case_id)
+            except PermissionError as exc:return self.error_page(str(exc),403)
+            except ValueError as exc:return self.error_page(str(exc),409)
         from visa_ai_candidate import provider_from_environment,VisaAIError
         try: provider=provider_from_environment()
         except VisaAIError as exc:return self.error_page(str(exc),400)
@@ -868,10 +991,14 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                 envelope['metadata']['source_ownership']=context['ownership']
                 # Revalidate active versions and physical hashes after the external request.
                 with db.transaction() as conn:
+                    if getattr(self,'business_changes_enabled',lambda:False)():
+                        self._visa_require_current_write(conn,case_id,prepared_case=case)
                     fresh=submitted_analysis_context(conn,int(case_id),lambda row:self._visa_text_from_document(case,row),self.visa_evidence_ownership_context(case_id))
                     if fresh['documents']!=context['documents'] or fresh['ownership']!=context['ownership']:raise ValueError('Submitted evidence changed during analysis; run again.')
                     save_ai_analysis(conn,int(case_id),envelope,actor_user_id=self.user['id'],occurred_at=g['now_iso']())
                 return self.redirect(f'/visa-management/cases/{case_id}/analysis')
+            except PermissionError as exc:return self.error_page(str(exc),403)
+            except VersionConflict as exc:return self.error_page(str(exc),409)
             except (ValueError,VisaAIError) as exc:return self.error_page(str(exc),400)
         from visa_evidence_candidate import analysis_html
         retained=db.one("SELECT * FROM visa_document_audit WHERE visa_case_id=? AND action='ai_analysis_completed' ORDER BY id DESC LIMIT 1",(case_id,))

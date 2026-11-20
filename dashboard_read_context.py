@@ -4,21 +4,14 @@ import threading
 from workflow_projection import load_current_workflow_projection
 
 
-class DashboardReadContext:
-    def __init__(self, database):
-        self._scope = database.read_snapshot()
-        self.connection = None
-        self._projection = None
-        self._thread = None
-        self._used = False
-
-    def __enter__(self):
-        if self._used:
-            raise RuntimeError("dashboard read context cannot be reused")
-        self._used = True
-        self.connection = self._scope.__enter__()
-        self._thread = threading.get_ident()
-        return self
+class DashboardProjectionContext:
+    """Cache projections on a caller-owned, already active read snapshot."""
+    def __init__(self,connection):
+        if not connection.in_transaction:
+            raise RuntimeError('active dashboard snapshot required')
+        self.connection=connection
+        self._projection=None
+        self._thread=threading.get_ident()
 
     def workflow(self, connection, *, cycle_ids=None):
         if (connection is not self.connection or self.connection is None
@@ -31,6 +24,24 @@ class DashboardReadContext:
             return self._projection
         requested = frozenset(int(value) for value in cycle_ids)
         return tuple(row for row in self._projection if row.cycle_id in requested)
+
+
+class DashboardReadContext(DashboardProjectionContext):
+    def __init__(self, database):
+        self._scope = database.read_snapshot()
+        self.connection = None
+        self._projection = None
+        self._thread = None
+        self._used = False
+
+    def __enter__(self):
+        if self._used:
+            raise RuntimeError("dashboard read context cannot be reused")
+        self._used = True
+        self.connection = self._scope.__enter__()
+        self.connection.execute('PRAGMA query_only=ON')
+        self._thread = threading.get_ident()
+        return self
 
     def __exit__(self, exc_type, exc, traceback):
         try:

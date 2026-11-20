@@ -1,12 +1,16 @@
 import unittest
 
-from dashboard_confirmed_stages import PROFILE_ONLY_STAGES, resolve_dashboard_stage
+from dashboard_confirmed_stages import STAGES, STAGE_DETAILS, PROFILE_ONLY_STAGES, resolve_dashboard_stage
 
 
 class DashboardConfirmedStageTests(unittest.TestCase):
-    def test_contract_draft_and_expired_link_leave_the_chart(self):
+    def test_visa_review_is_not_a_distribution_stage_but_keeps_its_profile_label(self):
+        self.assertNotIn('visa_result_needs_review',{key for key,*_ in STAGES})
+        self.assertEqual('签证材料需核实',STAGE_DETAILS['visa_result_needs_review'][1])
+
+    def test_contract_draft_stays_in_preparation_and_expired_link_is_explicit(self):
         self.assertEqual(resolve_dashboard_stage(form_submitted=True)[0], "02_contract_creation")
-        self.assertIsNone(resolve_dashboard_stage(form_submitted=True, contract="draft"))
+        self.assertEqual(resolve_dashboard_stage(form_submitted=True, contract="draft")[0],"contract_preparation")
         self.assertEqual(resolve_dashboard_stage(contract="ready")[0], "contract_preparation")
         self.assertEqual(resolve_dashboard_stage(contract="live")[0], "03_contract_signature")
         self.assertIn(resolve_dashboard_stage(form_submitted=True, contract="inactive_link")[0], PROFILE_ONLY_STAGES)
@@ -23,7 +27,7 @@ class DashboardConfirmedStageTests(unittest.TestCase):
     def test_only_started_cycles_with_a_current_stage_count(self):
         self.assertIsNone(resolve_dashboard_stage())
         self.assertEqual(resolve_dashboard_stage(form_live=True)[0], "01_parent_form")
-        self.assertIn(resolve_dashboard_stage(contract="signed")[0], PROFILE_ONLY_STAGES)
+        self.assertNotIn(resolve_dashboard_stage(contract="signed")[0], PROFILE_ONLY_STAGES)
         self.assertEqual(
             resolve_dashboard_stage(contract="not_required", preparing=True)[0],
             "06_school_application_submission",

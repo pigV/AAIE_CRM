@@ -6,7 +6,7 @@ no database, configuration, permission, route, or service side effects.
 
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -644,8 +644,10 @@ class TransferCaseService:
         *,
         timeout: float = 5.0,
         clock: Callable[[], str] = now_iso,
+        caller_transaction=None,
     ):
         self.database_path = Path(database_path)
+        self._caller_transaction = caller_transaction
         self.timeout = timeout
         self.clock = clock
         # Test suites may replace this private hook. Public service methods do
@@ -653,6 +655,9 @@ class TransferCaseService:
         self._failure_injector: Callable[[str], None] | None = None
 
     def _connect(self) -> sqlite3.Connection:
+        if self._caller_transaction is not None:
+            from business_changes.service_connection import ServiceConnection
+            return ServiceConnection(self._caller_transaction, self.database_path)
         connection = sqlite3.connect(
             self.database_path,
             timeout=self.timeout,
@@ -1519,9 +1524,10 @@ class TransferCaseService:
     def list_transfer_cases(
         self,
         student_id: str,
+        *, connection=None,
     ) -> tuple[TransferCaseDTO, ...]:
         try:
-            with closing(self._connect()) as connection:
+            with (nullcontext(connection) if connection is not None else closing(self._connect())) as connection:
                 self._require_schema(connection)
                 return tuple(
                     _transfer_dto(row)
@@ -2397,9 +2403,9 @@ class TransferCaseService:
         except sqlite3.Error as error:
             raise self._map_database_error(error) from None
 
-    def list_transfer_school_applications(self, case_id):
+    def list_transfer_school_applications(self, case_id, *, connection=None):
         try:
-            with closing(self._connect()) as connection:
+            with (nullcontext(connection) if connection is not None else closing(self._connect())) as connection:
                 self._require_schema(connection)
                 self._read_case(connection, case_id)
                 return tuple(

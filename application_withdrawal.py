@@ -2,12 +2,14 @@ import json
 import sqlite3
 
 from application_cycle import close_cycle
+from business_changes.withdrawals import synchronized_withdrawal
 
 
 class ApplicationWithdrawalConflict(ValueError):
     pass
 
 
+@synchronized_withdrawal
 def withdraw_application(
     connection: sqlite3.Connection, *, student_id: str, cycle_id: int,
     actor_id: int, actor_name: str, reason: str, stage: str, timestamp: str,

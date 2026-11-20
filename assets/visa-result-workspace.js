@@ -11,11 +11,18 @@
   }
   if(typeof module !== 'undefined' && module.exports) module.exports={valuesChanged,formLocked,initialResultGroup};
   if(typeof document === 'undefined') return;
+  const lifecycleCleanup = new Map();
+  function initialize(restorePosition = true) {
+    for (const [panel, cleanup] of lifecycleCleanup) if (!panel.isConnected) { cleanup(); lifecycleCleanup.delete(panel); }
   document.querySelectorAll('[data-visa-result-workspace]').forEach(panel => {
     if(panel.dataset.resultBound) return;
     panel.dataset.resultBound='true';
+    const remove = [];
+    const listenWindow = (type, listener) => { window.addEventListener(type, listener); remove.push(() => window.removeEventListener(type, listener)); };
+    lifecycleCleanup.set(panel, () => remove.forEach(cleanup => cleanup()));
     const one=s=>panel.querySelector(s), all=s=>Array.from(panel.querySelectorAll(s));
     const forms=all('form');
+    forms.forEach(form => { form.dataset.businessSyncManaged = '1'; });
     const controls=form=>Array.from(form.elements).filter(field=>field.name && !['hidden','file','submit','button'].includes(field.type));
     const before=new Map(forms.map(form=>[form,controls(form).map(field=>field.value)]));
     const originallyDisabled=new Map(forms.flatMap(form=>Array.from(form.elements)).map(field=>[field,Boolean(field.disabled)]));
@@ -42,7 +49,8 @@
     function update() {
       forms.forEach(form=>{
         const changed=valuesChanged(controls(form).map(field=>field.value),before.get(form));
-        if(changed)dirty.add(form);else dirty.delete(form);
+        if(changed) { dirty.add(form); form.dataset.businessSyncDirty = '1'; }
+        else { dirty.delete(form); delete form.dataset.businessSyncDirty; }
       });
       forms.forEach(form=>Array.from(form.elements).forEach(field=>{
         if('disabled' in field && field.type!=='hidden')field.disabled=originallyDisabled.get(field)||formLocked(form,Array.from(dirty));
@@ -61,6 +69,7 @@
       one('[data-result-reset]').hidden=dirty.size===0;
       panel.dataset.resultDirty=String(dirty.size>0);
     }
+    if (restorePosition) {
     const restoreGroups=stored && stored.stage===panel.dataset.stage && Array.isArray(stored.open);
     all('[data-result-group]').forEach(group=>{
       group.open=restoreGroups?stored.open.includes(group.id):group.dataset.resultGroup===initialResultGroup(panel.dataset.stage);
@@ -70,6 +79,7 @@
       if(target.tagName==='DETAILS')target.open=true;
       const details=target.querySelector('[data-result-item-details]');if(details)details.open=true;
     });
+    }
     panel.addEventListener('focusin',event=>{
       const target=event.target.closest('[data-result-item], #visa-result-dates, [id="visa-result-lodgement"], #visa-result-case-documents');
       if(target)lastAnchor=target.id;
@@ -98,12 +108,20 @@
       if(anchor && lastAnchor.startsWith('visa-result-item-'))anchor.value=lastAnchor;
       remember(true);submitting=true;
       if(event.target===one('[data-result-save]'))update();
+      const materialForm=one('[data-result-save]');
+      if(event.target===materialForm && materialForm.elements.namedItem('business_command_key') && window.AAIEBusinessChanges?.submitChecklist){
+        event.preventDefault();
+        window.AAIEBusinessChanges.submitChecklist(materialForm).then(()=>{
+          before.set(materialForm,controls(materialForm).map(field=>field.value));
+          submitting=false;update();window.dispatchEvent(new Event('aaie:business-change'));
+        }).catch(error=>{submitting=false;update();feedback.textContent=error.message;});
+      }
     });
-    window.addEventListener('beforeunload',event=>{if(dirty.size&&!submitting){event.preventDefault();event.returnValue='';}});
-    window.addEventListener('pagehide',()=>remember(true));
-    window.addEventListener('pageshow',event=>{if(event.persisted){submitting=false;update();}});
+    listenWindow('beforeunload',event=>{if(dirty.size&&!submitting){event.preventDefault();event.returnValue='';}});
+    listenWindow('pagehide',()=>remember(true));
+    listenWindow('pageshow',event=>{if(event.persisted){submitting=false;update();}});
     update();
-    if(!panel.closest('[hidden]'))requestAnimationFrame(()=>{
+    if(restorePosition && !panel.closest('[hidden]'))requestAnimationFrame(()=>{
       const hash=location.hash.slice(1);
       if(hash && findTarget(hash) && hash!=='visa-tab-visa-result'){reveal(hash,true);return;}
       if(stored?.resume){
@@ -115,4 +133,7 @@
       }
     });
   });
+  }
+  initialize();
+  document.addEventListener('aaie:business-fragment-rendered', () => initialize(false));
 })();

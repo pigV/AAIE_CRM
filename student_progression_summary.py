@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
@@ -464,6 +465,7 @@ def build_student_progression_summary(
     *,
     database_path: str | Path | None = None,
     flags: StudentCaseFeatureFlags | None = None,
+    connection=None,
 ) -> StudentProgressionSummary | None:
     student = {"student_id": str(student_id)}
     if not student_capabilities.can_view_progression_cases(
@@ -472,10 +474,11 @@ def build_student_progression_summary(
         return None
     path = Path(database_path or Path(__file__).parent / "database" / "aaie_crm.db")
     service = ProgressionCaseService(path)
+    read_options = {'connection': connection} if connection is not None else {}
     cases = []
     workspaces_by_case = {}
-    for item in service.list_cases(str(student_id)):
-        case_data = service.get_case_data(item.case_id)
+    for item in service.list_cases(str(student_id), **read_options):
+        case_data = service.get_case_data(item.case_id, **read_options)
         case = dict(case_data["case"])
         cases.append(case)
         workspace = {
@@ -483,9 +486,9 @@ def build_student_progression_summary(
             "current_business_step": case.get("workflow_stage"),
         }
         if int(case.get("active_slot") or 0) == 1:
-            workspace = build_progression_workspace(path, item.case_id)
+            workspace = build_progression_workspace(path, item.case_id, **read_options)
         workspaces_by_case[item.case_id] = workspace
-    with sqlite3.connect(path) as connection:
+    with (nullcontext(connection) if connection is not None else closing(sqlite3.connect(path))) as connection:
         connection.row_factory = sqlite3.Row
         case_ids = tuple(_case_id(item) for item in cases)
         cycle_by_case = {}

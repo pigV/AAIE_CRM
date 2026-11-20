@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from business_changes.visa_domains import synchronized_visa_write
 import sqlite3
 
 
@@ -119,6 +120,13 @@ def _write_current(
             occurred_at,
         ),
     )
+    from business_changes.runtime import enabled
+    if enabled(conn) and effective_result=='Granted':
+        from visa_document_lifecycle import case_projection
+        if case_projection(conn,case_id,read_text=lambda document:'')['result_status']!='Granted':
+            # Save the suggestion/manual history, but establish neither an
+            # official Case outcome nor downstream grant reconciliation here.
+            return
     _project_case(conn, case_id, effective_result, occurred_at)
     if effective_result == "Granted" and not conflict:
         from visa_cycle_assignment import reconcile_recorded_visa_grants
@@ -146,6 +154,7 @@ def _result(conn, case_id, created):
     return current
 
 
+@synchronized_visa_write
 def record_auto_result(
     conn,
     case_id,
@@ -256,6 +265,7 @@ def record_auto_result(
     return _result(conn, case_id, True)
 
 
+@synchronized_visa_write
 def record_manual_result(
     conn,
     case_id,
@@ -322,15 +332,17 @@ def record_manual_result(
     return _result(conn, case_id, True)
 
 
-def result_summary(conn, case_id):
+def result_summary(conn, case_id, *, read_text=None):
     if conn.execute("SELECT 1 FROM visa_cases WHERE id=?", (case_id,)).fetchone() is None:
         raise ValueError("Visa Case not found.")
     result = _result(conn, case_id, False)
     result.pop("created", None)
+    from business_changes.runtime import enabled
+    if enabled(conn):result['recorded_result']=result['effective_result']
     from visa_document_lifecycle import case_projection
-    projection=case_projection(conn,case_id)
+    projection=case_projection(conn,case_id,read_text=read_text)
     result['effective_result']=projection['result_status']
-    result['auto_detected_result']=projection['result_status'] if projection['result_status'] == 'Granted' else None
+    result['auto_detected_result']=projection.get('auto_detected_result',projection['result_status'] if projection['result_status'] == 'Granted' else None)
     result['workflow_status']=projection['workflow_status']
     result["history"] = _many(
         conn,
