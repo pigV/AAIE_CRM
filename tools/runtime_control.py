@@ -522,6 +522,12 @@ def sandbox_profile(config, *, allow_school_radius=False):
         *[f"(allow file-write* (subpath {q(p)}))" for p in (*adapter.nas_write_roots,*pdf)],
         *[f"(allow file-read-metadata (literal {q(p)}))"
           for p in sorted({p for root in roots for p in root.parents})],
+        # Staging secure storage walks only these exact parent directories.
+        # No sibling files, production paths, or additional writes are granted.
+        *([f"(allow file-read* (literal {q(p)}))"
+           for p in sorted(set(config.source_root.parents) | set(config.root.parents))
+           if str(p).startswith('/Volumes')]
+          if config.mode == 'staging' else []),
         *[f"(allow file-read* (literal {q(parent)}))" for path in pdf for parent in path.parents],
         *([f"(allow file-read* (literal {q(keychain)}))",
            *[f"(allow file-read-metadata (literal {q(parent)}))" for parent in keychain.parents]]

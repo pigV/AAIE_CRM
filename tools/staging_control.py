@@ -47,6 +47,11 @@ def sandbox_profile(c):
         f'(allow file-read* (subpath {q(ROOT)}))',
         *[f'(allow file-read-metadata (literal {q(p)}))'
           for p in ROOT.parents if str(p).startswith('/Volumes')],
+        # Secure storage opens each ancestor with O_DIRECTORY|O_NOFOLLOW.
+        # Literal directory access never grants access to its child files.
+        *[f'(allow file-read* (literal {q(p)}))'
+          for p in sorted(set(ROOT.parents) | set(c.root.parents))
+          if str(p).startswith('/Volumes')],
         *[f'(allow file-read-metadata (literal {q(p)}))'
           for p in sorted({parent for root in c.read_roots for parent in root.parents if str(parent).startswith('/Volumes')})],
         *[f'(allow file-read* (subpath {q(p)}))' for p in c.read_roots],
