@@ -179,6 +179,17 @@ def reapplication_cycle(connection: sqlite3.Connection, token: str, student_id: 
     return int(row[0]) if row else None
 
 
+def group_withdrawn_students(records: list[dict]) -> list[dict]:
+    """One student row with all withdrawal cycles retained in newest-first order."""
+    groups = {}
+    for record in records:
+        key = str(record['student_id'])
+        if key not in groups:
+            groups[key] = {'student_id': key, 'latest': record, 'history': []}
+        groups[key]['history'].append(record)
+    return list(groups.values())
+
+
 def list_withdrawn_applications(connection: sqlite3.Connection) -> list[dict]:
     rows = connection.execute(
         """

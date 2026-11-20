@@ -500,6 +500,10 @@ class InstitutionCommissionDraft:
 
 
     def _components(self):
+        from revenue.course_commissions import language_components
+        return self._main_components()+language_components(self)
+
+    def _main_components(self):
         from revenue.read_models import RevenueReadModels
 
         model = RevenueReadModels(self.db)
@@ -674,16 +678,28 @@ class InstitutionCommissionDraft:
     def confirm_student_evidence(self, form, terms, key):
         component = _value(form, "component")
         tier, reference = _value(form, "tier"), _value(form, "reference")
+        from revenue.course_commissions import language_rule
+        selected=next((row for row in self._components() if row['component_uid']==component),None)
+        language=selected is not None and selected.get('course_kind')=='language'
+        rule=language_rule(self,terms) if language else None
+        if language and not rule:
+            raise ValueError('请先核对独立语言佣金条款。')
         rcti = terms.get("payment_mode") == vic_rcti.PAYMENT
         nsw = terms.get("payment_mode") == NSW_CLAIMS_ONLY
+        if language:
+            rcti=nsw=False
+            if tier!='standard':
+                raise ValueError('请核对语言课程统一佣金比例。')
         if (not reference or len(reference) > 240 or _value(form, "eligible") != "1"
-                or (not (rcti or nsw) and tier not in terms["rates"])):
+                or (not (rcti or nsw or language) and tier not in terms["rates"])):
             raise ValueError("请确认已核对申领条件和凭证。")
         if not any(row["component_uid"] == component and not row.get("assignment_reason")
                    for row in self._components()):
             raise ValueError("请选择本机构已关联的学生入学项目。")
         result = {"uid": self.uid, "revision": terms.get("evidence_revision", terms["revision"]), "component_uid": component,
                   "tier": tier, "reference": reference}
+        if language:
+            result['course_rule_revision']=rule['revision']
         if nsw:
             result.update(self._nsw_evidence(form, terms))
         if rcti:
@@ -717,9 +733,11 @@ class InstitutionCommissionDraft:
         return bool(re.fullmatch(r"year_[1-9]\d*", value))
 
     def candidates(self, terms, *, excluding_draft=None):
+        from revenue.course_commissions import language_candidates
         facts = self._facts(terms)
         if terms.get("payment_mode") == vic_rcti.PAYMENT:
             yield from self._vic_estimates(terms, facts)
+            yield from language_candidates(self,terms,facts,excluding_draft=excluding_draft)
             return
         nsw = terms.get("payment_mode") == NSW_CLAIMS_ONLY
         drafts = self._drafts_for_target(all_targets=True)
@@ -731,6 +749,8 @@ class InstitutionCommissionDraft:
         ), default="") if self.target[0] == "authority" else ""
         today = datetime.now(ZoneInfo("Australia/Melbourne")).date().isoformat()
         for student in self._components():
+            if student.get('course_kind')=='language':
+                continue
             component = student["component_uid"]
             base = {"student_id":student["student_id"],"student_name":student["student_name"],
                     "component_uid":component,"course":student.get("course_name","")}
@@ -824,11 +844,15 @@ class InstitutionCommissionDraft:
                 row["revision"] = _digest([terms["revision"],dict(commencement),dict(tuition),row])
                 yield row
 
+        yield from language_candidates(self,terms,facts,excluding_draft=excluding_draft)
+
     def _vic_estimates(self, terms, facts):
         today = datetime.now(ZoneInfo("Australia/Melbourne")).date().isoformat()
         next_start = min((start for start in authority_version_starts(self.db, "VIC", self.pilot.simulation)
                           if start > terms["start"]), default="")
         for student in self._components():
+            if student.get('course_kind')=='language':
+                continue
             component = student["component_uid"]
             row = {key: student[key] for key in ("student_id", "student_name", "component_uid", "school_name")
                    if key in student}
@@ -893,7 +917,7 @@ class InstitutionCommissionDraft:
             "payment_terms":f'Within {invoice["payment_days"]} days of receipt of a valid invoice',
             **{field:invoice[field] for field in ("net_cents","gst_cents","gross_cents")},
             "lines":[{"description":" | ".join(filter(None, (
-                         row["student_name"], row["student_id"], row.get("school_name"), row["academic_period"],
+                         row["student_name"], row["student_id"], row.get("school_name"), row.get('course'), row["academic_period"],
                      ))),
                       **{field:row[field] for field in ("net_cents","gst_cents","gross_cents")}}
                      for row in invoice["lines"]],

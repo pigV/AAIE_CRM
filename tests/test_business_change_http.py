@@ -27,23 +27,31 @@ from staging_environment import ACTIVE
 class BusinessChangeHTTPTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if ACTIVE is None or ACTIVE.admin_port!=19060:raise RuntimeError('OS-confined task staging required')
+        if ACTIVE is None or getattr(ACTIVE,'mode','staging')!='staging':raise RuntimeError('OS-confined task staging required')
+        marker=ACTIVE.root/'config/synthetic-http-fixture.json'
+        if not marker.is_file() or json.loads(marker.read_text()).get('runtime')!=str(ACTIVE.root):
+            raise RuntimeError('explicit synthetic HTTP fixture required')
         import app
         cls.app=app
-        cls.port=19060
+        fixture=app.db.one("SELECT value FROM system_settings WHERE key='synthetic_http_fixture'")
+        if fixture is None or fixture[0]!='word-http-20261120':raise RuntimeError('synthetic database identity mismatch')
+        cls.port=ACTIVE.admin_port
         status,_,body=cls.request_static('/health')
         health=json.loads(body)
-        if status!=200 or health.get('environment')!='staging' or health.get('database_path')!=str(ACTIVE.db):
+        if status!=200 or any(health.get(key)!=value for key,value in {
+            'status':'ok','environment':'staging','service':'admin','port':ACTIVE.admin_port,
+            'database_path':str(ACTIVE.db),'storage_path':str(ACTIVE.storage)}.items()):
             raise RuntimeError('foreign HTTP listener rejected')
 
     @classmethod
-    def request_static(cls,path,form=None,token='synthetic-sync-admin-session',*,extra_headers=None,port=19060):
+    def request_static(cls,path,form=None,token='synthetic-sync-admin-session',*,extra_headers=None,port=None):
         headers={'User-Agent':'system-sync-isolated-http'}
         headers.update(extra_headers or {})
-        if token:headers['Cookie']='aaie_staging_aaie_session='+token
+        if token:headers['Cookie']=ACTIVE.namespace+'aaie_session='+token
         body=urlencode(form).encode() if form is not None else None
         if body is not None:headers['Content-Type']='application/x-www-form-urlencoded'
-        if port not in {19060,19061}:raise ValueError('foreign test port')
+        port=ACTIVE.admin_port if port is None else port
+        if port not in {ACTIVE.admin_port,ACTIVE.parent_port}:raise ValueError('foreign test port')
         c=http.client.HTTPConnection('127.0.0.1',port,timeout=30)
         try:
             c.request('POST' if form is not None else 'GET',path,body,headers)
@@ -70,9 +78,9 @@ class BusinessChangeHTTPTests(unittest.TestCase):
         boundary='SyntheticDirectUpload'+uuid.uuid4().hex
         payload=''.join(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n' for key,value in form.items()).encode()
         payload+=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\nContent-Type: application/pdf\r\n\r\n').encode()+data+f'\r\n--{boundary}--\r\n'.encode()
-        client=http.client.HTTPConnection('127.0.0.1',19060,timeout=30)
+        client=http.client.HTTPConnection('127.0.0.1',ACTIVE.admin_port,timeout=30)
         try:
-            client.request('POST',path,payload,{'Cookie':'aaie_staging_aaie_session=synthetic-sync-admin-session',
+            client.request('POST',path,payload,{'Cookie':ACTIVE.namespace+'aaie_session=synthetic-sync-admin-session',
                 'Content-Type':'multipart/form-data; boundary='+boundary})
             response=client.getresponse();return response.status,dict(response.getheaders()),response.read()
         finally:client.close()
@@ -80,6 +88,39 @@ class BusinessChangeHTTPTests(unittest.TestCase):
     def snapshot(self):
         status,_,body=self.request_static('/api/business-changes/snapshot?surface=dashboard_workflow')
         self.assertEqual(200,status,body[:300]);return json.loads(body)
+
+    def test_pending_batch_preview_is_case_owned_and_never_confirms_materials(self):
+        import io
+        from pypdf import PdfWriter
+        from visa_applicant_candidate import create_applicant,create_case
+        writer=PdfWriter();writer.add_blank_page(width=200,height=200);writer.add_blank_page(width=200,height=200)
+        stream=io.BytesIO();writer.write(stream);data=stream.getvalue();cid=self.cases[0]
+        base=f'/students/{self.sid}/visa-cases/{cid}/material-batch-upload'
+        status,_,body=self.post_file(base,{'csrf':'synthetic-sync-csrf','return_tab':'material_checklist'},'synthetic-batch.pdf',data)
+        self.assertEqual(200,status,body[:300]);self.assertIn(b'data-review-preview-root',body)
+        doc=self.app.db.one("SELECT id FROM student_documents WHERE student_id=? AND document_type='VisaBatchUploadPending' ORDER BY id DESC LIMIT 1",(self.sid,))
+        self.assertIsNotNone(doc);url=base+'/preview/'+str(doc['id'])
+        count=self.app.db.one('SELECT count(*) FROM business_change_events')[0]
+        status,headers,body=self.request_static(url+'?page=2')
+        self.assertEqual(200,status,body[:200]);self.assertEqual('image/png',headers['Content-Type']);self.assertEqual('2',headers['X-Preview-Page-Count'])
+        status,_,body=self.request_static(url+'?download=1');self.assertEqual(200,status);self.assertEqual(data,body)
+        foreign=url.replace('/visa-cases/'+str(cid)+'/', '/visa-cases/'+str(self.cases[1])+'/')
+        self.assertEqual(403,self.request_static(foreign)[0])
+        self.assertEqual('pending',self.app.db.one('SELECT document_status FROM student_documents WHERE id=?',(doc['id'],))[0])
+        self.assertEqual(count,self.app.db.one('SELECT count(*) FROM business_change_events')[0])
+        stamp=self.app.now_iso()
+        with self.app.db.transaction() as conn:
+            aid=create_applicant(conn,name='SYNTHETIC PREVIEW ONLY',email='',actor_id=1,stamp=stamp)
+            first=create_case(conn,applicant_id=aid,subclass='500',actor_id=1,stamp=stamp)
+            second=create_case(conn,applicant_id=aid,subclass='590',actor_id=1,stamp=stamp)
+        base=f'/visa-management/cases/{first}/applicant/material-batch-upload'
+        status,_,body=self.post_file(base,{'csrf':'synthetic-sync-csrf'},'synthetic-independent.pdf',data)
+        self.assertEqual(200,status,body[:300]);self.assertIn(b'data-review-preview-root',body)
+        doc=self.app.db.one('SELECT id FROM visa_only_material_uploads WHERE visa_case_id=? AND document_id IS NULL',(first,))
+        url=base+'/preview/'+str(doc['id'])
+        self.assertEqual(200,self.request_static(url)[0]);self.assertEqual(data,self.request_static(url+'?download=1')[2])
+        self.assertEqual(404,self.request_static(url.replace('/cases/'+str(first)+'/', '/cases/'+str(second)+'/'))[0])
+        self.assertIsNone(self.app.db.one('SELECT document_id FROM visa_only_material_uploads WHERE id=?',(doc['id'],))[0])
 
     def test_initial_home_page_uses_the_same_explicit_readonly_context(self):
         status,_,body=self.request_static('/')
@@ -407,7 +448,10 @@ class BusinessChangeHTTPTests(unittest.TestCase):
                 status,_,body=self.request_static('/api/business-changes/snapshot?'+urlencode({'surface':surface,**extra}))
                 self.assertEqual(200,status,body[:500])
                 html=''.join(json.loads(body)['data']['fragments'].values())
-                self.assertEqual(action=='archive',marker in html,(action,surface))
+                # Material-integrity warnings belong in Visa management/student details,
+                # while the home page and its application-stage distribution stay clear.
+                expected=action=='archive' and surface!='dashboard_overview'
+                self.assertEqual(expected,marker in html,(action,surface))
             status,_,body=self.request_static(f'/students/{self.sid}/visa-cases/{cid}?visa_tab=visa_result')
             self.assertEqual(200,status,body[:500])
             self.assertEqual(action=='archive',marker in body.decode())
@@ -466,10 +510,10 @@ class BusinessChangeHTTPTests(unittest.TestCase):
         boundary='SyntheticSync'+uuid.uuid4().hex
         body=(f'--{boundary}\r\nContent-Disposition: form-data; name="csrf"\r\n\r\nsynthetic-sync-csrf\r\n'
               f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="synthetic-material.pdf"\r\nContent-Type: application/pdf\r\n\r\n').encode()+data+f'\r\n--{boundary}--\r\n'.encode()
-        c=http.client.HTTPConnection('127.0.0.1',19060,timeout=30)
+        c=http.client.HTTPConnection('127.0.0.1',ACTIVE.admin_port,timeout=30)
         try:
             c.request('POST',f'/students/{self.sid}/visa-cases/{cid}/material-items/{item["id"]}/files',body,
-                {'Cookie':'aaie_staging_aaie_session=synthetic-sync-admin-session','Content-Type':'multipart/form-data; boundary='+boundary})
+                {'Cookie':ACTIVE.namespace+'aaie_session=synthetic-sync-admin-session','Content-Type':'multipart/form-data; boundary='+boundary})
             response=c.getresponse();payload=response.read();headers=dict(response.getheaders())
             self.assertEqual(303,response.status,payload[:300]);self.assertNotIn('kind=error',headers.get('Location',''))
         finally:c.close()
@@ -574,10 +618,10 @@ class BusinessChangeHTTPTests(unittest.TestCase):
         boundary='SyntheticApplications'+uuid.uuid4().hex
         body=(f'--{boundary}\r\nContent-Disposition: form-data; name="csrf"\r\n\r\nsynthetic-sync-csrf\r\n'
               f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="synthetic-application.pdf"\r\nContent-Type: application/pdf\r\n\r\n').encode()+data+f'\r\n--{boundary}--\r\n'.encode()
-        client=http.client.HTTPConnection('127.0.0.1',19060,timeout=30)
+        client=http.client.HTTPConnection('127.0.0.1',ACTIVE.admin_port,timeout=30)
         try:
             client.request('POST',f'/students/{self.sid}/applications/upload',body,
-                {'Cookie':'aaie_staging_aaie_session=synthetic-sync-admin-session','Content-Type':'multipart/form-data; boundary='+boundary})
+                {'Cookie':ACTIVE.namespace+'aaie_session=synthetic-sync-admin-session','Content-Type':'multipart/form-data; boundary='+boundary})
             response=client.getresponse();payload=response.read();location=response.getheader('Location')
             self.assertEqual(303,response.status,payload[:400])
         finally:client.close()
@@ -891,10 +935,10 @@ class BusinessChangeHTTPTests(unittest.TestCase):
         payload=''.join(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n' for key,value in fields.items()).encode()
         payload+=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="synthetic-replacement.pdf"\r\nContent-Type: application/pdf\r\n\r\n').encode()+data+f'\r\n--{boundary}--\r\n'.encode()
         for _ in range(2):
-            client=http.client.HTTPConnection('127.0.0.1',19060,timeout=30)
+            client=http.client.HTTPConnection('127.0.0.1',ACTIVE.admin_port,timeout=30)
             try:
                 client.request('POST',f'/students/{self.sid}/visa/{rid}/update',payload,{
-                    'Cookie':'aaie_staging_aaie_session=synthetic-sync-admin-session','Accept':'application/json',
+                    'Cookie':ACTIVE.namespace+'aaie_session=synthetic-sync-admin-session','Accept':'application/json',
                     'Content-Type':'multipart/form-data; boundary='+boundary})
                 response=client.getresponse();body=response.read()
                 self.assertEqual(200,response.status,body[:700]);self.assertIn('business_receipt',json.loads(body))
@@ -913,7 +957,7 @@ class BusinessChangeHTTPTests(unittest.TestCase):
         from pathlib import Path
         from PIL import Image,ImageDraw
         from tests.test_contract_master_layout import ContractMasterLayoutTests
-        status,_,health_body=self.request_static('/health',token=None,port=19061)
+        status,_,health_body=self.request_static('/health',token=None,port=ACTIVE.parent_port)
         self.assertEqual(200,status);health=json.loads(health_body)
         self.assertEqual('staging',health['environment']);self.assertEqual(str(ACTIVE.db),health['database_path'])
         for target,size in ((self.app.SONNY_SIGNATURE_PATH,(320,100)),(self.app.AAIE_COMPANY_STAMP_PATH,(180,180))):
@@ -938,7 +982,7 @@ class BusinessChangeHTTPTests(unittest.TestCase):
             VALUES(?,?,?,?,?,'active',?,?,?,'Synthetic Parent')''',(cid,self.sid,self.app.contract_signing_token_hash(token),token[-4:],
             '/contract-sign/'+token,(datetime.fromisoformat(stamp)+timedelta(hours=2)).isoformat(),stamp,openid))
         status,login_headers,login_body=self.request_static('/contract-sign/'+token+'/login',
-            {'wechat_openid':openid,'wechat_nickname':'Synthetic Parent'},token=None,port=19061,
+            {'wechat_openid':openid,'wechat_nickname':'Synthetic Parent'},token=None,port=ACTIVE.parent_port,
             extra_headers={'User-Agent':'MicroMessenger synthetic HTTP test'})
         self.assertEqual(303,status,login_body[:700])
         cookie=login_headers['Set-Cookie'].split(';',1)[0]
@@ -947,7 +991,7 @@ class BusinessChangeHTTPTests(unittest.TestCase):
         output=io.BytesIO();picture.save(output,format='PNG')
         status,_,body=self.request_static('/contract-sign/'+token+'/submit',{'declaration':'yes',
             'signature_data':'data:image/png;base64,'+base64.b64encode(output.getvalue()).decode()},token=None,
-            extra_headers={'Cookie':cookie,'User-Agent':'MicroMessenger synthetic HTTP test'},port=19061)
+            extra_headers={'Cookie':cookie,'User-Agent':'MicroMessenger synthetic HTTP test'},port=ACTIVE.parent_port)
         self.assertEqual(200,status,body[:700]);self.assertIn('下载完整合同 PDF',body.decode())
         contract=self.app.db.one('SELECT * FROM contracts WHERE id=?',(cid,))
         self.assertEqual('FullyExecuted',contract['contract_status'])

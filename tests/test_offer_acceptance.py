@@ -160,10 +160,10 @@ class OfferSelectionTests(OfferAcceptanceFixture):
         self.assertEqual(current.offer_id, 101)
         self.assertEqual(current.status_before_acceptance, "received")
         self.assertEqual(
-            self.connection.execute("SELECT COUNT(*) FROM offer_acceptance_history").fetchone()[0], 1
+            self.connection.execute("SELECT COUNT(*) FROM offer_acceptance_history").fetchone()[0], 2
         )
 
-    def test_switch_restores_exact_previous_status_without_coe(self):
+    def test_switch_preserves_previous_document_acceptance_without_coe(self):
         from offer_acceptance import set_accepted_offer
 
         self._resolve_first()
@@ -171,7 +171,7 @@ class OfferSelectionTests(OfferAcceptanceFixture):
         changed = set_accepted_offer(self.connection, "S001", 102, self.actor)
 
         statuses = dict(self.connection.execute("SELECT id,offer_status FROM offers WHERE id IN (101,102)"))
-        self.assertEqual(statuses, {101: "received", 102: "accepted"})
+        self.assertEqual(statuses, {101: "accepted", 102: "accepted"})
         self.assertEqual(changed.previous_offer_id, 101)
         pointer = self.connection.execute(
             "SELECT offer_id,status_before_acceptance FROM student_offer_acceptances WHERE student_id='S001'"
@@ -207,7 +207,7 @@ class OfferSelectionTests(OfferAcceptanceFixture):
             "SELECT status_before_acceptance FROM student_offer_acceptances WHERE student_id='S001'"
         ).fetchone()[0])
 
-    def test_explicit_withdraw_restores_offer_and_clears_only_current_projection(self):
+    def test_explicit_final_withdraw_preserves_document_and_clears_only_current_projection(self):
         from offer_acceptance import set_accepted_offer, withdraw_accepted_offer
 
         self._resolve_first()
@@ -221,14 +221,14 @@ class OfferSelectionTests(OfferAcceptanceFixture):
             occurred_at="2026-08-07T10:00:00+10:00",
         )
 
-        self.assertEqual("received", result.restored_status)
-        self.assertEqual("received", self.connection.execute(
+        self.assertEqual("accepted", result.restored_status)
+        self.assertEqual("accepted", self.connection.execute(
             "SELECT offer_status FROM offers WHERE id=101"
         ).fetchone()[0])
         self.assertEqual(0, self.connection.execute(
             "SELECT count(*) FROM student_offer_acceptances WHERE student_id='S001'"
         ).fetchone()[0])
-        self.assertEqual(1, self.connection.execute(
+        self.assertEqual(2, self.connection.execute(
             "SELECT count(*) FROM offer_acceptance_history WHERE student_id='S001'"
         ).fetchone()[0])
 
@@ -293,7 +293,7 @@ class OfferSelectionTests(OfferAcceptanceFixture):
             101,
         )
 
-    def test_legacy_unknown_restore_status_blocks_switch_without_inventing_a_status(self):
+    def test_legacy_unknown_state_can_switch_final_without_cancelling_document(self):
         from offer_acceptance import OfferAcceptanceError, assign_offer_school, set_accepted_offer
 
         assign_offer_school(self.connection, 101, 11, self.actor)
@@ -304,13 +304,10 @@ class OfferSelectionTests(OfferAcceptanceFixture):
                ) VALUES('S001',101,'__legacy_status_unknown__','2026-08-01','2026-08-01')"""
         )
 
-        with self.assertRaisesRegex(OfferAcceptanceError, "历史状态") as caught:
-            set_accepted_offer(self.connection, "S001", 102, self.actor)
-
-        self.assertEqual(caught.exception.code, "legacy_restore_status_required")
+        set_accepted_offer(self.connection, "S001", 102, self.actor)
         self.assertEqual(
             dict(self.connection.execute("SELECT id,offer_status FROM offers WHERE id IN (101,102)")),
-            {101: "accepted", 102: "signed"},
+            {101: "accepted", 102: "accepted"},
         )
 
 
@@ -375,7 +372,21 @@ class OfferRouteTests(OfferAcceptanceFixture):
         self.assertEqual(payload["city_name"], "Melbourne")
         self.assertEqual(missing_status, 404)
 
-    def test_accept_route_returns_coe_warning_then_switches_after_acknowledgement(self):
+    def test_document_accept_route_preserves_other_acceptance_and_final_school(self):
+        import app as app_module
+        from unittest.mock import patch
+        from offer_acceptance import assign_offer_school, set_accepted_offer
+        assign_offer_school(self.connection, 101, 11, self.actor)
+        set_accepted_offer(self.connection, 'S001', 101, self.actor)
+        self.connection.execute("INSERT INTO coe_oshc VALUES(1,'S001','COE')")
+        with patch.object(app_module,'db',self.DbAdapter(self.connection)), patch.object(app_module,'can_workflow_module_save',return_value=True):
+            status, payload = self._handler({'csrf':'token'}).offer_accept('POST','S001','102')
+        self.assertEqual(200,status)
+        self.assertTrue(payload['ok'])
+        self.assertEqual([(101,'accepted'),(102,'accepted')], [tuple(row) for row in self.connection.execute('SELECT id,offer_status FROM offers WHERE id IN (101,102) ORDER BY id')])
+        self.assertEqual(101,self.connection.execute("SELECT offer_id FROM student_offer_acceptances WHERE student_id='S001'").fetchone()[0])
+
+    def test_final_selection_route_returns_coe_warning_then_switches_after_acknowledgement(self):
         import app as app_module
         from offer_acceptance import assign_offer_school, set_accepted_offer
 
@@ -389,10 +400,10 @@ class OfferRouteTests(OfferAcceptanceFixture):
             app_module.can_workflow_module_save = lambda user, module: module == "Offer"
             warning_status, warning = self._handler(
                 {"csrf": "token", "coe_warning_acknowledged": "0"}
-            ).offer_accept("POST", "S001", "102")
+            ).offer_select_final("POST", "S001", "102")
             status, payload = self._handler(
                 {"csrf": "token", "coe_warning_acknowledged": "1"}
-            ).offer_accept("POST", "S001", "102")
+            ).offer_select_final("POST", "S001", "102")
         finally:
             app_module.db = old_db
             app_module.can_workflow_module_save = old_permission

@@ -29,7 +29,31 @@ def _aud(cents):
 
 
 def _student_school(row):
-    return f' · {escape(row["school_name"])}' if row.get("school_name") else ""
+    school=f' · {escape(row["school_name"])}' if row.get("school_name") else ""
+    if row.get('course_kind')=='language':
+        school+=' · 语言课程'+(f'：{escape(row["course"])}' if row.get('course') else '')
+    return school
+
+
+def _language_evidence_form(row,terms,url,security):
+    conditions=terms.get('course_rules',{}).get('language',{}).get('conditions','')
+    return f'''<details><summary>核对语言课程申领凭证</summary><p>{escape(conditions)}</p>
+      <form action="{url}" method="post" class="revenue-action-form">
+      {security('evidence:'+row['component_uid'])}{_hidden('operation','evidence')}
+      {_hidden('component',row['component_uid'])}{_hidden('terms_revision',terms['revision'])}{_hidden('tier','standard')}
+      <label>语言课程凭证编号或来源<input name="reference" maxlength="240" required></label>
+      <label><input type="checkbox" name="eligible" value="1" required>已核对语言课程满足独立合同条款和申领条件</label>
+      <button type="submit">保存语言凭证核对结果</button></form></details>'''
+
+
+def _language_estimate_panel(rows,terms,url,security):
+    articles=[]
+    for row in rows:
+        status=(f'语言课程预计佣金 <strong>{_aud(row["gross_cents"])}</strong>'
+                if 'gross_cents' in row else escape(row.get('reason','')))
+        controls=_language_evidence_form(row,terms,url,security) if row.get('needs_evidence') else ''
+        articles.append(f'<article><h3>{escape(row["student_name"] or row["student_id"])}{_student_school(row)}</h3><p>{status}</p>{controls}</article>')
+    return '<h3>独立语言课程佣金</h3>'+''.join(articles) if articles else ''
 
 
 def _settlement_panel(invoice, settlement, action, csrf):
@@ -273,6 +297,16 @@ def _render_nsw_review(analysis, review, editing, form, document, url, security)
             + f' <a href="{safe_url}">取消</a></form>')
 
 
+def _contract_review(header, content, document):
+    from document_review_layout import preview_panel
+    preview = preview_panel(f"/revenue/documents/{document}/preview",
+                            f"/revenue/documents/{document}/download", "签署佣金合同.pdf")
+    return (header + '<div class="upload-review-page finance-contract-review" data-upload-review-workbench>'
+            '<article class="upload-review-file-card">'
+            '<div class="upload-review-file-meta finance-contract-fields">' + content + '</div>'
+            + preview + '</article></div></section>')
+
+
 def render_workflow(workflow, csrf, token, *, analysis=None, terms=None, invoice=None, error="", form=None,
                     contract_only=False, settlement=None, formal_authority=None, nsw_review=None, edit_nsw=False):
     url = f"{ROOT}/{quote(workflow.uid,safe='')}"
@@ -323,9 +357,9 @@ def render_workflow(workflow, csrf, token, *, analysis=None, terms=None, invoice
     if not terms:
         header += f'<details><summary>删除本次上传</summary><form method="post" action="{url}">{security("discard")}{_hidden("operation", "discard")}<p>删除后可重新上传正确的 PDF。</p><button type="submit">确认删除本次上传</button></form></details>'
         if analysis["profile"] == "unsupported":
-            return header + '<p>合同已保存。检测到尚未支持的多档佣金，请查看 PDF 原文核对各档规则。</p></section>'
+            return _contract_review(header, '<p>合同已保存。检测到尚未支持的多档佣金，请查看 PDF 原文核对各档规则。</p>', document)
         if analysis["profile"] == NSW_SCHEDULE_PROFILE:
-            return header + _render_nsw_review(analysis, nsw_review, edit_nsw, form, document, url, security) + "</section>"
+            return _contract_review(header, _render_nsw_review(analysis, nsw_review, edit_nsw, form, document, url, security), document)
         labels = {
             "school_name":"合同付款主体", "start":"合同生效日", "end":"合同到期日",
             "conditions":"申领条件", "payment_days":"收到有效发票后付款天数",
@@ -360,17 +394,19 @@ def render_workflow(workflow, csrf, token, *, analysis=None, terms=None, invoice
         notice = "已提取条款，请对照原文核对，空白内容需要填写。"
         if analysis["status"] != "read":
             notice += " 部分 PDF 内容未能识别。"
-        return header + f'''<h3>核对佣金条款</h3><p>{notice}</p>
+        return _contract_review(header, f'''<h3>核对佣金条款</h3><p>{notice}</p>
           <form method="post" action="{url}" class="revenue-action-form">
             {security("terms")}{_hidden("operation","terms")}{_hidden("analysis_revision",_digest(analysis))}
             {"".join(rows)}
             <label><input type="checkbox" name="reviewed" value="1" required>已核对签署合同与以上条款</label>
-            <button class="primary" type="submit">{"确认佣金信息" if contract_only else "确认佣金信息并查看学生"}</button></form></section>'''
+            <button class="primary" type="submit">{"确认佣金信息" if contract_only else "确认佣金信息并查看学生"}</button></form>''', document)
     candidates = list(workflow.candidates(terms))
+    language_rows=[row for row in candidates if row.get('course_kind')=='language']
+    main_rows=[row for row in candidates if row.get('course_kind')!='language']
     if terms.get("payment_mode") == vic_rcti.PAYMENT:
-        return header + _vic_estimate_panel(candidates, terms, url, security) + "</section>"
+        return header + _vic_estimate_panel(main_rows, terms, url, security) + _language_estimate_panel(language_rows,terms,url,security) + "</section>"
     if nsw_claims:
-        return header + _nsw_estimate_panel(candidates, terms, url, security) + "</section>"
+        return header + _nsw_estimate_panel(main_rows, terms, url, security) + _language_estimate_panel(language_rows,terms,url,security) + "</section>"
     items, blockers = [], []
     if workflow.target[0] == "school":
         from revenue.read_models import RevenueReadModels
@@ -390,7 +426,9 @@ def render_workflow(workflow, csrf, token, *, analysis=None, terms=None, invoice
                          f'{student} · {escape(row["academic_period"])} · {_aud(row["gross_cents"])}</label>')
             continue
         evidence_form = ""
-        if row.get("needs_evidence"):
+        if row.get('needs_evidence') and row.get('course_kind')=='language':
+            evidence_form=_language_evidence_form(row,terms,url,security)
+        elif row.get("needs_evidence"):
             tiers = {key:TIER_LABELS[key] for key in terms["rates"]}
             evidence_form = f'''<details><summary>核对申领凭证</summary><p>{escape(terms["conditions"])}</p>
               <form action="{url}" method="post" class="revenue-action-form">

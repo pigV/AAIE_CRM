@@ -50,8 +50,7 @@ class ChangeSchemaTests(unittest.TestCase):
         with self.assertRaises(ValueError):install(c)
 
     def test_formal_runner_apply_twice_and_failed_check_rolls_back(self):
-        root=ROOT/'tmp';root.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=root) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             p=Path(directory);pack=p/'pack';(pack/'checks').mkdir(parents=True)
             shutil.copy2(ROOT/'migrations'/MIGRATION,pack/MIGRATION)
             check=MIGRATION.removesuffix('.sql')+'_forward_check.sql'

@@ -103,8 +103,7 @@ class DocumentMetadataTests(unittest.TestCase):
  def test_formal_runner_applies_metadata_once_and_preserves_seed_identity(self):
   import tempfile,shutil
   import migration_runner
-  base=ROOT/'SAFEBOX/visa-production-20260909/metadata/unit-fixtures';base.mkdir(parents=True,exist_ok=True)
-  with tempfile.TemporaryDirectory(dir=base) as name:
+  with tempfile.TemporaryDirectory() as name:
    directory=Path(name);packages=directory/'packages';(packages/'checks').mkdir(parents=True)
    stem='20260909_037_visa_document_metadata'
    shutil.copyfile(ROOT/'migrations'/(stem+'.sql'),packages/(stem+'.sql'));shutil.copyfile(ROOT/'migrations/checks'/(stem+'_forward_check.sql'),packages/'checks'/(stem+'_forward_check.sql'))

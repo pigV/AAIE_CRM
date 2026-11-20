@@ -33,6 +33,9 @@ class CommissionTermsEditor:
 
     def save(self, form, key):
         if self.workflow:
+            if form.get('commission_action')=='language_rule':
+                from revenue.course_commissions import confirm_language_rule
+                return confirm_language_rule(self.workflow,form,key)
             return self.workflow.revise_terms(form, key)
         return revise_school_rule(self.repository, self.scope, self.uid, form, self.actor, key)
 
@@ -115,6 +118,23 @@ class CommissionTermsEditor:
         select("GST", "gst", gst, GST_MODES)
         status = f'<p role="alert">{escape(error)}</p>' if error else ""
         history_html = ""
+        language_html = ''
+        if self.workflow and self.target[0] in {'school','authority'}:
+            rule=terms.get('course_rules',{}).get('language',{})
+            rate=rule.get('rates',{}).get('standard')
+            language_html=f'''<details><summary>语言课程独立佣金条款</summary>
+              <p>从本合同PDF人工核对语言课程条款。未确认时语言学费不生成可申领佣金。</p>
+              <form class="revenue-action-form" method="post" action="{escape(action,quote=True)}">
+              <input type="hidden" name="csrf" value="{escape(csrf,quote=True)}">
+              <input type="hidden" name="revision" value="{escape(revision,quote=True)}">
+              <input type="hidden" name="idempotency_key" value="language-{escape(token,quote=True)}">
+              <input type="hidden" name="commission_action" value="language_rule">
+              <input type="hidden" name="period" value="whole_course">
+              <label>语言全课程计佣比例（%）<input name="rate" inputmode="decimal" value="{'' if rate is None else f'{rate/100:g}'}" required></label>
+              <label>合同条款位置<input name="reference" maxlength="600" value="{escape(rule.get('reference',''),quote=True)}" required></label>
+              <label>语言课程申领条件<textarea name="conditions" maxlength="6000" required>{escape(rule.get('conditions',''))}</textarea></label>
+              <label><input type="checkbox" name="reviewed" value="1" required>我已核对合同原件中的语言课程比例和条件</label>
+              <button type="submit" class="primary">确认语言佣金条款</button></form></details>'''
         if versions:
             rows = "".join(f'<li>{escape(when)} · {escape(" / ".join(f"{points/100:g}%" for points in rates))}</li>'
                            for when, rates in versions)
@@ -126,5 +146,5 @@ class CommissionTermsEditor:
           <input type="hidden" name="revision" value="{escape(value("revision", revision), quote=True)}">
           <input type="hidden" name="idempotency_key" value="{escape(token, quote=True)}">
           {"".join(fields.values())}
-          <button class="primary" type="submit">保存修改</button></form>{history_html}'''
+          <button class="primary" type="submit">保存修改</button></form>{language_html}{history_html}'''
         return _page("编辑佣金条款", body, back_href=base, back_label="返回学校佣金")

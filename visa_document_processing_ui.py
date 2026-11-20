@@ -41,7 +41,13 @@ def processing_dates_html(case_id, csrf, summary, documents, *, compact=False):
     heading='处理日期 / Processing speed' if compact else 'Processing speed'
     note=('Grant Sent On 是信件发送日期，与 Date of Grant 分开。体检完成日期由工作人员核对填写；更正保留审计。' if compact else 'Calendar days. Grant Sent On is separate from Date of Grant. Medical Completed is entered by Staff.')
     help_text='' if compact else '<p>Enter or correct the dates below. Health Exam Date is the Sent on date of the Health Examinations letter. Manual corrections are retained.</p>'
-    return '<section class="panel" id="visa-processing-dates"><h2>'+heading+'</h2><p>'+note+'</p>'+help_text+cards+validation+_form(case_id,csrf,'correct-processing-dates',''.join(fields)+'<button>Save processing dates</button>')+'</section>'
+    editor=_form(case_id,csrf,'correct-processing-dates',''.join(fields)+'<button>Save processing dates</button>')
+    if compact:
+        labels={'acknowledge_sent_on':'递交确认信发送','health_exam_date':'体检通知发送',
+                'grant_sent_on':'下签信发送','medical_completed_date':'体检完成'}
+        dates=''.join('<div><dt>'+label+'</dt><dd>'+escape(str(summary.get('fields',{}).get(key,{}).get('value') or '尚未填写'))+'</dd></div>' for key,label in labels.items())
+        editor='<dl class="visa-result-date-summary" data-result-date-summary>'+dates+'</dl><details class="visa-result-date-editor" id="visa-result-date-editor" data-result-date-editor><summary>核对 / 修改处理日期</summary>'+editor+'</details>'
+    return '<section class="panel" id="visa-processing-dates"><h2>'+heading+'</h2><p>'+note+'</p>'+help_text+cards+validation+editor+'</section>'
 
 def keyword_rules_html(case_id, csrf, rules):
     from visa_document_metadata import CATEGORIES

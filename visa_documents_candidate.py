@@ -219,6 +219,14 @@ def _label_value(lines, pattern):
     return ''
 
 
+def is_bridging_letter(text):
+    """Recognize the current visa in a heading/decision, not policy boilerplate."""
+    return bool(re.search(
+        r'^\s*(?:(?:IMMI\s+)?(?:Visa\s+)?Bridging\s+(?:visa\b|[A-E]\b)|'
+        r'We have granted you (?:a|an) Bridging\b|Visa\s*:?\s*Bridging\b)',
+        str(text or ''), re.IGNORECASE | re.MULTILINE))
+
+
 def propose_letter(text):
     """Extract label-scoped suggestions from official letter text; never confirm.
 
@@ -230,7 +238,9 @@ def propose_letter(text):
     lowered = text.lower()
     grant = bool(re.search(r'grant notification|visa (?:has been )?granted|date of grant|visa grant date', lowered))
     refusal = bool(re.search(r'refusal|visa (?:has been )?refused', lowered))
-    if grant and refusal:
+    if is_bridging_letter(text):
+        kind, decision = 'bridging_visa', ''
+    elif grant and refusal:
         kind, decision = 'unknown', ''
     elif refusal:
         kind, decision = 'refusal', 'refusal'

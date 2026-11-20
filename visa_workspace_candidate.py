@@ -155,6 +155,14 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
 
     def _visa_batch_suggestion(self, case, document, available_items):
         filename = document['original_name']
+        # A Bridging grant notification is a different material, never the
+        # combined substantive grant/refusal slot. Filename is a suggestion only.
+        filename_text = re.sub(r'[_\-.]+', ' ', Path(filename).stem)
+        if re.search(r'\bbridging\s+(?:visa|[a-e])\b|\bbv[abc]\b', filename_text, re.I):
+            item = self.visa_material_find_available_item(available_items, 'Bridging Visa')
+            return self.visa_material_batch_suggestion(
+                item, 'High' if item else 'Unmatched',
+                'matched keyword: Bridging Visa' if item else 'Bridging Visa target item is not in current checklist')
         suggestion = self.suggest_visa_material_item_for_filename(filename, available_items)
         if suggestion['item_id'] and suggestion['confidence'] in {'High', 'Medium'}:
             if suggestion['item_title'] != 'IMMI Grant Letter / IMMI Refusal Letter':
@@ -167,6 +175,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         text = self._visa_read_text(dict(case), dict(document))
         kind = self._visa_batch_letter_kind(text)
         names = {
+            'bridging_visa': ('Bridging Visa',),
             'grant': ('IMMI Grant Letter / IMMI Refusal Letter',),
             'refusal': ('IMMI Grant Letter / IMMI Refusal Letter',),
             'lodgement_receipt': ('IMMI Acknowledgment Letter', 'IMMI Acknowledgement Letter'),
@@ -768,11 +777,44 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
             return case
         return super().visa_material_case_or_404(student_id,case_id)
 
+    def visa_batch_pending_preview(self,method,student_id,case_id,document_id):
+        if method!='GET':return self.error_page('Method Not Allowed',405)
+        g=self._visa_runtime()
+        if not g['can_access_module'](self.user,'visa'):return self.error_page('Access denied',403)
+        case=self.visa_material_case_or_404(student_id,case_id)
+        if not case:return
+        if student_id:
+            doc=self.visa_material_pending_batch_document_or_404(student_id,case_id,document_id)
+        else:
+            doc=g['db'].one('SELECT * FROM visa_only_material_uploads WHERE id=? AND visa_case_id=? AND document_id IS NULL',(document_id,case_id))
+            if not doc:return self.error_page('Pending material not found',404)
+        if doc is None:return
+        try:
+            path=self._visa_document_path(dict(case),dict(doc))
+            data=path.read_bytes();name=str(doc['original_name'])
+            if (self.query.get('download') or [''])[0]=='1':
+                payload=data;mime='application/octet-stream';pages=1;number=1
+            else:
+                number=max(1,int((self.query.get('page') or ['1'])[0]))
+                pages=max(1,g['pdf_page_count'](data,max_pages=None)) if name.lower().endswith('.pdf') else 1
+                number=min(number,pages)
+                rendered=Path(g['make_preview'](f"visa-pending-{case_id}-{document_id}-{'student' if student_id else 'applicant'}",name,data,g['mimetypes'].guess_type(name)[0] or 'application/octet-stream',size='large',page=number)).resolve()
+                if not rendered.is_relative_to(g['PREVIEW_DIR'].resolve()):raise ValueError('Invalid preview path')
+                payload=rendered.read_bytes();mime='image/png'
+        except (OSError,ValueError,RuntimeError):return self.error_page('Material preview unavailable',400)
+        self.send_response(200);self.send_header('Content-Type',mime)
+        self.send_header('Cache-Control','private, no-store');self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('Content-Length',str(len(payload)));self.send_header('X-Preview-Page',str(number));self.send_header('X-Preview-Page-Count',str(pages))
+        if mime!='image/png':self.send_header('Content-Disposition',"attachment; filename*=UTF-8''"+quote(name))
+        self.end_headers();self.wfile.write(payload)
+
     def visa_applicant_action(self,method,case_id,tail):
         if not self._visa_allowed():return
         case = self.visa_material_case_or_404('',case_id)
         if not case:return
         self._visa_independent_case_id=int(case_id)
+        preview_match=re.fullmatch(r'material-batch-upload/preview/(\d+)',tail)
+        if preview_match:return self.visa_batch_pending_preview(method,'',case_id,int(preview_match[1]))
         if tail in {'material-items', 'material-items/init', 'material-batch-upload', 'material-batch-upload/confirm'}:
             if not self.visa_only_materials_ready():
                 return self.error_page('独立案件材料清单需要先应用数据库迁移。', 503)

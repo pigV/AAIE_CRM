@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
+import json
 import unicodedata
 from typing import Literal
 
@@ -445,6 +446,132 @@ def _authorized_actor(actor) -> tuple[int | None, str]:
     return actor_id, str(_value(actor, "display_name", "System") or "System")
 
 
+# Existing audit storage distinguishes document acceptance from final-school selection.
+_DOCUMENT_ACCEPTANCE = "__document_acceptance__"
+_DOCUMENT_WITHDRAWAL = "__document_withdrawal__"
+
+
+def _document_acceptance_record(connection, offer_id):
+    row = connection.execute(
+        """SELECT * FROM offer_acceptance_history
+           WHERE new_offer_id=? AND previous_offer_restored_status IN (?,?)
+           ORDER BY id DESC LIMIT 1""",
+        (int(offer_id), _DOCUMENT_ACCEPTANCE, _DOCUMENT_WITHDRAWAL),
+    ).fetchone()
+    return row if row and row['previous_offer_restored_status'] == _DOCUMENT_ACCEPTANCE else None
+
+
+def _validate_offer_document_owner(connection, offer):
+    event_columns = _table_columns(connection, "offer_received_events")
+    if {"legacy_offer_id", "transfer_branch_id"} <= event_columns:
+        if connection.execute("SELECT 1 FROM offer_received_events WHERE legacy_offer_id=? AND transfer_branch_id IS NOT NULL LIMIT 1", (offer["id"],)).fetchone():
+            raise OfferAcceptanceError("transfer_branch_managed", "Transfer Offer 必须在 Target Branch / Transfer V2 专门页面处理。")
+    link_columns = _table_columns(connection, "case_record_links")
+    if {"record_type", "record_id", "transfer_application_id"} <= link_columns:
+        if connection.execute("SELECT 1 FROM case_record_links WHERE record_type='offer' AND record_id=? AND transfer_application_id IS NOT NULL LIMIT 1", (offer["id"],)).fetchone():
+            raise OfferAcceptanceError("transfer_branch_managed", "Transfer Offer 必须在 Target Branch / Transfer V2 专门页面处理。")
+    cycle_id = _value(offer, "application_cycle_id")
+    if cycle_id is not None:
+        cycle = connection.execute("SELECT * FROM application_cycles WHERE id=?", (cycle_id,)).fetchone()
+        if cycle is None or str(_value(cycle, "student_id", "")) != str(offer["student_id"]):
+            raise OfferAcceptanceError("cycle_owner_mismatch", "Offer 的申请周期学生归属异常。")
+        if str(_value(cycle, "cycle_type", "")) == "transfer":
+            raise OfferAcceptanceError("transfer_branch_managed", "Transfer Offer 必须在 Target Branch / Transfer V2 专门页面处理。")
+        if str(_value(cycle, "status", "")) != "active":
+            raise OfferAcceptanceError("cycle_inactive", "Offer 不属于当前有效申请周期。")
+
+
+def _accept_offer_document(connection, student_id: str, offer_id: int, actor,
+                          occurred_at: str | None = None) -> AcceptanceChange:
+    """Accept this document without changing final school, CoE, or commission.
+
+    Offer and SignedOffer documents may coexist. Neither creates a second
+    canonical final acceptance or a commission source through this operation.
+    """
+    actor_id, actor_name = _authorized_actor(actor)
+    offer = connection.execute("SELECT * FROM offers WHERE id=?", (int(offer_id),)).fetchone()
+    if offer is None:
+        raise OfferAcceptanceError("offer_not_found", "Offer 记录不存在。")
+    if str(offer["student_id"]) != str(student_id):
+        raise OfferAcceptanceError("student_mismatch", "该 Offer 不属于当前学生。")
+    _validate_offer_document_owner(connection, offer)
+    if str(_value(offer, "document_type", "Offer")) not in {"Offer", "SignedOffer"}:
+        raise OfferAcceptanceError("formal_offer_required", "仅 Offer 或 SignedOffer 文件可以接受。")
+    status = str(offer["offer_status"] or "received")
+    if status.strip().lower() in {"void", "voided", "cancelled", "canceled", "rejected",
+                                   "declined", "withdrawn", "superseded", "invalid_record"}:
+        raise OfferAcceptanceError("offer_invalid", "该 Offer 已失效，无法接受。")
+    if _table_columns(connection, "offer_received_event_state_events"):
+        state = connection.execute(
+            """SELECT state.state FROM offer_received_event_state_events state
+               JOIN offer_received_events receipt ON receipt.id=state.offer_received_event_id
+               WHERE receipt.legacy_offer_id=?
+               ORDER BY state.occurred_at DESC,state.id DESC LIMIT 1""", (int(offer_id),)
+        ).fetchone()
+        if state and state[0] != "ACTIVE":
+            raise OfferAcceptanceError("offer_invalid", "该 Offer 已失效，无法接受。")
+    previous = _document_acceptance_record(connection, offer_id)
+    if status == "accepted" and previous is not None:
+        return AcceptanceChange(str(student_id), int(offer_id), None, True, False, False,
+                                str(previous["accepted_at"]))
+    original_status = status
+    if status == "accepted":
+        current = get_current_accepted_offer(connection, str(student_id))
+        original_status = current.status_before_acceptance if current and current.offer_id == int(offer_id) else "__legacy_status_unknown__"
+    stamp = occurred_at or _now_iso()
+    connection.execute("SAVEPOINT accept_offer_document")
+    try:
+        if status != "accepted":
+            connection.execute(
+                """UPDATE offers SET offer_status='accepted',accepted_date=?,accepted_by=?
+                   WHERE id=? AND student_id=?""", (stamp[:10], actor_id, int(offer_id), str(student_id)))
+        connection.execute(
+            """INSERT INTO offer_acceptance_history(
+                 student_id,previous_offer_id,new_offer_id,previous_offer_restored_status,
+                 new_offer_previous_status,accepted_by_user_id,accepted_by_name,accepted_at,
+                 coe_present,coe_warning_acknowledged,created_at
+               ) VALUES(?,NULL,?,?,?,?,?,?,0,0,?)""",
+            (str(student_id),int(offer_id),_DOCUMENT_ACCEPTANCE,original_status,actor_id,actor_name,stamp,stamp))
+        connection.execute("RELEASE SAVEPOINT accept_offer_document")
+    except Exception:
+        connection.execute("ROLLBACK TO SAVEPOINT accept_offer_document")
+        connection.execute("RELEASE SAVEPOINT accept_offer_document")
+        raise
+    return AcceptanceChange(str(student_id),int(offer_id),None,False,False,False,stamp)
+
+
+def _preserve_final_document_acceptance(connection, student_id, current, actor, stamp):
+    """Record legacy acceptance history without accepting or reviving an old Offer.
+
+    A replaced/withdrawn final may already be void or rejected. Only a row
+    still marked accepted needs a compatibility history marker; receipt
+    validity is a gate for new acceptance, not for removing the final choice.
+    """
+    offer = connection.execute("SELECT * FROM offers WHERE id=? AND student_id=?",
+                               (current.offer_id, str(student_id))).fetchone()
+    if offer is None:
+        raise OfferAcceptanceError("offer_not_found", "原最终 Offer 记录不存在。")
+    _validate_offer_document_owner(connection, offer)
+    if str(offer["offer_status"]) != "accepted" or _document_acceptance_record(connection, current.offer_id) is not None:
+        return
+    actor_id, actor_name = _authorized_actor(actor)
+    connection.execute(
+        """INSERT INTO offer_acceptance_history(
+             student_id,previous_offer_id,new_offer_id,previous_offer_restored_status,
+             new_offer_previous_status,accepted_by_user_id,accepted_by_name,accepted_at,
+             coe_present,coe_warning_acknowledged,created_at
+           ) VALUES(?,NULL,?,?,?,?,?,?,0,0,?)""",
+        (str(student_id),current.offer_id,_DOCUMENT_ACCEPTANCE,current.status_before_acceptance,
+         actor_id,actor_name,current.accepted_at,stamp))
+
+
+@synchronized_offer_selection
+def accept_offer_document(connection, student_id: str, offer_id: int, actor,
+                          occurred_at: str | None = None) -> AcceptanceChange:
+    """Accept one ordinary Offer document without changing the final school."""
+    return _accept_offer_document(connection, student_id, offer_id, actor, occurred_at)
+
+
 @synchronized_offer_selection
 def set_accepted_offer(
     connection,
@@ -454,7 +581,7 @@ def set_accepted_offer(
     warning_acknowledged: bool = False,
     occurred_at: str | None = None,
 ) -> AcceptanceChange:
-    """Set exactly one accepted Offer, preserving prior status and permanent history."""
+    """Select one final-school Offer while retaining independent document acceptances."""
 
     actor_id, actor_name = _authorized_actor(actor)
     offer = connection.execute("SELECT * FROM offers WHERE id=?", (int(offer_id),)).fetchone()
@@ -462,11 +589,13 @@ def set_accepted_offer(
         raise OfferAcceptanceError("offer_not_found", "Offer 记录不存在。")
     if str(offer["student_id"]) != str(student_id):
         raise OfferAcceptanceError("student_mismatch", "该 Offer 不属于当前学生。")
+    _validate_offer_document_owner(connection, offer)
     eligibility = acceptance_eligibility(connection, int(offer_id))
     if not eligibility.eligible:
         raise OfferAcceptanceError("classification_required", eligibility.reason or "Offer 学校资料不完整。")
     current = get_current_accepted_offer(connection, str(student_id))
     if current and current.offer_id == int(offer_id):
+        _accept_offer_document(connection, student_id, offer_id, actor, occurred_at)
         return AcceptanceChange(
             student_id=str(student_id),
             offer_id=int(offer_id),
@@ -491,11 +620,6 @@ def set_accepted_offer(
         if event_state and event_state[0] != "ACTIVE":
             raise OfferAcceptanceError("offer_invalid", "该 Offer 已失效，无法设为最终接受。")
 
-    if current and current.status_before_acceptance == "__legacy_status_unknown__":
-        raise OfferAcceptanceError(
-            "legacy_restore_status_required",
-            "当前已接受 Offer 的历史状态待检查；请先完成历史状态复核，再更换 Offer。",
-        )
     if eligibility.requires_coe_warning and not warning_acknowledged:
         raise OfferAcceptanceError(
             "coe_warning_required",
@@ -505,28 +629,12 @@ def set_accepted_offer(
     stamp = occurred_at or _now_iso()
     previous_offer_id = current.offer_id if current else None
     new_previous_status = str(offer["offer_status"] or "received")
-    if new_previous_status == "accepted":
-        raise OfferAcceptanceError(
-            "inconsistent_accepted_status",
-            "该 Offer 状态异常，请先联系管理员检查历史接受记录。",
-        )
-
     connection.execute("SAVEPOINT offer_acceptance_change")
     try:
         restored_status = None
         if current:
-            restored_status = current.status_before_acceptance
-            connection.execute(
-                """UPDATE offers
-                      SET offer_status=?,accepted_date=NULL,accepted_by=NULL
-                    WHERE id=? AND student_id=?""",
-                (restored_status, current.offer_id, str(student_id)),
-            )
-        connection.execute(
-            """UPDATE offers SET offer_status='accepted',accepted_date=?,accepted_by=?
-                WHERE id=? AND student_id=?""",
-            (stamp[:10], actor_id, int(offer_id), str(student_id)),
-        )
+            _preserve_final_document_acceptance(connection, student_id, current, actor, stamp)
+        _accept_offer_document(connection, student_id, offer_id, actor, stamp)
         connection.execute(
             """INSERT INTO student_offer_acceptances(
                  student_id,offer_id,status_before_acceptance,accepted_at,
@@ -642,26 +750,17 @@ def withdraw_accepted_offer(
     cleaned_reason = str(reason or "").strip()
     if not cleaned_reason:
         raise OfferAcceptanceError("reason_required", "撤回 Acceptance 必须填写原因。")
-    if current.status_before_acceptance == "__legacy_status_unknown__":
-        raise OfferAcceptanceError(
-            "legacy_restore_status_required",
-            "当前已接受 Offer 的历史状态待检查，不能自动撤回。",
-        )
     offer = connection.execute(
         "SELECT * FROM offers WHERE id=? AND student_id=?",
         (current.offer_id, str(student_id)),
     ).fetchone()
     if offer is None:
         raise OfferAcceptanceError("offer_not_found", "Offer 记录不存在。")
+    _validate_offer_document_owner(connection, offer)
     stamp = occurred_at or _now_iso()
     connection.execute("SAVEPOINT withdraw_offer_acceptance")
     try:
-        connection.execute(
-            """UPDATE offers
-                  SET offer_status=?,accepted_date=NULL,accepted_by=NULL
-                WHERE id=? AND student_id=?""",
-            (current.status_before_acceptance, current.offer_id, str(student_id)),
-        )
+        _preserve_final_document_acceptance(connection, student_id, current, actor, stamp)
         connection.execute(
             "DELETE FROM student_offer_acceptances WHERE student_id=? AND offer_id=?",
             (str(student_id), current.offer_id),
@@ -691,7 +790,64 @@ def withdraw_accepted_offer(
     return AcceptanceWithdrawal(
         student_id=str(student_id),
         offer_id=current.offer_id,
-        restored_status=current.status_before_acceptance,
+        restored_status=str(offer["offer_status"]),
         withdrawn_at=stamp,
         reason=cleaned_reason,
     )
+
+
+@synchronized_offer_selection
+def withdraw_offer_document(connection, student_id: str, offer_id: int, actor, *,
+                            reason: str, occurred_at: str | None = None) -> AcceptanceWithdrawal:
+    """Withdraw one document acceptance; final-school selection must be withdrawn first."""
+    actor_id, actor_name = _authorized_actor(actor)
+    reason = str(reason or '').strip()
+    if not reason:
+        raise OfferAcceptanceError('reason_required', '撤回 Offer 文件接受必须填写原因。')
+    offer = connection.execute('SELECT * FROM offers WHERE id=?', (int(offer_id),)).fetchone()
+    if offer is None:
+        raise OfferAcceptanceError('offer_not_found', 'Offer 记录不存在。')
+    if str(offer['student_id']) != str(student_id):
+        raise OfferAcceptanceError('student_mismatch', '该 Offer 不属于当前学生。')
+    _validate_offer_document_owner(connection, offer)
+    current = get_current_accepted_offer(connection, str(student_id))
+    final = current is not None and current.offer_id == int(offer_id)
+    if {'legacy_offer_id'} <= _table_columns(connection, 'offer_received_events') and _table_columns(connection, 'cycle_final_acceptances'):
+        final = final or bool(connection.execute('''SELECT 1 FROM cycle_final_acceptances selected
+            JOIN offer_received_events event ON event.id=selected.offer_received_event_id
+            WHERE selected.acceptance_status='active' AND event.legacy_offer_id=? LIMIT 1''',
+            (int(offer_id),)).fetchone())
+    if final:
+        raise OfferAcceptanceError('final_acceptance_active', '该 Offer 仍为最终入读选择，请先撤回最终选择，再撤回文件接受。')
+    record = _document_acceptance_record(connection, int(offer_id))
+    stamp = occurred_at or _now_iso()
+    if record is None:
+        previous = connection.execute('''SELECT * FROM offer_acceptance_history
+            WHERE new_offer_id=? AND previous_offer_restored_status=? ORDER BY id DESC LIMIT 1''',
+            (int(offer_id), _DOCUMENT_WITHDRAWAL)).fetchone()
+        if previous is not None and str(offer['offer_status']) == str(previous['new_offer_previous_status']):
+            return AcceptanceWithdrawal(str(student_id),int(offer_id),str(offer['offer_status']),str(previous['accepted_at']),reason)
+        raise OfferAcceptanceError('active_acceptance_not_found', '该文件没有可撤回的接受记录；历史状态需要先复核。')
+    restored = str(record['new_offer_previous_status'])
+    if restored in {'accepted','__legacy_status_unknown__'}:
+        raise OfferAcceptanceError('legacy_restore_status_required', '该 Offer 的历史接受前状态未知，请先复核历史记录。')
+    if str(offer['offer_status']) != 'accepted':
+        raise OfferAcceptanceError('offer_invalid', '文件状态已变更，不能自动撤回接受。')
+    connection.execute('SAVEPOINT withdraw_offer_document')
+    try:
+        connection.execute('UPDATE offers SET offer_status=?,accepted_date=NULL,accepted_by=NULL WHERE id=? AND student_id=?',
+                           (restored,int(offer_id),str(student_id)))
+        connection.execute('''INSERT INTO offer_acceptance_history(student_id,previous_offer_id,new_offer_id,
+            previous_offer_restored_status,new_offer_previous_status,accepted_by_user_id,accepted_by_name,
+            accepted_at,coe_present,coe_warning_acknowledged,created_at) VALUES(?,NULL,?,?,?,?,?,?,0,0,?)''',
+            (str(student_id),int(offer_id),_DOCUMENT_WITHDRAWAL,restored,actor_id,actor_name,stamp,stamp))
+        connection.execute('''INSERT INTO audit_logs(user_id,action_type,module_name,module_key,record_id,
+            student_id,old_value,new_value,created_at) VALUES(?,?,?,?,?,?,?,?,?)''',
+            (actor_id,'offer_document_withdrawn','Offer','offer',str(offer_id),str(student_id),
+             json.dumps({'offer_status':'accepted'}),json.dumps({'offer_status':restored,'reason':reason},ensure_ascii=False),stamp))
+        connection.execute('RELEASE SAVEPOINT withdraw_offer_document')
+    except Exception:
+        connection.execute('ROLLBACK TO SAVEPOINT withdraw_offer_document')
+        connection.execute('RELEASE SAVEPOINT withdraw_offer_document')
+        raise
+    return AcceptanceWithdrawal(str(student_id),int(offer_id),restored,stamp,reason)

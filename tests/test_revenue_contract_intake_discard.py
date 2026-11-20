@@ -119,6 +119,7 @@ class ContractIntakeDiscardTests(RevenueDatabaseFixture, unittest.TestCase):
         handler.end_headers = lambda: None
         handler.wfile = BytesIO()
         db = SimpleNamespace(
+            path=self.database_path,
             connect=lambda: self.db, _release_connection=lambda _db: None,
             one=lambda sql, args: self.db.execute(sql, args).fetchone(),
             all=lambda sql, args=(): self.db.execute(sql, args).fetchall(),
@@ -138,6 +139,9 @@ class ContractIntakeDiscardTests(RevenueDatabaseFixture, unittest.TestCase):
                     pdf = canvas.Canvas(stream)
                     pdf.drawString(45, 760, "Signed synthetic agreement " + target)
                     pdf.drawString(45, 740, "1. Commission is a one-off payment of 8% of first-year tuition fees.")
+                    for appendix in range(2, 5):
+                        pdf.showPage()
+                        pdf.drawString(45, 760, f"Synthetic contract appendix page {appendix}")
                     pdf.save()
                     source_pdf = stream.getvalue()
                     handler.files = [app.Upload("contract_file", "contract.pdf", "application/pdf", source_pdf)]
@@ -164,6 +168,7 @@ class ContractIntakeDiscardTests(RevenueDatabaseFixture, unittest.TestCase):
                                      "/revenue/contracts/upload-school")
                     self.assertEqual(handler.revenue_institution_commission_draft("GET", first)[0], 404)
                     self.assertEqual(handler.revenue_document("GET", document, "view")[0], 404)
+                    self.assertEqual(handler.revenue_document("GET", document, "preview")[0], 404)
                     self.assertIn(f'value="{target}"', handler.revenue_school_contract_upload("GET")[1])
 
                     replacement = upload("correct-" + target)
@@ -208,6 +213,25 @@ class ContractIntakeDiscardTests(RevenueDatabaseFixture, unittest.TestCase):
                     handler.wfile = BytesIO()
                     self.assertIsNone(handler.revenue_document("GET", workflow.document["uid"], "view"))
                     self.assertEqual(handler.wfile.getvalue(), source_pdf)
+                    headers = {}
+                    handler.send_header = lambda name, value: headers.__setitem__(name, value)
+                    handler.query = {"page": ["999"]}
+                    handler.wfile = BytesIO()
+                    self.assertIsNone(handler.revenue_document("GET", workflow.document["uid"], "preview"))
+                    self.assertTrue(handler.wfile.getvalue().startswith(b"\x89PNG"))
+                    self.assertEqual(headers["X-Preview-Page"], "4")
+                    self.assertEqual(headers["X-Preview-Page-Count"], "4")
+                    self.assertEqual(headers["Cache-Control"], "private, no-store")
+                    self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+                    self.assertEqual(handler.revenue_document("POST", workflow.document["uid"], "preview")[0], 405)
+                    self.assertEqual(handler.revenue_document("GET", "foreign-contract", "preview")[0], 404)
+                    handler.query = {}
+                    handler.user = {"id": 1, "role_name": "Staff", "module_permissions_json": "[]"}
+                    handler.wfile = BytesIO()
+                    self.assertEqual(handler.revenue_document("GET", workflow.document["uid"], "preview")[0], 403)
+                    self.assertEqual(handler.wfile.getvalue(), b"")
+                    handler.user = {"id": 1, "role_name": "Admin"}
+
                     handler.form = {"operation": "invoice"}
                     self.assertEqual(handler.revenue_institution_commission_draft("POST", replacement)[0], 400)
 

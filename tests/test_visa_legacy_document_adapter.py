@@ -80,6 +80,7 @@ class LegacyTests(unittest.TestCase):
   self.assertEqual(self.c.execute('SELECT original_name FROM student_documents').fetchone()[0],'Bank Account Transaction Details_Deposit.txt')
   self.assertNotIn('legacy-edit',h.visa_legacy_document_controls_html(1,dict(file,is_auto_reference=True)))
  def test_actual_default_detail_renders_processing_and_preserves_tabs(self):
+  self.c.executescript("ALTER TABLE visa_cases ADD COLUMN status TEXT DEFAULT 'Draft'; ALTER TABLE visa_cases ADD COLUMN visa_type TEXT DEFAULT '500 Student Visa'; ALTER TABLE visa_cases ADD COLUMN case_owner INTEGER;")
   from contextlib import contextmanager
   from html import escape
   from http import HTTPStatus

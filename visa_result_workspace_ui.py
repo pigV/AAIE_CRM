@@ -113,7 +113,7 @@ def render_result_workspace(case, result, materials_html, processing_html, lodge
     if not dict(case).get('student_id') and target=='visa-result-lodgement':target='visa-result-case-documents'
     navigation=''.join(f'<a href="#visa-result-group-{key}" data-result-jump>{label}</a>' for key,label,_ in GROUPS if key!='other')
     extra=(f'<details class="visa-result-case-documents" id="visa-result-case-documents"><summary>案件文件与递交版本 / Prepared · IMMI Submitted</summary>{case_documents}</details>' if case_documents else '')
-    return f'''<link rel="stylesheet" href="/assets/visa-material-workspace.css?v=1"><link rel="stylesheet" href="/assets/visa-result-workspace.css?v=1"><script src="/assets/visa-result-workspace.js?v=3" defer></script>
+    return f'''<link rel="stylesheet" href="/assets/visa-material-workspace.css?v=1"><link rel="stylesheet" href="/assets/visa-result-workspace.css?v=2"><script src="/assets/visa-result-workspace.js?v=4" defer></script>
       <div class="visa-result-workspace" data-visa-result-workspace data-case-id="{int(case['id'])}" data-stage="{stage['key']}">
         <section class="visa-result-current visa-result-{stage['tone']}"><div><span>当前结果记录</span><h2>{escape(stage['label'])}</h2><p>{escape(stage['hint'])}</p></div><a class="primary button-link" href="#{target}" data-result-jump>{escape(stage['action'])}</a></section>
         <nav class="visa-result-nav" aria-label="结果页分区">{navigation}<a href="#visa-result-dates" data-result-jump>关键日期与结果核对</a></nav>

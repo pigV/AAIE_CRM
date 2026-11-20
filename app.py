@@ -22308,7 +22308,7 @@ def lifecycle_context_badge_html(context):
 
 
 def application_document_row(
-    document, module=None, csrf="", lifecycle_context=None, transfer_usage=False
+    document, module=None, csrf="", lifecycle_context=None, transfer_usage=False, can_manage_source=False
 ):
     module = module or document["folder_category"]
     uploaded_at = esc((document["uploaded_at"] or "")[:16].replace("T", " "))
@@ -22318,6 +22318,7 @@ def application_document_row(
     void_note = ""
     if str(document_status).lower() == "voided":
         reason = document["void_reason"] if "void_reason" in document_keys else ""
+        reason = str(reason or "").removeprefix("[source-material-withdrawal] ")
         void_note = f'<span class="status danger">{("已作废" if module == "Applications" else "VOID / 已作废")}{("：" + esc(reason)) if reason else ""}</span>'
     preview_actions = ""
     suffix = Path(document["stored_name"] or document["original_name"] or "").suffix.lower()
@@ -22328,6 +22329,18 @@ def application_document_row(
                 f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
                 '<button class="secondary" type="submit">重新生成最终确认方案</button></form>'
             )
+    if csrf and can_manage_source and module == 'Applications':
+        from student_document_lifecycle import SOURCE_DOCUMENT_TYPES
+        if document['document_type'] in SOURCE_DOCUMENT_TYPES:
+            restore = str(document_status).lower() == 'voided' and str(document['void_reason'] or '').startswith('[source-material-withdrawal] ')
+            action_label = '恢复此材料' if restore else '删除此材料'
+            preview_actions += (
+                f'<form method="post" action="/students/{esc(document["student_id"])}/documents/{int(document["id"])}/withdraw-source" data-ajax-student-tab-form>'
+                f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                f'<input type="hidden" name="withdrawn" value="{0 if restore else 1}">'
+                '<label>原因<input name="reason" required placeholder="填写撤销或恢复原因"></label>'
+                f'<button class="{("secondary" if restore else "danger")} compact">{action_label}</button>'
+                '<small>保留原件与历史，可恢复；已被正式业务采用的材料需先在对应业务页面处理。</small></form>')
     preview = student_document_preview_panel(document, extra_actions=preview_actions)
     context_badge = (
         '<p class="muted-line">原始文件未直接绑定业务周期；本次采用状态见对应学校材料清单。</p>'
@@ -27678,7 +27691,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/revenue/contracts/upload-school$", self.revenue_school_contract_upload),
                 (r"^/revenue/institution-commission-drafts/([^/]+)$", self.revenue_institution_commission_draft),
                 (r"^/revenue/vic-rcti/([a-z0-9-]+)(?:/([a-z0-9-]+))?$", self.revenue_vic_rcti),
-                (r"^/revenue/documents/([^/]+)/(view|download)$", self.revenue_document),
+                (r"^/revenue/documents/([^/]+)/(view|download|preview)$", self.revenue_document),
                 (r"^/revenue/school-commission-candidates(?:/(review|confirm))?$",
                  self.revenue_school_claim_candidates),
                 (r"^/revenue/school-commission-invoices(?:/(account|services|preview|edit|pdf|issue|delivery|payment|reconcile|reminder|reminder-send|reminder-retry|reminder-sent|mail-settings|mail-retry|mail-history))?$",
@@ -28000,6 +28013,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/(\d+)/visa-cases/(\d+)/material-items/init$", self.student_visa_case_material_checklist_init),
                 (r"^/students/(\d+)/visa-cases/(\d+)/material-items$", self.student_visa_case_material_checklist_save),
                 (r"^/students/(\d+)/visa-cases/(\d+)/material-batch-upload$", self.student_visa_case_material_batch_upload),
+                (r"^/students/(\d+)/visa-cases/(\d+)/material-batch-upload/preview/(\d+)$", self.visa_batch_pending_preview),
                 (r"^/students/(\d+)/visa-cases/(\d+)/material-batch-upload/confirm$", self.student_visa_case_material_batch_confirm),
                 (r"^/students/(\d+)/visa-cases/(\d+)/materials-zip$", self.student_visa_case_materials_zip_export),
                 (r"^/students/(\d+)/visa-cases/(\d+)/material-items/(\d+)/files$", self.student_visa_case_material_file_upload),
@@ -28041,9 +28055,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/(\d+)/materials-complete$", self.materials_complete),
                 (r"^/students/(\d+)/offer$", self.offer_create),
                 (r"^/students/(\d+)/offer/first-year-tuition$", self.student_first_year_tuition_update),
+                (r"^/students/(\d+)/coe/course-tuition/([A-Za-z0-9_-]+)$", self.student_course_tuition_update),
+                (r"^/students/(\d+)/coe/(\d+)/course-tuition$", self.student_coe_course_confirmation),
                 (r"^/students/(\d+)/offer/(\d+)/update$", self.offer_update),
                 (r"^/students/(\d+)/offer/(\d+)/classify$", self.offer_classify),
+                (r"^/students/(\d+)/documents/(\d+)/withdraw-source$", self.student_source_material_withdraw),
                 (r"^/students/(\d+)/offer/(\d+)/accept$", self.offer_accept),
+                (r"^/students/(\d+)/offer/(\d+)/select-final$", self.offer_select_final),
+                (r"^/students/(\d+)/offer/(\d+)/withdraw-document-acceptance$", self.offer_document_acceptance_withdraw),
                 (r"^/students/(\d+)/offer/(\d+)/withdraw-acceptance$", self.offer_acceptance_withdraw),
                 (r"^/students/(\d+)/offer/resume-selection$", self.offer_selection_resume),
                 (r"^/students/(\d+)/coe$", self.coe_create),
@@ -31485,6 +31504,25 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 )
         except (StorageUnavailable, OSError, ValueError, TypeError):
             return self.error_page("Revenue 文件不可用。", HTTPStatus.NOT_FOUND)
+        if disposition == "preview":
+            try:
+                total = pdf_page_count(payload, max_pages=None) if mime_type == "application/pdf" else 1
+                number = max(1, min(total, int((self.query.get("page") or ["1"])[0])))
+                preview = Path(make_preview("revenue_" + str(document["sha256"]),
+                    "source" + extensions[mime_type], payload, mime_type, size="large", page=number)).resolve()
+                if PREVIEW_DIR.resolve() not in preview.parents or not preview.is_file():
+                    raise ValueError("preview_unavailable")
+                rendered = preview.read_bytes()
+            except (OSError, ValueError, RuntimeError):
+                return self.error_page("原件预览暂不可用，请下载原文件核对。", HTTPStatus.BAD_REQUEST)
+            self.send_response(HTTPStatus.OK)
+            for key, value in (("Content-Type", "image/png"), ("Content-Length", str(len(rendered))),
+                    ("Cache-Control", "private, no-store"), ("X-Content-Type-Options", "nosniff"),
+                    ("X-Preview-Page", str(number)), ("X-Preview-Page-Count", str(total))):
+                self.send_header(key, value)
+            self.end_headers()
+            self.wfile.write(rendered)
+            return
         extension = extensions[mime_type]
         filename = f"{document['document_kind']}-{document_uid}{extension}"
         self.send_response(HTTPStatus.OK)
@@ -55238,14 +55276,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
         finally:
             db._release_connection(connection)
+        from application_withdrawal import group_withdrawn_students
         rows = []
-        for record in records:
+        for group in group_withdrawn_students(records):
+            record = group['latest']
             student_id = str(record["student_id"])
             name = student_display_name(record)
             href = f'/students/{quote(student_id)}?application_cycle_id={record["cycle_id"]}'
+            history = ''.join(
+                f'<li><a href="/students/{quote(student_id)}?application_cycle_id={item["cycle_id"]}">'
+                f'第 {esc(item["sequence_no"])} 轮</a> · {esc(item["stage"])} · '
+                f'{esc(display_datetime(item["closed_at"]))} · {esc(item["reason"])} · {esc(item["operator"])}</li>'
+                for item in group['history']
+            )
+            history_html = (f'<details><summary>共 {len(group["history"])} 次终止 · 查看历史</summary><ul>{history}</ul></details>'
+                            if len(group['history']) > 1 else '')
             rows.append(f"""<tr>
                 <td>{esc(student_id)}</td><td><a href="{esc(href)}">{esc(name)}</a></td>
-                <td>{esc(record["sequence_no"])}</td><td>{esc(record["stage"])}</td>
+                <td>{esc(record["sequence_no"])}{history_html}</td><td>{esc(record["stage"])}</td>
                 <td>{esc(display_datetime(record["closed_at"]))}</td>
                 <td>{esc(record["reason"])}</td><td>{esc(record["operator"])}</td>
               </tr>""")
@@ -60591,6 +60639,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             setting_reader=db.setting,
         )
         transfer_summary = build_student_transfer_summary(student_id, self.user)
+        from student_transfer_summary import render_student_transfer_badge
+        transfer_name_badge = render_student_transfer_badge(transfer_summary)
         transfer_summary_fact_html = render_student_transfer_fact(transfer_summary)
         if transfer_summary_fact_html:
             transfer_summary_fact_html = transfer_summary_fact_html.replace(
@@ -60914,7 +60964,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         <section class="student-summary-card panel">
           <div class="student-summary-main">
             <a class="back-link" href="/students">← 学生列表</a>
-            <div class="student-title"><div class="avatar">{esc(student["passport_first_name"][:1])}</div><div><h2>{esc(student["passport_first_name"])} {esc(student["passport_last_name"])}</h2><p>{esc(student_id)} · {esc(current_status_text)}</p></div></div>
+            <div class="student-title"><div class="avatar">{esc(student["passport_first_name"][:1])}</div><div><h2>{esc(student["passport_first_name"])} {esc(student["passport_last_name"])} <span data-student-transfer-name>{transfer_name_badge}</span></h2><p>{esc(student_id)} · {esc(current_status_text)}</p></div></div>
             <div class="alerts">{alert_html}</div><div class="student-actions" id="workflow-progress">{school_plan_button}{primary_action_grid}{edit_profile_button}{withdrawal_button}{delete_student_button}{business_operations}</div>
           </div>
           <div class="student-summary-facts">
@@ -61238,8 +61288,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             step_start = time.perf_counter()
             docs = db.all(
                 """SELECT * FROM student_documents
-                   WHERE student_id=? AND is_active=1 AND folder_category='Applications'
-                   ORDER BY uploaded_at DESC""",
+                   WHERE student_id=? AND folder_category='Applications'
+                     AND (is_active=1 OR (document_status='voided' AND void_reason LIKE '[source-material-withdrawal] %'))
+                   ORDER BY is_active DESC,uploaded_at DESC""",
                 (student_id,),
             )
             student_perf_log("file_query", student_id, tab=tab, elapsed_ms=perf_ms(step_start), count=len(docs))
@@ -61265,6 +61316,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             doc_rows = "".join(
                 application_document_row(
                     document, csrf=self.csrf,
+                    can_manage_source=getattr(self,'business_changes_enabled',lambda:False)() and can_workflow_module_save(self.user,'Applications'),
                     lifecycle_context=document_contexts.get(int(document["id"])),
                 ) for document in normalized_docs
             ) or '<div class="empty">尚无文件</div>'
@@ -61687,6 +61739,96 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return render_student_tuition(details, str(student_id), self.csrf, new_token(),
                                       show_original=not permission or allowed(self.user, permission))
 
+    def student_coe_course_confirmation(self, method, student_id, coe_id):
+        from business_changes.snapshots import read_scope
+        from business_changes.commands import TransactionView
+        from revenue.school_courses import available, accepted_course_offers, render_course_fields, read_course_fields, save_coe_courses, course_details
+        if method not in {'GET','POST'}:
+            return self.error_page('不支持此请求方式。',405)
+        if not self._can_correct_student_tuition() or not allowed(self.user,'coe.manage'):
+            return self.error_page('无权限核对课程学费或读取CoE原件。',403)
+        record = db.one("SELECT * FROM coe_oshc WHERE id=? AND student_id=? AND document_kind IN ('COE','COE_CAAW')",(int(coe_id),student_id))
+        if record is None:
+            return self.error_page('CoE不存在或不属于此学生。',404)
+        with read_scope(db) as connection:
+            if not available(connection):
+                return self.error_page('课程功能尚未完成迁移。',400)
+            from revenue.student_intake_tuition import accepted_offer_context
+            context = accepted_offer_context(connection,student_id)
+            schools = [dict(row) for row in connection.execute("SELECT id,school_name FROM schools WHERE COALESCE(deleted_at,'')='' ORDER BY school_name")]
+            offers = accepted_course_offers(connection,student_id,record['application_cycle_id'])
+        if method == 'POST':
+            try:
+                entries = read_course_fields(self.form,0)
+                if not entries:
+                    raise ValueError('请选择并核对需要确认的课程及费用。')
+                student = db.one('SELECT * FROM students WHERE student_id=? AND deleted_at IS NULL',(student_id,))
+                if student is None:
+                    return self.error_page('学生不存在。',404)
+                source = nas.require_student_file_readable(student,record['file_path'])
+                payload = source.read_bytes()
+                from revenue.tuition_storage import TuitionEvidenceStorage
+                from revenue.first_year_tuition import OFFER_EXTENSIONS
+                staged = TuitionEvidenceStorage(Path(db.path).parent/'revenue_documents').stage(
+                    Upload('file',source.name,mimetypes.guess_type(source.name)[0] or 'application/octet-stream',payload),OFFER_EXTENSIONS-{'.txt'})
+                from revenue.school_courses import confirm_existing_coe_courses
+                from business_changes.authorization import current_staff
+                with db.transaction() as connection:
+                    actor = current_staff(connection,self.user['id'])
+                    with db.business_scope(TransactionView(connection,'bc_staff_authorization')):
+                        if not (can_workflow_module_save(actor,'Offer') and can_perform_revenue_action(actor,'cases/tuition') and allowed(actor,'coe.manage')):
+                            raise PermissionError('课程学费权限已变化。')
+                    current = connection.execute('SELECT file_path FROM coe_oshc WHERE id=? AND student_id=?',(int(coe_id),student_id)).fetchone()
+                    if not current or current[0] != str(source):
+                        raise ValueError('CoE原件已变化，请重新核对。')
+                    confirm_existing_coe_courses(connection,student_id,int(coe_id),entries,staged,int(actor['id']))
+            except (ValueError,PermissionError,OSError) as exc:
+                return self.flash_redirect(f'/students/{student_id}/coe/{coe_id}/course-tuition',str(exc),'error')
+            return self.flash_redirect(f'/students/{student_id}?tab=coe','课程学费已确认，CoE原件和原业务记录保持可追溯。')
+        fields = render_course_fields(0,schools,context,offers=offers)
+        body = f"""<section class="panel upload-review"><h2>核对现有 CoE 的课程学费</h2>
+          <p>CoE #{int(coe_id)} · 不重新上传，不新增重复CoE记录。</p>
+          <a href="/coe-oshc/{int(coe_id)}/download" class="secondary button-link">查看CoE原件</a>
+          <form method="post" class="stack-form"><input type="hidden" name="csrf" value="{esc(self.csrf)}">
+          <article data-upload-review-workbench><select data-document-type-select hidden><option value="COE" selected>COE</option></select>{fields}</article>
+          <button class="primary">确认课程学费</button></form></section><script src="/assets/student-intake-tuition.js" defer></script>"""
+        return self.send_html(page('核对课程学费',body,self.user,self.csrf,'students',nas.status()))
+
+    def student_course_tuition_panel(self, student_id):
+        from business_changes.snapshots import read_scope
+        if not self._can_correct_student_tuition():
+            return ''
+        from revenue.school_courses import available, course_details, render_course_details
+        with read_scope(db) as connection:
+            if not available(connection):
+                return ''
+            rows = course_details(connection,str(student_id))
+        return render_course_details(rows,str(student_id),self.csrf,new_token())
+
+    def student_course_tuition_update(self, method, student_id, course_uid):
+        from business_changes.commands import TransactionView
+        if method != 'POST':
+            return self.error_page('不支持此请求方式。',405)
+        if not self._can_correct_student_tuition():
+            return self.error_page('无权限修改课程学费。',403)
+        from revenue.school_courses import correct_course_tuition
+        from business_changes.authorization import current_staff
+        try:
+            with db.transaction() as connection:
+                actor = current_staff(connection,self.user['id'])
+                with db.business_scope(TransactionView(connection,'bc_staff_authorization')):
+                    previous_actor = self.user
+                    try:
+                        self.user = actor
+                        if not self._can_correct_student_tuition():
+                            raise PermissionError('课程学费修改权限已变化。')
+                    finally:
+                        self.user = previous_actor
+                correct_course_tuition(connection,str(student_id),course_uid,self.form,int(actor['id']))
+        except (ValueError,PermissionError) as exc:
+            return self.flash_redirect(f'/students/{student_id}?tab=coe',str(exc),'error')
+        return self.flash_redirect(f'/students/{student_id}?tab=coe','课程学费已更正，历史证据与发票记录保留。')
+
     def student_first_year_tuition_update(self, method, student_id):
         if method != "POST":
             return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
@@ -61862,6 +62004,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if has_school_master
             else []
         )
+        document_acceptance_ids = {int(row['new_offer_id']) for row in db.all(
+            "SELECT DISTINCT new_offer_id FROM offer_acceptance_history WHERE student_id=? AND previous_offer_restored_status=?",
+            (str(student_id), '__document_acceptance__'))}
         rows = []
         has_transfer_offer_links = bool(
             db.one(
@@ -61898,7 +62043,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
             deposit_amount = "" if offer["deposit_amount"] is None else str(offer["deposit_amount"])
             is_current_accepted = current_offer_id == int(offer["id"])
-            is_muted = current_offer_id is not None and not is_current_accepted
+            is_muted = current_offer_id is not None and not is_current_accepted and str(offer["offer_status"] or "").lower() != "accepted"
             transfer_binding = db.one(
                 """SELECT cycle.source_student_case_id AS case_id,
                           link.transfer_application_id AS branch_id,
@@ -61923,7 +62068,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
             legacy_accepted_conflict = (
                 current_offer_id is None and offer["offer_status"] == "accepted"
-                and not transfer_is_accepted
+                and not transfer_is_accepted and int(offer["id"]) not in document_acceptance_ids
             )
             offer_classification_status = offer_record_value(offer, "classification_status") or "unresolved"
             offer_school_id = offer_record_value(offer, "school_id")
@@ -61961,9 +62106,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <form class="offer-classification-form" method="post" action="/students/{student_id}/offer/{offer['id']}/classify" data-ajax-student-tab-form>
                 <input type="hidden" name="csrf" value="{esc(self.csrf)}">
                 <div>
-                  <label>搜索学校<input type="search" data-offer-school-search placeholder="输入学校名称筛选" autocomplete="off"></label>
-                  <label>CRM 学校匹配<select name="school_id" required>{school_options}</select></label>
-                  <small data-offer-school-search-status aria-live="polite">输入名称筛选；选择学校后保存，搜索不会自动更改当前匹配。</small>
+                  <label>CRM 学校匹配<input type="search" data-offer-school-search role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="offer-school-results-{offer['id']}" placeholder="输入学校名称、城市或州，选择搜索结果" autocomplete="off" required></label>
+                  <select name="school_id" hidden aria-label="已选择的 CRM 学校">{school_options}</select>
+                  <div id="offer-school-results-{offer['id']}" class="offer-school-results" data-offer-school-results role="listbox" hidden></div>
+                  <small data-offer-school-search-status aria-live="polite">输入名称，直接选择下方匹配学校后保存。</small>
                 </div>
                 <button class="secondary compact" type="submit">保存学校匹配</button>
               </form>"""
@@ -61980,7 +62126,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     f'<label>学校<input name="school_name" value="{esc(offer["school_name"])}" '
                     'readonly required></label>'
                 )
-            elif is_current_accepted or legacy_accepted_conflict:
+            elif is_current_accepted or legacy_accepted_conflict or str(offer["offer_status"] or "").lower() == "accepted":
                 status_label = "accepted（历史待确认）" if legacy_accepted_conflict else "accepted"
                 status_field = f'<label>状态<input value="{status_label}" disabled><input type="hidden" name="offer_status" value="accepted"></label>'
                 school_field = f'<label>学校<input name="school_name" value="{esc(offer["school_name"])}" required></label>'
@@ -61999,23 +62145,34 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                   <form method="post" action="/students/{student_id}/offer/{offer['id']}/withdraw-acceptance" data-offer-withdraw-acceptance-form data-ajax-student-tab-form>
                     <input type="hidden" name="csrf" value="{esc(self.csrf)}">
                     <label>撤回原因<input name="reason" required placeholder="说明撤回 Acceptance 的原因"></label>
-                    <button class="danger compact" type="submit">Withdraw Acceptance</button>
+                    <button class="danger compact" type="submit">撤回最终入读选择</button>
                   </form>"""
             elif legacy_accepted_conflict:
-                accept_action = '<span class="offer-accept-disabled">历史接受记录冲突，请先确认保留哪一份 Offer</span>'
-            elif current_requires_history_review and not is_current_accepted:
-                accept_action = '<span class="offer-accept-disabled">当前接受项的历史状态待检查，暂不能切换</span>'
+                accept_action = '<span class="offer-accept-disabled">历史最终入读选择待核实</span>'
             elif not is_current_accepted and classification_resolved:
                 accept_action = f"""
-                  <form method="post" action="/students/{student_id}/offer/{offer['id']}/accept" data-offer-accept-form>
+                  <form method="post" action="/students/{student_id}/offer/{offer['id']}/select-final" data-offer-accept-form>
                     <input type="hidden" name="csrf" value="{esc(self.csrf)}">
                     <input type="hidden" name="coe_warning_acknowledged" value="0">
-                    <button class="primary compact" type="submit">设为已接受</button>
+                    <button class="primary compact" type="submit">设为最终入读学校</button>
                   </form>"""
             elif not is_current_accepted:
-                accept_action = '<span class="offer-accept-disabled">完善学校匹配后可设为已接受</span>'
+                accept_action = '<span class="offer-accept-disabled">完善学校匹配后可选择最终入读学校</span>'
+            if transfer_binding is None:
+                document_accepted = str(offer['offer_status'] or '').lower() == 'accepted'
+                document_action = ('<span class="offer-accepted-badge">此 Offer 已接受</span>' if document_accepted else
+                    f'<form method="post" action="/students/{student_id}/offer/{offer["id"]}/accept" data-offer-accept-form>'
+                    f'<input type="hidden" name="csrf" value="{esc(self.csrf)}">'
+                    '<button class="primary compact" type="submit">设为已接受</button></form>')
+                if document_accepted and not is_current_accepted:
+                    document_action += (
+                        f'<form method="post" action="/students/{student_id}/offer/{offer["id"]}/withdraw-document-acceptance" data-ajax-student-tab-form>'
+                        f'<input type="hidden" name="csrf" value="{esc(self.csrf)}">'
+                        '<label>撤回此文件接受的原因<input name="reason" required></label>'
+                        '<button class="danger compact" type="submit">撤回此 Offer 接受</button></form>')
+                accept_action = document_action + accept_action
             rows.append(
-                f'<article id="offer-card-{offer["id"]}" class="student-file-record offer-record-card{" offer-record-card--muted" if is_muted else ""}" data-offer-current-accepted="{"true" if is_current_accepted else "false"}" data-offer-accept-eligible="{"true" if classification_resolved and not legacy_accepted_conflict and not current_requires_history_review else "false"}">'
+                f'<article id="offer-card-{offer["id"]}" class="student-file-record offer-record-card{" offer-record-card--muted" if is_muted else ""}" data-offer-current-accepted="{"true" if is_current_accepted else "false"}" data-offer-accept-eligible="{"true" if classification_resolved and not legacy_accepted_conflict else "false"}">'
                 f'<div class="student-file-record-main">'
                 f'{lifecycle_context_badge_html(lifecycle_contexts.get(int(offer["id"])))}'
                 f'<div class="student-file-record-head"><div><span class="status">{esc(document_label)}</span>'
@@ -62071,7 +62228,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return f"""
         <section class="panel offer-panel">
           <div class="panel-head"><div><h2>Offer 管理</h2><p>上传 Offer 后自动识别学校、日期、有效期和接收定金；识别结果可以人工修改。</p></div><div class="row-actions"><button class="secondary" type="button" data-offer-save-all>保存全部修改</button><button class="secondary" type="button" data-dialog-open="offer-dialog">手动新增</button></div></div>
-          {('<div class="notice warn">当前已接受 Offer 来自历史数据，原状态尚未确认；完成历史复核前系统不会猜测或自动切换。</div>' if current_requires_history_review else '')}
+          {('<div class="notice warn">当前最终入读 Offer 的接受前状态尚未确认；仍可选择其他有效最终学校，撤回该文件接受前需核实原状态。</div>' if current_requires_history_review else '')}
           <form class="upload-box" method="post" enctype="multipart/form-data" action="/students/{student_id}/offer">
             <input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="offer_status" value="received">
             {transfer_branch_field}<input type="file" name="file" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" required><button class="primary">上传 Offer 并自动识别</button>
@@ -62237,6 +62394,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                           <div class="coe-record-head"><div><span class="status ok">已上传</span><strong>{esc(record["document_kind"])}</strong></div><small>{esc(display_datetime(record["created_at"]) if "created_at" in record.keys() else "")}</small></div>
                           <form id="{form_id}" class="coe-fields" data-ajax-student-tab-form data-refresh-tab="coe" data-refresh-panel="false" method="post" action="/students/{student_id}/coe/{record["id"]}/update">{"".join(controls)}<div class="coe-save-row"><button class="secondary">保存修改</button><small class="inline-save-status" data-save-status></small></div></form>
                           {self.final_school_coe_panel(student_id, final_coe_rows.get(record["id"]))}
+                          {(f'<a class="secondary button-link" href="/students/{student_id}/coe/{int(record["id"])}/course-tuition">核对 / 补充课程学费</a>' if record['document_kind'] in {'COE','COE_CAAW'} and self._can_correct_student_tuition() and allowed(self.user,'coe.manage') else '')}
                         </div>
                         <aside class="coe-record-file">{file_cell(record)}</aside>
                       </div>
@@ -62305,6 +62463,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <input type="file" name="file" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" multiple required>
             <button class="primary" type="submit">上传 COE / CAAW / OSHC / Letter of Confirmation 并进入 Review</button>
           </form>
+          {self.student_course_tuition_panel(student_id)}
           <div class="coe-sections">{coe_section}{caaw_section}{oshc_section}{letter_section}</div>
         </section>
         <dialog id="coe-dialog"><form method="post" enctype="multipart/form-data" action="/students/{student_id}/coe"><input type="hidden" name="csrf" value="{esc(self.csrf)}">{getattr(self,"business_change_record_hidden_fields",lambda *args:"")("COE + OSHC",student_id)}<div class="dialog-head"><h2>手动新增 COE / CAAW / OSHC / Letter of Confirmation</h2><button type="button" class="icon-button" data-dialog-close>×</button></div>
@@ -69561,6 +69720,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def visa_material_batch_review_html(self, student_id, case, documents, *, selected_items=None):
         from visa_material_workspace_ui import material_upload_target
+        from document_review_layout import preview_panel
         requested_tab = form_text_value(getattr(self, 'form', {}) or {}, 'return_tab') or self.visa_case_active_tab()
         return_tab = 'visa_result' if requested_tab == 'visa_result' else 'material_checklist'
         return_label = 'Visa Result' if return_tab == 'visa_result' else 'Material Checklist'
@@ -69572,18 +69732,21 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             suggested_label = suggestion.get("chinese_label") or "Unmatched / 待确认"
             selected_id = suggestion.get("item_id") if suggestion["confidence"] in {"High", "Medium"} else ""
             selected_id = (selected_items or {}).get(doc["id"], target_item or selected_id)
-            rows.append(f"""
-              <tr class="visa-material-batch-review-row">
-                <td class="visa-material-batch-review-file"><strong>{esc(doc['original_name'])}</strong><input type="hidden" name="document_ids" value="{esc(doc['id'])}"></td>
-                <td class="visa-material-batch-suggestion">{esc(suggestion.get('item_title') or 'Unmatched')}</td>
-                <td class="visa-material-batch-suggestion">{esc(suggested_label)}</td>
-                <td><span class="status-pill visa-material-batch-confidence visa-material-batch-confidence-{esc(suggestion['confidence'].lower())}">{esc(suggestion['confidence'])}</span></td>
-                <td class="visa-material-batch-reason">{esc(suggestion['matched_reason'])}</td>
-                <td class="visa-material-batch-final-choice"><select name="final_item_{esc(doc['id'])}">{self.visa_material_batch_item_options_html(available_items, selected_id)}</select><label>Unknown result document type<select name="result_type_{esc(doc['id'])}"><option value="">Use recognized type</option><option value="grant_letter">IMMI Grant Letter</option><option value="refusal_letter">IMMI Refusal Letter</option></select></label></td>
-                <td><span class="visa-material-batch-skip-note">确认或留空跳过</span></td>
-              </tr>""")
+            preview_url=(f"/students/{quote(student_id)}/visa-cases/{case['id']}/material-batch-upload/preview/{doc['id']}" if student_id else
+                         f"/visa-management/cases/{case['id']}/applicant/material-batch-upload/preview/{doc['id']}")
+            download_url=preview_url+'?download=1'
+            rows.append(f'''<article class="upload-review-workbench upload-review-file-card visa-material-batch-review-row" data-upload-review-workbench>
+              <section class="review-fields-workspace upload-review-file-meta visa-batch-fields" data-review-fields-pane>
+                <h3>{esc(doc['original_name'])}</h3><input type="hidden" name="document_ids" value="{esc(doc['id'])}">
+                <dl><dt>系统建议材料项</dt><dd>{esc(suggestion.get('item_title') or 'Unmatched')}</dd>
+                <dt>中文名称</dt><dd>{esc(suggested_label)}</dd><dt>置信度</dt><dd>{esc(suggestion['confidence'])}</dd>
+                <dt>匹配原因</dt><dd>{esc(suggestion['matched_reason'])}</dd></dl>
+                <label>Final Item / 最终选择<select name="final_item_{esc(doc['id'])}">{self.visa_material_batch_item_options_html(available_items, selected_id)}</select></label>
+                <label>Unknown result document type<select name="result_type_{esc(doc['id'])}"><option value="">Use recognized type</option><option value="grant_letter">IMMI Grant Letter</option><option value="refusal_letter">IMMI Refusal Letter</option></select></label>
+                <p>留空跳过：文件仍保留为 pending，不会变成正式材料或结果。</p>
+              </section>{preview_panel(preview_url,download_url,doc['original_name'])}</article>''')
         return f"""
-        <div class="visa-management-page visa-material-batch-review-page">
+        <div class="visa-management-page visa-material-batch-review-page upload-review upload-review-page">
           <section class="panel visa-management-hero visa-material-batch-header">
             <div><span class="eyebrow">Review / 确认页面</span><h2>文件已上传，正在确认材料归类</h2><p>系统建议仅用于辅助判断。请为每个文件确认最终材料项；留空跳过的文件仍会保留为 pending，不会显示到正式 Material Checklist。</p></div>
             <div class="row-actions visa-material-batch-actions"><a class="secondary button-link" href="{esc(self.visa_case_return_path(student_id, case['id'], return_tab))}">返回 {return_label}</a></div>
@@ -69594,8 +69757,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <input type="hidden" name="csrf" value="{esc(self.csrf)}">
               <input type="hidden" name="target_material_item" value="{esc(target_item)}">
               <input type="hidden" name="return_tab" value="{esc(return_tab)}">
-              <div class="table-wrap visa-material-batch-review-table"><table><thead><tr><th>File Name / 文件名</th><th>Suggested Item / 系统建议材料项</th><th>Chinese Label / 中文名称</th><th>Confidence / 置信度</th><th>Match Reason / 匹配原因</th><th>Final Item / 最终选择</th><th>Action / 操作</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
-              <div class="dialog-actions visa-material-batch-review-actions"><span>留空的文件将保持 pending。</span><button class="primary" type="submit">Confirm Upload / 确认上传</button></div>
+              <div class="upload-review-file-list">{''.join(rows)}</div>
+              <div class="dialog-actions visa-material-batch-review-actions upload-review-actions"><span>留空的文件将保持 pending。</span><button class="primary" type="submit">Confirm Upload / 确认上传</button></div>
             </form>
           </section>
         </div>
@@ -69681,6 +69844,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if not case:
             return
         if method == "GET":
+            if (self.query.get('review') or [''])[0]=='pending':
+                candidates=db.all("SELECT * FROM student_documents WHERE student_id=? AND folder_category='Visa Management' AND document_type='VisaBatchUploadPending' AND is_active=1 AND document_status='pending' ORDER BY id",(student_id,))
+                pending=[]
+                for document in candidates:
+                    if f"Visa Case {case_id}" not in Path(document['file_path']).parts:continue
+                    try:self._visa_document_path(dict(case),dict(document))
+                    except (ValueError,OSError):continue
+                    pending.append(document)
+                return self.send_html(page("Smart Batch Upload Review",self.visa_material_batch_review_html(student_id,case,pending),self.user,self.csrf,"visa",nas.status()))
             return self.send_html(page("Smart Batch Upload", self.visa_material_batch_upload_page_html(student_id, case), self.user, self.csrf, "visa", nas.status()))
         if method != "POST":
             return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
@@ -70626,21 +70798,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <p>当前 v1 只显示 visa_cases 中已有记录；不会从旧 VISA、Application 或文件记录自动迁移。</p>
             </div>"""
         body = f"""
-        <div class="visa-management-page">
-          <section class="panel visa-management-hero">
-            <div>
-              <span class="eyebrow">Applicant / Student → Visa Case</span>
-              <h2>Visa Management</h2>
-              <p>搜索申请人或学生，进入 Visa Case 管理表单、材料、IMMI Submitted 和待确认的签证结果。</p>
-            </div>
-          </section>
+        <div class="visa-management-page visa-management-compact">
+          <p class="visa-management-intro">搜索申请人或学生，进入案件管理材料、递交记录和签证结果。</p>
           <section class="panel visa-applicant-search" aria-label="Visa applicant search">
             <form method="get" action="/visa-management"><label>Search Applicant / Student<input type="search" name="q" value="{esc((self.query.get('q') or [''])[0])}" placeholder="Name / Student ID / Email"></label><button>Search</button></form><a class="button-link" href="/visa-management/applicants/new">Create Visa-only Applicant</a>
             <div>{active_filters}</div>
-            <p class="visa-management-readonly-note">筛选只读取 URL 参数，不会创建、更新或关联 Visa 数据。</p>
+
           </section>
           <section class="visa-management-kpi-grid">{kpi_cards}</section>
-          {self.business_change_visa_consistency_html()}
+          {self.business_change_visa_consistency_html(compact=True)}
           <section class="panel visa-management-list-panel">
             <div class="panel-head"><div><h2>Visa Cases</h2><p>最多显示最近 200 条未归档 case。</p></div></div>
             {case_table}
@@ -70649,8 +70815,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         from urllib.parse import urlencode
         filters={key:(self.query.get(key) or [''])[0] for key in ('status','subclass','case_type','q')}
         endpoint='/api/business-changes/snapshot?'+urlencode({'surface':'visa_overview',**filters})
-        body=body.replace('<div class="visa-management-page">',
-            f'<div class="visa-management-page" data-business-sync-fragment="visa-overview" data-business-sync-endpoint="{esc(endpoint)}">',1)
+        body=body.replace('<div class="visa-management-page visa-management-compact">',
+            f'<div class="visa-management-page visa-management-compact" data-business-sync-fragment="visa-overview" data-business-sync-endpoint="{esc(endpoint)}">',1)
         body=body.replace('<h2>Visa Cases</h2>',
             '<h2>Visa Cases</h2><span data-business-sync-controls hidden><button type="button" data-business-sync-refresh>刷新数据</button><span role="status" data-business-sync-status></span></span>',1)
         if fragment_only:return body
@@ -71214,6 +71380,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         """
 
     def upload_review(self, method, student_id, token):
+        from business_changes.snapshots import read_scope
         folder, metadata = load_upload_review(token)
         module = metadata["module"]
         config = MODULE_REVIEW_CONFIG[module]
@@ -71245,6 +71412,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             finally:
                 db._release_connection(connection)
         intake_review = module in {"Offer", "COE + OSHC"}
+        course_review_available = False
+        course_school_choices, course_offer_choices = [], []
+        if module == 'COE + OSHC' and not (metadata.get('form') or {}).get('transfer_branch_id'):
+            from revenue.school_courses import available, accepted_course_offers
+            with read_scope(db) as connection:
+                course_review_available = available(connection)
+                if course_review_available:
+                    course_school_choices = [dict(row) for row in connection.execute("SELECT id,school_name FROM schools WHERE COALESCE(deleted_at,'')='' ORDER BY school_name")]
+                    for cycle in connection.execute("SELECT id FROM application_cycles WHERE student_id=? AND status='active' AND cycle_type<>'transfer'", (student_id,)):
+                        course_offer_choices.extend(accepted_course_offers(connection,student_id,cycle[0]))
         target_label = config.get("target_label")
         cards = []
         for file_meta in metadata["files"]:
@@ -71286,6 +71463,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 1,
             )
             intake_html = render_review_fields(index, module, suggested_type, intake_context) if intake_review else ""
+            if course_review_available:
+                from revenue.school_courses import render_course_fields
+                intake_html = render_course_fields(index,course_school_choices,intake_context,offers=course_offer_choices)
             target_field = ""
             if target_label:
                 target_field = (
@@ -71300,7 +71480,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     {review_issue}
                     <div class="review-meta-line compact"><span>File size</span><strong>{esc(file_size)}</strong></div>
                     <div class="review-meta-line compact"><span>File type</span><strong>{esc(content_type)}</strong></div>
-                    <label class="choice wide"><input type="checkbox" name="confirm_item_{index}" value="1" checked><span>确认保存此文件</span></label>
+                    <div class="upload-review-item-actions"><label class="choice wide"><input type="checkbox" name="confirm_item_{index}" value="1" checked><span>确认保存此文件</span></label><button type="button" class="danger compact" data-review-remove>移除此文件</button><input type="hidden" name="discard_item_{index}" value="0" data-review-discard><span data-review-remove-status aria-live="polite"></span></div>
                     <label>DocumentType / 文件类型 <span class="required">(*)</span><select name="document_type_{index}" aria-required="true" data-document-type-select data-optional-document-types="{esc(optional_types)}"><option value="">请选择 DocumentType</option>{option_html_for_file}</select><small data-document-type-help>保存当前上传文件时必须选择 DocumentType，用于命名；不是说所有文件类型都必须上传。</small></label>
                     {target_field}
                     {extraction_html}
@@ -71309,7 +71489,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                   </section>
                   <section class="review-preview-workspace upload-review-preview-panel" data-review-preview-root data-preview-src="{preview_src}?size=large" data-download-url="{preview_src}/download" data-preview-title="{esc(file_meta["original_name"])}">
                     <div class="review-preview-head">
-                      <div><strong>文件预览 / Document Preview</strong><small>上方确认文件信息和自动提取字段；下方对照原文。</small></div>
+                      <div><strong>文件预览 / Document Preview</strong><small>对照右侧原件核对左侧字段；两边可分别滚动。</small></div>
                       <div class="review-preview-head-actions">
                         <button type="button" class="secondary mini" data-review-preview-fullscreen>全屏查看</button>
                         <button type="button" class="ghost mini" data-review-preview-open-window>新窗口打开</button>
@@ -71680,53 +71860,68 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         try:
                             if tuition_preparation_error is not None:
                                 raise ValueError(tuition_preparation_error)
-                            values = read_review_fields(self.form, index)
-                            if values is not None:
-                                context = accepted_offer_context(connection, student_id)
-                                choice = self.form.get(f"intake_choice_{index}", "")
-                                decision = choose_coe(
-                                    context, coe_provider, self.form.get(f"intake_acceptance_{index}"),
-                                    values, choice,
-                                    confirmed_school=self.form.get(f"intake_coe_school_{index}", ""),
-                                )
-                                bound_cycle, = connection.execute(
-                                    "SELECT application_cycle_id FROM coe_oshc WHERE id=?",
-                                    (business_record_id,),
-                                ).fetchone()
-                                if bound_cycle != context["application_cycle_id"]:
-                                    raise ValueError("请核对 CoE 和已接受 Offer 所属的申请周期。")
-                                validate_tuition_update(
-                                    connection, context,
-                                    values if decision == "coe" else context["offer"]["values"],
-                                )
-                                from revenue.first_year_tuition import OFFER_EXTENSIONS
-                                from revenue.repository import RevenueRepository
-                                from revenue.tuition_storage import TuitionEvidenceStorage
+                            if self.form.get(f'course_mode_{index}'):
+                                from revenue.school_courses import read_course_fields, save_coe_courses
+                                if intake_upload is None:
+                                    if tuition_prepared:
+                                        raise ValueError('课程学费附件尚未完成预存储，请稍后核对。')
+                                    from revenue.tuition_storage import TuitionEvidenceStorage
+                                    from revenue.first_year_tuition import OFFER_EXTENSIONS
+                                    intake_upload = TuitionEvidenceStorage(Path(db.path).parent/'revenue_documents').stage(upload,OFFER_EXTENSIONS-{".txt"})
+                                save_coe_courses(connection,student_id,business_record_id,
+                                    read_course_fields(self.form,index),intake_upload,int(self.user['id']))
+                            else:
+                                values = read_review_fields(self.form, index)
+                                if values is not None:
+                                    context = accepted_offer_context(connection, student_id)
+                                    choice = self.form.get(f"intake_choice_{index}", "")
+                                    decision = choose_coe(
+                                        context, coe_provider, self.form.get(f"intake_acceptance_{index}"),
+                                        values, choice,
+                                        confirmed_school=self.form.get(f"intake_coe_school_{index}", ""),
+                                    )
+                                    bound_cycle, = connection.execute(
+                                        "SELECT application_cycle_id FROM coe_oshc WHERE id=?",
+                                        (business_record_id,),
+                                    ).fetchone()
+                                    if bound_cycle != context["application_cycle_id"]:
+                                        raise ValueError("请核对 CoE 和已接受 Offer 所属的申请周期。")
+                                    validate_tuition_update(
+                                        connection, context,
+                                        values if decision == "coe" else context["offer"]["values"],
+                                    )
+                                    from revenue.first_year_tuition import OFFER_EXTENSIONS
+                                    from revenue.repository import RevenueRepository
+                                    from revenue.tuition_storage import TuitionEvidenceStorage
 
-                                if tuition_prepared:
-                                    if intake_upload is None:
-                                        raise ValueError('入学学费附件尚未完成预存储，请稍后核对。')
-                                else:
-                                    intake_upload = TuitionEvidenceStorage(
-                                        Path(db.path).parent / "revenue_documents",
-                                    ).stage(upload, OFFER_EXTENSIONS - {".txt"})
-                                with RevenueRepository(connection).transaction():
-                                    source = save_source(
-                                        connection, "coe", business_record_id, student_id, context["school_id"],
-                                        values, intake_upload, int(self.user["id"]),
-                                        acceptance_id=context["acceptance_id"], decision=decision,
-                                        source_school=coe_provider,
-                                    )
-                                    tuition_result = sync_tuition(
-                                        connection, context, source if decision == "coe" else context["offer"],
-                                        int(self.user["id"]), coe_id=business_record_id,
-                                        keep_existing=decision == "offer" and not choice,
-                                    )
-                                    if tuition_result.get("reason"):
-                                        pending_coe_tuition[index] = tuition_result["reason"]
+                                    if tuition_prepared:
+                                        if intake_upload is None:
+                                            raise ValueError('入学学费附件尚未完成预存储，请稍后核对。')
+                                    else:
+                                        intake_upload = TuitionEvidenceStorage(
+                                            Path(db.path).parent / "revenue_documents",
+                                        ).stage(upload, OFFER_EXTENSIONS - {".txt"})
+                                    with RevenueRepository(connection).transaction():
+                                        source = save_source(
+                                            connection, "coe", business_record_id, student_id, context["school_id"],
+                                            values, intake_upload, int(self.user["id"]),
+                                            acceptance_id=context["acceptance_id"], decision=decision,
+                                            source_school=coe_provider,
+                                        )
+                                        tuition_result = sync_tuition(
+                                            connection, context, source if decision == "coe" else context["offer"],
+                                            int(self.user["id"]), coe_id=business_record_id,
+                                            keep_existing=decision == "offer" and not choice,
+                                        )
+                                        if tuition_result.get("reason"):
+                                            pending_coe_tuition[index] = tuition_result["reason"]
                         except ValueError as error:
+                            if self.form.get(f'course_mode_{index}'):
+                                # Explicit course confirmation is all-or-nothing;
+                                # keep the source in review so the user can correct it.
+                                raise
                             pending_coe_tuition[index] = str(error)
-                    if index not in pending_coe_tuition:
+                    if index not in pending_coe_tuition and not self.form.get(f"course_mode_{index}"):
                         context = accepted_offer_context(connection, student_id)
                         reason = coe_first_year_reason(connection, context, business_record_id) if context else ""
                         if reason:
@@ -71961,6 +72156,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         and coe_kind_from_review(
                             (self.form.get(f"document_type_{file_meta['index']}") or "").strip()
                         ) in {"COE", "COE_CAAW"}
+                        and str(self.form.get(f"course_mode_{file_meta['index']}") or '') != 'language'
                         for file_meta in metadata.get("files", ())
                     )
                     if not requires_acceptance:
@@ -72323,6 +72519,34 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             else f"已确认并保存 {len(saved)} 个文件")+tuition_notice+"; ".join(visa_review_skipped),
         )
 
+    def student_source_material_withdraw(self, method, student_id, document_id):
+        from student_document_lifecycle import set_document_withdrawn
+        from business_changes.authorization import current_staff
+        wants_json = 'application/json' in str(self.headers.get('Accept','')).lower()
+        def respond(message, status=200):
+            if wants_json:
+                return self.json_response({'ok':status < 400,'message':message},status)
+            return self.flash_redirect(f'/students/{student_id}?tab=applications',message,'error' if status >= 400 else 'success')
+        if method != 'POST':
+            return respond('Method not allowed',405)
+        if not can_workflow_module_save(self.user,'Applications'):
+            return respond('没有材料管理权限。',403)
+        if self.form.get('withdrawn') not in {'0','1'}:
+            return respond('无效的材料操作',400)
+        def authorize(view, document):
+            actor = current_staff(view,self.user['id'])
+            with db.business_scope(view):
+                if not can_workflow_module_save(actor,'Applications'):
+                    raise PermissionError('材料管理权限已变化，请重新核对。')
+        try:
+            with db.transaction() as connection:
+                set_document_withdrawn(connection,student_id=student_id,document_id=int(document_id),
+                    withdrawn=self.form['withdrawn']=='1',reason=self.form.get('reason',''),
+                    actor_user_id=self.user['id'],occurred_at=now_iso(),authorize=authorize)
+        except (ValueError,PermissionError) as exc:
+            return respond(str(exc),403 if isinstance(exc,PermissionError) else 400)
+        return respond('材料已更新，原件与历史保留。')
+
     def application_upload(self, method, student_id):
         if method != "POST":
             return
@@ -72676,6 +72900,38 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         })
 
     def offer_accept(self, method, student_id, offer_id):
+        from offer_acceptance import accept_offer_document
+        if method != 'POST':
+            return self.json_response({'ok':False,'error':'method_not_allowed'},405)
+        if not can_workflow_module_save(self.user, 'Offer'):
+            return self.json_response({'ok':False,'error':'access_denied'},403)
+        if set(self.form) - {'csrf','coe_warning_acknowledged'}:
+            return self.json_response({'ok':False,'error':'invalid_fields'},400)
+        actor = dict(self.user or {}, can_manage_offer=True)
+        try:
+            with db.transaction() as connection:
+                change = accept_offer_document(connection, student_id, int(offer_id), actor)
+        except OfferAcceptanceError as exc:
+            return self.json_response({'ok':False,'error':exc.code,'message':str(exc)},400)
+        return self.json_response({'ok':True,'message':'此 Offer 已接受，其他 Offer 保持不变。',
+            'accepted_offer_id':change.offer_id,'unchanged':change.unchanged})
+
+    def offer_document_acceptance_withdraw(self, method, student_id, offer_id):
+        from offer_acceptance import withdraw_offer_document
+        if method != 'POST':
+            return self.json_response({'ok':False,'message':'Method not allowed'},405)
+        if not can_workflow_module_save(self.user,'Offer'):
+            return self.json_response({'ok':False,'message':'没有撤回 Offer 接受的权限。'},403)
+        if set(self.form) - {'csrf','reason'}:
+            return self.json_response({'ok':False,'message':'请求包含未允许字段。'},400)
+        try:
+            with db.transaction() as connection:
+                withdraw_offer_document(connection,student_id,int(offer_id),dict(self.user,can_manage_offer=True),reason=self.form.get('reason',''))
+        except OfferAcceptanceError as exc:
+            return self.json_response({'ok':False,'message':str(exc),'error_code':exc.code},400)
+        return self.json_response({'ok':True,'message':'已撤回此 Offer 文件接受，其他文件保持不变。'})
+
+    def offer_select_final(self, method, student_id, offer_id):
         if method != "POST":
             return self.json_response({"ok": False, "error": "method_not_allowed"}, HTTPStatus.METHOD_NOT_ALLOWED)
         if not can_workflow_module_save(self.user, "Offer"):

@@ -7,7 +7,7 @@ from visa_document_metadata import LEGACY, effective_metadata
 from visa_processing_dates import parse_processing_dates, processing_summary, _field, _metrics
 
 SINGLE_ACTIVE = {'grant_letter', 'immi_acknowledgment'}
-KIND_CATEGORY = {'grant':'grant_letter', 'refusal':'refusal_letter', 'lodgement_receipt':'immi_acknowledgment', 'medical':'health_examination'}
+KIND_CATEGORY = {'bridging_visa':'bridging_visa', 'grant':'grant_letter', 'refusal':'refusal_letter', 'lodgement_receipt':'immi_acknowledgment', 'medical':'health_examination'}
 INACTIVE = {'pending', 'archived', 'deleted', 'voided', 'inactive', 'pending_review'}
 CANONICAL_MATERIAL = {
     'IMMI Grant Letter': 'grant_letter',

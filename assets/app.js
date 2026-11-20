@@ -3037,6 +3037,29 @@
     }
   };
 
+  const reviewRemovedStates = new WeakMap();
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-review-remove]");
+    if (!button) return;
+    const card = button.closest(".upload-review-file-card");
+    const confirm = q('input[name^="confirm_item_"]', card);
+    const discard = q("[data-review-discard]", card);
+    const status = q("[data-review-remove-status]", card);
+    if (!card || !confirm || !discard) return;
+    const removed = discard.value !== "1";
+    if (removed) {
+      const fields = qa("input,select,textarea", card).filter((field) => field !== discard);
+      reviewRemovedStates.set(card, fields.map((field) => [field, field.disabled, field.checked]));
+      confirm.checked = false; fields.forEach((field) => { field.disabled = true; });
+    } else {
+      (reviewRemovedStates.get(card) || []).forEach(([field, disabled, checked]) => { field.disabled = disabled; if ("checked" in field) field.checked = checked; });
+    }
+    discard.value = removed ? "1" : "0";
+    card.classList.toggle("upload-review-file-card--removed", removed);
+    button.textContent = removed ? "撤销移除" : "移除此文件";
+    if (status) status.textContent = removed ? "此文件不会保存，其他文件保持不变。" : "已恢复，原填写内容保留。";
+  });
+
   const initOfferPanel = (root = document) => {
     qa("[data-offer-school-search]", root).forEach((input) => {
       if (input.dataset.offerSchoolSearchBound === "true") return;
@@ -3045,25 +3068,53 @@
       if (!select) return;
       const status = q("[data-offer-school-search-status]", form);
       const choices = Array.from(select.options);
+      const results = q("[data-offer-school-results]", form);
+      if (!results) return;
+      let active = -1;
+      const close = () => { results.hidden = true; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); };
+      const choose = (option) => {
+        select.value = option.value; input.value = option.textContent.trim();
+        input.setCustomValidity(""); close();
+        if (status) status.textContent = "已选择学校；点击保存学校匹配。";
+      };
+      const selectedOption = choices.find((option) => option.value && option.value === select.value);
+      if (selectedOption) input.value = selectedOption.textContent.trim();
       const filter = () => {
         const query = input.value.trim().toLowerCase();
-        const selected = select.value;
-        const matches = new Set(choices.filter((option) => option.value
-          && option.textContent.toLowerCase().includes(query)));
-        select.replaceChildren(...choices.filter((option) => !option.value
-          || option.value === selected || matches.has(option)));
-        select.value = selected;
-        if (status) status.textContent = !query
-          ? "输入名称筛选；选择学校后保存，搜索不会自动更改当前匹配。"
-          : matches.size ? `找到 ${matches.size} 所学校；当前匹配保留，选择学校后保存。`
-            : "未找到匹配学校；当前学校选择未更改。";
+        const matches = choices.filter((option) => option.value && option.textContent.toLowerCase().includes(query));
+        results.replaceChildren(); active = -1;
+        matches.slice(0, 40).forEach((option, index) => {
+          const button = document.createElement("button");
+          button.type = "button"; button.role = "option"; button.id = results.id + "-" + index;
+          button.textContent = option.textContent; button.addEventListener("click", () => choose(option));
+          results.append(button);
+        });
+        results.hidden = !matches.length; input.setAttribute("aria-expanded", String(matches.length > 0));
+        input.removeAttribute("aria-activedescendant");
+        if (status) status.textContent = matches.length ? `找到 ${matches.length} 所学校，请选择${matches.length > 40 ? "（显示前40所，可继续输入缩小范围）" : ""}。` : "未找到匹配学校，请调整搜索。";
       };
       input.dataset.offerSchoolSearchBound = "true";
-      input.addEventListener("input", filter);
+      input.addEventListener("input", () => { select.value = ""; input.setCustomValidity("请从下方结果选择 CRM 学校。"); filter(); });
+      input.addEventListener("focus", filter);
       input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") event.preventDefault();
+        const buttons = Array.from(results.children);
+        if (event.key === "Escape") { close(); return; }
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          if (!buttons.length) return;
+          results.hidden = false; input.setAttribute("aria-expanded", "true");
+          active = (active + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+          buttons.forEach((button, index) => button.setAttribute("aria-selected", String(index === active)));
+          input.setAttribute("aria-activedescendant", buttons[active].id);
+          buttons[active].scrollIntoView({block:"nearest"});
+        } else if (event.key === "Enter" && !results.hidden) {
+          event.preventDefault();
+          if (active >= 0) buttons[active].click();
+          else if (buttons.length === 1) buttons[0].click();
+        }
       });
-      select.addEventListener("change", filter);
+      form.addEventListener("focusout", (event) => { if (!form.contains(event.relatedTarget)) close(); });
+      form.addEventListener("submit", (event) => { if (!select.value) { event.preventDefault(); input.setCustomValidity("请从结果选择 CRM 学校。"); input.reportValidity(); } });
     });
 
     qa("form[data-ajax-offer]", root).forEach((form) => {

@@ -71,3 +71,25 @@
  .visa-result-nav a { flex:1 1 130px; text-align:center; }
 }
 @media(pointer:coarse) { .visa-result-workspace :is(button,a,summary,input,select) { min-height:44px; } .visa-result-workspace :is(input,select,textarea) { font-size:16px; } }
+/* Keep the result overview readable without expanding every editor. */
+.visa-result-date-summary { margin:10px 0; display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.visa-result-date-summary > div { min-width:0; }
+.visa-result-date-summary dt { font-size:12px; color:var(--muted); }
+.visa-result-date-summary dd { margin:3px 0 0; font-size:13px; font-weight:600; }
+.visa-result-date-editor > summary { padding:9px 0; color:var(--result-blue); font-weight:600; }
+.visa-result-date-editor .stack-form { margin-top:10px; }
+.visa-result-workspace .visa-result-item { display:grid; grid-template-columns:auto minmax(0,1fr); gap:6px 16px; padding:10px 14px; }
+.visa-result-item-head { grid-column:1/-1; }
+.visa-result-item-actions,.visa-result-item-details { margin:0; }
+.visa-result-item-details[open] { grid-column:1/-1; }
+@media(min-width:1101px) {
+ .visa-result-workspace .visa-result-columns { grid-template-columns:minmax(0,1fr) minmax(330px,390px); gap:16px; }
+ .visa-result-workspace .visa-result-aside { position:sticky; top:16px; }
+ .visa-result-aside .visa-result-summary { grid-template-columns:repeat(2,minmax(0,1fr)); }
+ .visa-result-aside .visa-result-summary .visa-result-row { min-width:0; }
+}
+.visa-result-aside .panel p { margin:6px 0; line-height:1.45; }
+.visa-result-aside .panel h2 { margin:5px 0 8px; }
+.visa-result-aside .visa-result-summary { margin-top:8px; }
+.visa-result-aside .visa-result-summary > div { padding:8px; min-height:0; }
+.visa-result-aside .visa-result-summary span { margin-bottom:4px; }

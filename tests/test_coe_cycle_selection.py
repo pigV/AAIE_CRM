@@ -136,7 +136,8 @@ class CoeRoutePreflightTests(CoeCycleSelectionTests):
         self.handler.form={'coe_application_cycle_id':'94'}
         self.handler.files=[SimpleNamespace(field_name='file',filename='coe.pdf')]
         self.handler.redirect=lambda url:url
-        def stage(student,module,uploads,user,form):
+        def stage(student,module,uploads,user,form,*,permission_policy):
+            self.assertEqual('workflow_save',permission_policy)
             captured.update(form)
             return 'staged'
         self.ns['create_upload_review']=stage

@@ -3,7 +3,7 @@ import json
 from business_changes.visa_domains import synchronized_visa_write
 import re
 from datetime import date
-from visa_documents_candidate import _text_date, _DATE_TOKEN
+from visa_documents_candidate import _text_date, _DATE_TOKEN, is_bridging_letter
 
 FIELDS=('acknowledge_sent_on','health_exam_date','grant_sent_on','medical_completed_date')
 def _today(value):return date.fromisoformat(str(value)) if value else date.today()
@@ -44,7 +44,7 @@ def parse_processing_dates(text,*,today=None):
   return _field(next(iter(values)),'detected',key) if len(values)==1 else _field(status='ambiguous',source=key)
  fields={key:_field() for key in FIELDS};low=text.lower()
  kinds=[]
- if re.search(r'grant notification|date of grant|visa (?:has been )?granted',low):kinds.append('grant_sent_on')
+ if not is_bridging_letter(text) and re.search(r'grant notification|date of grant|visa (?:has been )?granted',low):kinds.append('grant_sent_on')
  if any(re.match(r'(?:health\s+(?:exam(?:ination)?s?|assessment)|medical\s+(?:exam(?:ination)?|letter|request)|examination\s+request)\b',line,re.I) for line in lines):kinds.append('health_exam_date')
  if re.search(r'acknowledg(?:e)?ment|acknowledge letter|lodgement receipt|application received',low):kinds.append('acknowledge_sent_on')
  elif not kinds and re.search(r'we (?:have )?received your[^\n]{0,160}\bvisa application\b',low):

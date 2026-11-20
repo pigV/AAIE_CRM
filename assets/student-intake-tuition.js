@@ -30,3 +30,19 @@ for (const fields of document.querySelectorAll("[data-student-intake-tuition]"))
   fields.addEventListener("input", sync);
   sync();
 }
+for (const fields of document.querySelectorAll('[data-school-course-tuition]')) {
+  const card = fields.closest('[data-upload-review-workbench]');
+  const documentType = card?.querySelector('[data-document-type-select]');
+  const mode = fields.querySelector('[data-school-course-mode]');
+  const sync = () => {
+    fields.hidden = fields.disabled = !['COE', 'COE_CAAW'].includes(documentType?.value);
+    for (const section of fields.querySelectorAll('[data-school-course-kind]')) {
+      const enabled = !fields.hidden && [section.dataset.schoolCourseKind, 'both'].includes(mode.value);
+      section.hidden = !enabled;
+      for (const input of section.querySelectorAll('input,select,textarea')) input.disabled = !enabled;
+    }
+  };
+  documentType?.addEventListener('change', sync);
+  mode?.addEventListener('change', sync);
+  sync();
+}

@@ -77,7 +77,7 @@
     if(restoreGroups)stored.open.forEach(id=>{
       const target=findTarget(id);if(!target)return;
       if(target.tagName==='DETAILS')target.open=true;
-      const details=target.querySelector('[data-result-item-details]');if(details)details.open=true;
+      const details=target.matches('[data-result-item]')?target.querySelector('[data-result-item-details]'):null;if(details)details.open=true;
     });
     }
     panel.addEventListener('focusin',event=>{

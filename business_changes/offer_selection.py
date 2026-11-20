@@ -6,7 +6,7 @@ from .contracts import Subject
 from .domain import run_domain_write
 from .runtime import enabled
 
-EVENTS={'assign_offer_school':'offer.school_assigned','apply_offer_classification':'offer.school_classified',
+EVENTS={'withdraw_offer_document':'offer.document_withdrawn','accept_offer_document':'offer.document_accepted','assign_offer_school':'offer.school_assigned','apply_offer_classification':'offer.school_classified',
         'set_accepted_offer':'offer.acceptance_selected','withdraw_accepted_offer':'offer.acceptance_withdrawn'}
 
 
@@ -36,7 +36,7 @@ def synchronized_offer_selection(function):
         def describe(view,result,before,after):
             source_id=params.get('offer_id') or before[1]
             if source_id is None:raise ValueError('Offer selection identity missing')
-            affected=[Subject('student',student_id),Subject('dashboard','workflow'),Subject('dashboard','overview'),Subject('module','offers')]
+            affected=[Subject('student',student_id),Subject('dashboard','workflow'),Subject('dashboard','overview'),Subject('module','offers'),Subject('module','revenue')]
             changed={i for i in before[0].keys()|after[0].keys() if before[0].get(i)!=after[0].get(i)}
             cycles={row.get('application_cycle_id') for snapshot in (before,after) for i,row in snapshot[0].items() if i in changed}
             for cid in cycles-{None}:

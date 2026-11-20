@@ -829,7 +829,7 @@ class BusinessChangeSyncMixin:
             '<p>先核实案件与申请周期归属，再通过正式流程关联；系统不会自动归入当前申请。</p>'
             f'<ul>{links}</ul>{more}</section>')
 
-    def business_change_visa_consistency_html(self,*,student_id=None,case_id=None):
+    def business_change_visa_consistency_html(self,*,student_id=None,case_id=None,compact=False):
         from urllib.parse import quote
         g=self.business_change_runtime();esc=g['esc'];issues=self.business_change_visa_consistency_issues(student_id=student_id,case_id=case_id)
         if not issues:return ''
@@ -837,9 +837,13 @@ class BusinessChangeSyncMixin:
         for issue in issues:
             url=f'/students/{quote(str(issue["student_id"]),safe="")}/visa-cases/{issue["case_id"]}?visa_tab=visa_result'
             rows.append(f'<li data-business-visa-review-case="{issue["case_id"]}"><a href="{esc(url)}">{esc(issue["student_name"])} · {esc(issue["student_id"])} · Case #{issue["case_id"]}</a>：{esc(issue["message"])}</li>')
-        return (f'<section class="panel" data-business-visa-review role="status"><h3>签证材料需核实 · {len(issues)} 个案件</h3>'
+        content = (f'<section class="panel" data-business-visa-review role="status"><h3>签证材料需核实 · {len(issues)} 个案件</h3>'
             '<p>原人工确认和周期关闭记录已保留；请核对有效材料或使用正式更正流程。</p>'
             f'<ul>{"".join(rows)}</ul></section>')
+        if compact:
+            return (f'<details class="visa-management-review-details"><summary>签证材料需核实 · {len(issues)} 个案件 · 展开查看</summary>'
+                    + content + '</details>')
+        return content
 
     def business_change_student_summary_snapshot(self,*,tab=None):
         g=self.business_change_runtime()
@@ -999,7 +1003,9 @@ class BusinessChangeSyncMixin:
             if kind in {'COE','COE_CAAW'} and self.form.get(f'intake_defer_{index}')!='1':
                 try:
                     from revenue.student_intake_tuition import read_review_fields
-                    values=read_review_fields(self.form,index)
+                    from revenue.school_courses import read_course_fields
+                    course_values=read_course_fields(self.form,index)
+                    values=course_values if course_values is not None else read_review_fields(self.form,index)
                     if values is not None:
                         from revenue.first_year_tuition import OFFER_EXTENSIONS
                         from revenue.tuition_storage import TuitionEvidenceStorage
