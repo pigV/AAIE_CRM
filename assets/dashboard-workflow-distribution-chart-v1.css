@@ -342,3 +342,12 @@
   }
 
 }
+
+/* Shared stage key color for recent students and the distribution bars. */
+.ui-premium-v2 .dashboard-recent-table .dashboard-application-stage {
+  color: var(--application-stage-color, #64748b);
+  background: color-mix(in srgb, var(--application-stage-color, #64748b) 9%, #fff);
+  border-color: color-mix(in srgb, var(--application-stage-color, #64748b) 30%, #fff);
+  font-size: 12px;
+  font-weight: 800;
+}

@@ -327,6 +327,10 @@ from student_doc import (
     study_contract_cover_accessibility_lines,
     study_contract_cover_png_bytes,
 )
+from dashboard_stage_presentation import (
+    stage_color, stage_label as dashboard_stage_label, ordered_stage_definitions,
+    stage_badge_html, stage_palette_color,
+)
 from student_application_stage_distribution import (
     APPLICATION_STAGE_DEFINITIONS,
     CANONICAL_APPLICATION_STAGE_DEFINITIONS,
@@ -10381,22 +10385,7 @@ def dashboard_signed_institution_structure_chart_html(data):
 
 
 def dashboard_workflow_distribution_color(index):
-    colors = (
-        "#315BEF",
-        "#7A5AF8",
-        "#22A6B3",
-        "#E49B2F",
-        "#D85A62",
-        "#2E9B66",
-        "#4C7BD9",
-        "#B55CC8",
-        "#00A6A6",
-        "#D8872D",
-        "#6B7C93",
-        "#C36A8D",
-        "#20A66A",
-    )
-    return colors[index] if 0 <= index < len(colors) else "#315BEF"
+    return stage_palette_color(index)
 
 
 def dashboard_application_stage_destination(student):
@@ -10445,6 +10434,7 @@ def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None
             observed.items(), key=lambda item: (item[1][0], item[0])
         )
     )
+    definitions = ordered_stage_definitions(definitions)
     stage_map = {key: [] for key, _label in definitions}
     for student in stage_students:
         if student.stage.key in stage_map:
@@ -10456,11 +10446,11 @@ def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None
         students = stage_map[key]
         stage_count = len(students)
         bar_width = (stage_count / max_count * 100) if max_count else 0
-        color = dashboard_workflow_distribution_color(index)
+        color = stage_color(key)
         muted_class = " dashboard-workflow-distribution-chart__row--muted" if stage_count == 0 else ""
         student_links = "".join(
             f"""<a class="dashboard-workflow-distribution-chart__student" href="{esc(dashboard_application_stage_destination(student))}" data-lifecycle-type="{esc(getattr(student, 'cycle_type', '') or '')}">
-              <span><strong>{esc(student.student_name)}</strong><small>{esc(LIFECYCLE_LABELS.get(getattr(student, 'cycle_type', '') or '', 'Lifecycle'))}{' · Cycle #' + str(student.cycle_sequence) if getattr(student, 'cycle_sequence', None) is not None else ''} · {esc(student.stage.label or '')}{' · ' + esc(student.target_context) if getattr(student, 'target_context', None) else ''}</small><small>{esc(student.stage.blocker)}</small></span>
+              <span><strong>{esc(student.student_name)}</strong><small>{esc(LIFECYCLE_LABELS.get(getattr(student, 'cycle_type', '') or '', 'Lifecycle'))}{' · Cycle #' + str(student.cycle_sequence) if getattr(student, 'cycle_sequence', None) is not None else ''} · {esc(dashboard_stage_label(student.stage.key, student.stage.label))}{' · ' + esc(student.target_context) if getattr(student, 'target_context', None) else ''}</small><small>{esc(student.stage.blocker)}</small></span>
               <span aria-hidden="true">›</span>
             </a>"""
             for student in students
@@ -31762,7 +31752,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return (
                 f'<tr><td><a href="/students/{esc(student_id)}">{esc(student_id)}</a></td>'
                 f'<td><a href="/students/{esc(student_id)}"><strong>{esc(name)}</strong></a></td>'
-                f'<td><span class="status application-stage-{esc(stage_key or "not-recorded")}">{esc(stage_label or "未记录")}</span></td>'
+                f'<td>{stage_badge_html(stage_key, stage_label)}</td>'
                 f'<td>{esc(final_school_name or "待确认")}</td>'
                 f'<td>{esc(applying_year_level or "未记录")}</td>'
                 f'<td class="dashboard-recent-created-date">{esc(created_date)}</td></tr>'
@@ -31771,7 +31761,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         rows = "".join(recent_student_row_html(row) for row in recent) or '<tr><td colspan="6" class="empty">尚无学生记录</td></tr>'
         signed_institution_structure = dashboard_signed_institution_structure_data()
         signed_institution_structure_html = dashboard_signed_institution_structure_chart_html(signed_institution_structure)
-        dashboard_workflow_chart_css = '<link rel="stylesheet" href="/assets/dashboard-workflow-distribution-chart-v1.css?v=11">'
+        dashboard_workflow_chart_css = '<link rel="stylesheet" href="/assets/dashboard-workflow-distribution-chart-v1.css?v=12">'
         dashboard_signed_institution_css = '<link rel="stylesheet" href="/assets/dashboard-signed-institution-structure-chart-v1.css?v=5">'
         body = f"""
         <div style="display:contents" data-business-sync-fragment="dashboard-overview" data-business-sync-endpoint="/api/business-changes/snapshot?surface=dashboard_overview">
@@ -31782,7 +31772,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <div class="dashboard-actions"><a class="primary button-link" href="/students/new">新建学生</a><a class="parent-link-action button-link" href="/parent-links">生成家长表单</a></div>
         </section>
         {kpi_cards_html}
-        {self.business_change_visa_consistency_html()}
         {signed_institution_structure_html}
         <div class="dashboard-chart-grid">
           <section class="panel dashboard-recent-panel"><div class="panel-head"><div><h2>最近学生</h2><p>按建档时间显示</p></div><a class="secondary button-link" href="/students">查看全部</a></div>
