@@ -36,6 +36,19 @@ class DashboardConfirmedStageTests(unittest.TestCase):
             with self.subTest(terminal=terminal):
                 self.assertIsNone(resolve_dashboard_stage(accepted=True, coe=True, visa=terminal))
 
+    def test_submitted_form_without_required_contract_waits_for_school_plan(self):
+        self.assertEqual(
+            resolve_dashboard_stage(form_submitted=True, contract="not_required", contract_required=False),
+            ("waiting_school_plan", "等待制作学校方案"),
+        )
+
+    def test_live_form_without_required_contract_still_waits_for_submission(self):
+        self.assertEqual(
+            resolve_dashboard_stage(form_live=True, contract="not_required", contract_required=False),
+            ("01_parent_form", ""),
+        )
+        self.assertIsNone(resolve_dashboard_stage(contract="not_required",contract_required=False))
+
     def test_offer_and_visa_require_current_cycle_evidence(self):
         self.assertEqual(resolve_dashboard_stage(submitted=True)[0], "07_school_response")
         self.assertEqual(resolve_dashboard_stage(submitted=True, offer=True)[0], "08_offer_acceptance")

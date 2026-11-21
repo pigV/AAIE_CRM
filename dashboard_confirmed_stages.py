@@ -202,8 +202,10 @@ def resolve_dashboard_stage(*, form_live=False, form_submitted=False, contract=N
     if contract in {"signed", "not_required"}:
         if preparing:
             return "06_school_application_submission", ""
-        if contract == "signed":
+        if contract == "signed" or form_submitted:
             return "waiting_school_plan", "等待制作学校方案"
+        if form_live:
+            return "01_parent_form", ""
         return None
     if contract == "live":
         return "03_contract_signature", ""
