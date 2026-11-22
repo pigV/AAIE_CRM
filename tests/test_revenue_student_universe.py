@@ -37,7 +37,7 @@ class StudentUniverseTests(unittest.TestCase):
         d=self.m.workspace("cases", {"student":s["student_id"]})
         self.assertEqual(s["student_id"], d["student_detail"]["student_id"])
         self.assertEqual([],d["student_detail"]["cases"])
-        self.assertIn("未建立",render_revenue_workspace_page(d,"csrf"))
+        self.assertIn(d["student_detail"]["missing_case"]["status"],render_revenue_workspace_page(d,"csrf"))
     def test_multi_case_detail_preserves_every_cycle(self):
         s=self.c.execute("SELECT student_id FROM revenue_commercial_cases GROUP BY student_id HAVING COUNT(*)>1 LIMIT 1").fetchone()[0]
         d=self.m.workspace("cases", {"student":s})

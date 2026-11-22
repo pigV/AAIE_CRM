@@ -4260,7 +4260,7 @@ def submit_parent_reapplication(data, token_row, draft_revision):
     return student_id
 
 
-def create_student_from_form(data, token_row=None, consultant_id=None, source_token=""):
+def create_student_from_form(data, token_row=None, consultant_id=None, source_token="", *, actor_user_id=None):
     year = local_year()
     encrypted_password = ""
     if data.get("account_password"):
@@ -4390,7 +4390,7 @@ def create_student_from_form(data, token_row=None, consultant_id=None, source_to
                 conn,
                 "PARENT_FORM_SUBMITTED" if token_row else "STUDENT_CREATED",
                 occurred_at=created,
-                actor_user_id=None,
+                actor_user_id=actor_user_id,
                 student_id=student_id,
                 parent_form_token=token_row["token"] if token_row else None,
                 education_stream=data.get("application_stream") or "school_education",
@@ -55914,7 +55914,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if missing:
             body = f'<div class="student-new-page">{internal_student_form("/students/new", self.csrf, missing, data, missing_names)}</div>'
             return self.send_html(page("手动新建学生", body, self.user, self.csrf, "students", nas.status()), 422)
-        student_id = create_student_from_form(data, consultant_id=self.user["id"], source_token="manual")
+        student_id = create_student_from_form(data, consultant_id=self.user["id"], source_token="manual", actor_user_id=self.user["id"])
         db.audit(self.user, "create", "students", student_id, new_value="manual")
         return self.flash_redirect(f"/students/{student_id}", f"学生已创建：{student_id}")
 
@@ -55930,7 +55930,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         missing = validate_student_data(data)
         if missing:
             return self.flash_redirect("/students", "Excel 模板缺少必填项：" + "、".join(missing), "error")
-        student_id = create_student_from_form(data, consultant_id=self.user["id"], source_token="excel_template")
+        student_id = create_student_from_form(data, consultant_id=self.user["id"], source_token="excel_template", actor_user_id=self.user["id"])
         db.audit(self.user, "create", "students", student_id, new_value=f"excel_template:{upload.filename}")
         return self.flash_redirect(f"/students/{student_id}", f"已从 Excel 模板创建学生：{student_id}")
 
@@ -76800,7 +76800,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if student_data.get("application_stream") == "higher_education":
             return self.flash_redirect("/contracts?view=list", "Higher Education 学生不适用留学服务合同，不能从独立合同转为学生。", "error")
         old_status = normalize_contract_status(contract["contract_status"])
-        student_id = create_student_from_form(student_data, consultant_id=self.user["id"], source_token=f"contract:{contract['contract_uid'] or contract_id}")
+        student_id = create_student_from_form(student_data, consultant_id=self.user["id"], source_token=f"contract:{contract['contract_uid'] or contract_id}", actor_user_id=self.user["id"])
         student = db.one("SELECT * FROM students WHERE student_id=?", (student_id,))
         if not student or student["nas_status"] != "ready":
             return self.flash_redirect("/contracts?view=list", f"学生已创建为 {student_id}，但学生文件夹尚未就绪，请到学生管理检查 NAS 状态。", "error")

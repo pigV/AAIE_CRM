@@ -26,7 +26,8 @@ class RevenueService:
         self.repository = repository
         self.connection = repository.connection
 
-    def open_case(self, application_cycle_id: int, actor_user_id: int, idempotency_key: str):
+    def open_case(self, application_cycle_id: int, actor_user_id: int, idempotency_key: str,
+                  *, integration_source: dict | None = None):
         payload = {"application_cycle_id": int(application_cycle_id)}
 
         def operation():
@@ -138,7 +139,10 @@ class RevenueService:
                     actor_user_id, self.repository.now(),
                 ),
             )
-            return self.repository.require_by_uid("revenue_commercial_cases", uid)
+            result = self.repository.require_by_uid("revenue_commercial_cases", uid)
+            if integration_source:
+                result = {**result, "integration_source": integration_source}
+            return result
 
         return self.repository.command(
             idempotency_key=idempotency_key, command_type="commercial_case_opened",

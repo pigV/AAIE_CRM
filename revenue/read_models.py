@@ -84,7 +84,10 @@ WORKSPACE_DEFINITIONS = {
             ("billing_status", "收费状态"), ("commission_status", "佣金状态"),
             ("status", "档案状态"), ("updated_at_display", "最后更新"),
         ),
-        "filters": (("all", "全部"), ("open", "进行中"), ("on_hold", "已暂停"), ("closed", "已关闭")),
+        "filters": (("all", "全部"), ("open", "进行中"), ("on_hold", "已暂停"), ("closed", "已关闭"),
+                    ("missing-active", "在办待补建"), ("missing-historical", "历史未纳入"),
+                    ("missing-withdrawn", "已撤回未建档"), ("missing-ended", "已结束未纳入"),
+                    ("missing-cycle", "无申请周期")),
     },
     "billing": {
         "title": "客户收费",
@@ -1021,7 +1024,11 @@ class RevenueReadModels:
         has_names = {"passport_first_name", "passport_last_name"}.issubset(self._columns("students"))
         name_columns = ("s.passport_first_name,s.passport_last_name" if has_names else
                         "NULL AS passport_first_name,NULL AS passport_last_name")
-        student_select = "SELECT s.student_id," + name_columns + " FROM students s WHERE "
+        missing_predicates = self._missing_case_predicates("s")
+        reason_select = "CASE " + " ".join(
+            "WHEN " + predicate + " THEN '" + key + "'" for key, predicate in missing_predicates.items()
+        ) + " ELSE NULL END AS missing_case_reason"
+        student_select = "SELECT s.student_id," + name_columns + "," + reason_select + " FROM students s WHERE "
         q = self._student_parameter(parameters, "q")
         if q:
             expressions = ["s.student_id"]
@@ -1033,7 +1040,9 @@ class RevenueReadModels:
             pattern = "%" + q.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
             where += " AND (" + " OR ".join(e + " LIKE ? ESCAPE '!'" for e in expressions) + ")"
             values.extend([pattern] * len(expressions))
-        if active_filter != "all":
+        if active_filter in missing_predicates:
+            where += " AND " + missing_predicates[active_filter]
+        elif active_filter != "all":
             where += " AND EXISTS(SELECT 1 FROM revenue_commercial_cases sc WHERE sc.student_id=s.student_id AND sc.status=?)"
             values.append(active_filter)
         total = self.connection.execute("SELECT COUNT(*) FROM students s WHERE " + where, values).fetchone()[0]
@@ -1063,8 +1072,10 @@ class RevenueReadModels:
                 row = self._case_projection(cases[0])
             else:
                 row = {"uid": sid, "student_id": sid, "student_name": name,
-                       "status": "未建立 / Not Yet Created" if not cases else f"{len(cases)} 个申请周期档案",
+                       "status": self._missing_case_info(student["missing_case_reason"])["status"] if not cases else f"{len(cases)} 个申请周期档案",
                        "href": self.cases_href + "?" + urlencode({"student": sid})}
+                if not cases:
+                    row["missing_case"] = self._missing_case_info(student["missing_case_reason"])
             rows.append(row)
         def link(number):
             return self.cases_href + "?" + urlencode({"q": q, "filter": active_filter, "page": number})
@@ -1079,12 +1090,52 @@ class RevenueReadModels:
                     "SELECT * FROM revenue_commercial_cases WHERE student_id=? ORDER BY application_cycle_id DESC,id DESC", (selected,)).fetchall()
                 detail = {"student_id": selected, "student_name": self._student_display_name(selected),
                           "state": "found", "cases": [self._case_projection(c) for c in case_rows]}
+                if not case_rows:
+                    detail["missing_case"] = self._missing_case_info(student["missing_case_reason"])
             else:
                 detail = {"state": "not_found", "cases": []}
         return {"rows": rows, "student_detail": detail, "pagination": {
             "total": total, "page": page, "pages": pages, "page_size": page_size,
             "previous": link(page-1) if page > 1 else None,
             "next": link(page+1) if page < pages else None}}
+
+    def _missing_case_predicates(self, student_alias: str) -> dict[str, str]:
+        """Mutually exclusive, query-only reasons; shared by rows and filtering."""
+        missing = f"NOT EXISTS(SELECT 1 FROM revenue_commercial_cases mc WHERE mc.student_id={student_alias}.student_id)"
+        columns = self._columns("application_cycles")
+        if not {"student_id", "status", "id"}.issubset(columns):
+            return {"missing-active": "0", "missing-withdrawn": "0", "missing-historical": "0",
+                    "missing-ended": "0", "missing-cycle": missing}
+        scope = f"ma.student_id={student_alias}.student_id"
+        exists = f"EXISTS(SELECT 1 FROM application_cycles ma WHERE {scope})"
+        active = f"EXISTS(SELECT 1 FROM application_cycles ma WHERE {scope} AND lower(trim(ma.status))='active')"
+        withdrawn = (f"COALESCE((SELECT lower(trim(ma.outcome)) FROM application_cycles ma WHERE {scope} ORDER BY ma.id DESC LIMIT 1),'')='withdrawn'"
+                     if "outcome" in columns else "0")
+        historical = "0"
+        if "created_at" in columns and "cutover_at" in self._columns("revenue_module_state"):
+            historical = f"""({exists} AND NOT EXISTS(SELECT 1 FROM application_cycles ma WHERE {scope}
+                AND COALESCE(julianday(ma.created_at)<julianday((SELECT cutover_at FROM revenue_module_state WHERE id=1)),0)=0))"""
+        return {
+            "missing-active": f"({missing} AND {active})",
+            "missing-withdrawn": f"({missing} AND NOT {active} AND ({withdrawn}))",
+            "missing-historical": f"({missing} AND NOT {active} AND NOT ({withdrawn}) AND {historical})",
+            "missing-ended": f"({missing} AND NOT {active} AND NOT ({withdrawn}) AND NOT ({historical}) AND {exists})",
+            "missing-cycle": f"({missing} AND NOT {exists})",
+        }
+
+    @staticmethod
+    def _missing_case_info(reason: str | None) -> dict[str, str]:
+        labels = {
+            "missing-active": ("在办 · 待补建财务档案", "申请仍在进行，但尚无收费与佣金档案。需要核对周期、合同及建档来源。"),
+            "missing-historical": ("历史未纳入财务", "申请已结束，周期早于财务模块启用；历史费用与佣金需要按业务凭证另行核对。"),
+            "missing-withdrawn": ("已撤回 · 未建财务档案", "申请已撤回，尚无收费与佣金档案；撤回不代表费用或佣金已结清。"),
+            "missing-ended": ("已结束 · 未纳入财务", "申请周期已结束，尚无收费与佣金档案，需要核对是否存在待处理的财务事项。"),
+            "missing-cycle": ("无申请周期 · 待核对", "学生尚无可关联的申请周期，需要先核对业务归属。"),
+        }
+        key = reason if reason in labels else "missing-cycle"
+        status, explanation = labels[key]
+        return {"reason": key, "status": status,
+                "explanation": explanation + " 查看本页不会自动生成收费、佣金或发票。"}
 
     def _case_rows(self, active_filter: str) -> list[dict[str, Any]]:
         return self._student_page(active_filter, {})["rows"]

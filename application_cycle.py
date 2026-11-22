@@ -1154,7 +1154,7 @@ def record_application_lifecycle_event(
             conn, token, occurred_at, actor_user_id, actor_name=actor_name
         )
     if event in {"STUDENT_CREATED", "PARENT_FORM_SUBMITTED"}:
-        return ensure_active_application_cycle(
+        cycle = ensure_active_application_cycle(
             conn,
             _clean_required(student_id, "student_id"),
             "initial",
@@ -1164,6 +1164,19 @@ def record_application_lifecycle_event(
             actor_name=actor_name,
             education_stream=education_stream,
         )
+        if event == "PARENT_FORM_SUBMITTED" and parent_form_token and actor_user_id is None:
+            from revenue.cycle_integration import ensure_revenue_case_for_parent_submission
+            ensure_revenue_case_for_parent_submission(
+                conn, cycle.id, parent_form_token, occurred_at=occurred_at,
+            )
+        elif actor_user_id is not None:
+            # Existing compatible cycles also need an idempotent retry. Use
+            # created_at, not unrelated later updates, for the cutover guard.
+            ensure_revenue_case_for_cycle(
+                conn, cycle.id, actor_user_id, occurred_at=occurred_at,
+                integration_event="created",
+            )
+        return cycle
     if event in {"CONTRACT_CREATED", "CONTRACT_SIGNED"}:
         if contract_id is None:
             raise CycleValidationError("contract_id is required")

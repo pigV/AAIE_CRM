@@ -713,6 +713,7 @@ _STUDENT_CASE_STATUS_TONES = {
     "已申领": "progress",
     "已确认": "success",
     "预测中": "progress",
+    "在办 · 待补建财务档案": "pending",
 }
 
 
@@ -872,9 +873,14 @@ def render_revenue_workspace_page(
         else:
             content = f'<h2>{escape(str(detail["student_name"]))} · {escape(str(detail["student_id"]))}</h2>'
             cases = detail.get("cases") or []
-            content += "<ul>" + "".join(
+            if cases:
+                content += "<ul>" + "".join(
                 f'<li><a href="{escape(str(case["href"]), quote=True)}">{escape(str(case["business_type"]))} · {escape(str(case["intake"]))} · {escape(str(case["status"]))}</a>'
-                f' · 收费：{escape(str(case["billing_status"]))} · 佣金：{escape(str(case["commission_status"]))}</li>' for case in cases) + "</ul>" if cases else "<p>未建立 / Not Yet Created</p>"
+                f' · 收费：{escape(str(case["billing_status"]))} · 佣金：{escape(str(case["commission_status"]))}</li>' for case in cases) + "</ul>"
+            else:
+                missing = detail.get("missing_case") or {}
+                content += (f'<p>{escape(str(missing.get("status") or "未建立财务档案"))}</p>'
+                            f'<p>{escape(str(missing.get("explanation") or "请先核对申请周期与合同归属。"))}</p>')
         student_detail = f'<section class="revenue-panel" aria-label="学生收入与佣金详情">{content}</section>'
     action_content = (
         '<aside id="revenue-action" class="revenue-action-note">'

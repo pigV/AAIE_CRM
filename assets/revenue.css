@@ -548,7 +548,7 @@ a.revenue-coverage-card:hover { border-color: #cbd6ff; box-shadow: 0 7px 16px rg
   align-items: end;
   display: grid;
   gap: 12px 20px;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr);
   margin-bottom: 16px;
 }
 
