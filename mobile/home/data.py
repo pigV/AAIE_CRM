@@ -8,6 +8,7 @@ from student_application_stage_distribution import (
     application_stage_definitions_for_connection,
 )
 from workflow_projection import load_current_workflow_projection
+from dashboard_stage_presentation import distribution_stage_definitions, distribution_stage_key
 
 
 @dataclass(frozen=True)
@@ -134,15 +135,19 @@ def _stage_summaries(db, load_stages: Callable, *, connection=None, cycles_only=
         if owned and release:
             release(connection)
     if cycles_only:
+        canonical = any(key == '07_school_response' for key, _ in definitions)
+        definitions = distribution_stage_definitions(definitions, canonical=canonical)
         # Keep actionable states returned by the shared classifier, including
         # review states added after the original Mobile stage definitions.
         known={key for key,_ in definitions}
         definitions=tuple(definitions)+tuple(dict.fromkeys(
-            (str(student.stage.key),str(student.stage.label)) for student in students
-            if student.stage.key and student.stage.key not in known))
+            (str(distribution_stage_key(student.stage.key,canonical=canonical)),str(student.stage.label)) for student in students
+            if student.stage.key and distribution_stage_key(student.stage.key,canonical=canonical) not in known))
     counts = {key: 0 for key, _label in definitions}
     for student in students:
         key = str(student.stage.key or "")
+        if cycles_only:
+            key = distribution_stage_key(key, canonical=canonical)
         if key in counts:
             counts[key] += 1
     return tuple(

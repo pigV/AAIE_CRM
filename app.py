@@ -330,6 +330,9 @@ from student_doc import (
 from dashboard_stage_presentation import (
     stage_color, stage_label as dashboard_stage_label, ordered_stage_definitions,
     stage_badge_html, stage_palette_color,
+    distribution_stage_key as dashboard_distribution_stage_key,
+    distribution_stage_label as dashboard_distribution_stage_label,
+    distribution_stage_definitions,
 )
 from student_application_stage_distribution import (
     APPLICATION_STAGE_DEFINITIONS,
@@ -10419,14 +10422,16 @@ def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None
         [(key, label) for key, label, _destination in DASHBOARD_STAGE_DEFINITIONS]
         if canonical else list(APPLICATION_STAGE_DEFINITIONS)
     )
+    definitions = distribution_stage_definitions(definitions, canonical=canonical)
     known = {key for key, _label in definitions}
     observed = {}
     for student in stage_students:
-        key = student.stage.key
+        key = dashboard_distribution_stage_key(student.stage.key, canonical=canonical)
         if key and key not in known:
             observed.setdefault(
                 key,
-                (student.stage.index or 999, student.stage.label or key),
+                (student.stage.index or 999, dashboard_distribution_stage_label(
+                    student.stage.key, student.stage.label or key, canonical=canonical)),
             )
     definitions.extend(
         (key, values[1])
@@ -10437,8 +10442,9 @@ def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None
     definitions = ordered_stage_definitions(definitions)
     stage_map = {key: [] for key, _label in definitions}
     for student in stage_students:
-        if student.stage.key in stage_map:
-            stage_map[student.stage.key].append(student)
+        key = dashboard_distribution_stage_key(student.stage.key, canonical=canonical)
+        if key in stage_map:
+            stage_map[key].append(student)
     max_count = max((len(items) for items in stage_map.values()), default=0)
     total_count = sum(len(items) for items in stage_map.values())
     rows = []
@@ -10450,7 +10456,7 @@ def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None
         muted_class = " dashboard-workflow-distribution-chart__row--muted" if stage_count == 0 else ""
         student_links = "".join(
             f"""<a class="dashboard-workflow-distribution-chart__student" href="{esc(dashboard_application_stage_destination(student))}" data-lifecycle-type="{esc(getattr(student, 'cycle_type', '') or '')}">
-              <span><strong>{esc(student.student_name)}</strong><small>{esc(LIFECYCLE_LABELS.get(getattr(student, 'cycle_type', '') or '', 'Lifecycle'))}{' · Cycle #' + str(student.cycle_sequence) if getattr(student, 'cycle_sequence', None) is not None else ''} · {esc(dashboard_stage_label(student.stage.key, student.stage.label))}{' · ' + esc(student.target_context) if getattr(student, 'target_context', None) else ''}</small><small>{esc(student.stage.blocker)}</small></span>
+              <span><strong>{esc(student.student_name)}</strong><small>{esc(LIFECYCLE_LABELS.get(getattr(student, 'cycle_type', '') or '', 'Lifecycle'))}{' · Cycle #' + str(student.cycle_sequence) if getattr(student, 'cycle_sequence', None) is not None else ''} · {esc(dashboard_distribution_stage_label(student.stage.key, student.stage.label, canonical=canonical))}{' · ' + esc(student.target_context) if getattr(student, 'target_context', None) else ''}</small><small>{esc(student.stage.blocker)}</small></span>
               <span aria-hidden="true">›</span>
             </a>"""
             for student in students
@@ -55399,6 +55405,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     summary_map[row["student_id"]].lifecycle_type,
                     summary_map[row["student_id"]].stage_key,
                 )]
+            elif stage_filter in {"07_school_response", "waiting_school_offer"}:
+                rows_data = [
+                    row for row in rows_data
+                    if dashboard_distribution_stage_key(
+                        summary_map[row["student_id"]].stage_key
+                    ) == "07_school_response"
+                ]
             else:
                 rows_data = [
                     row for row in rows_data

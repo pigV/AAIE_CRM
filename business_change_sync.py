@@ -631,12 +631,14 @@ class BusinessChangeSyncMixin:
                 rows=tuple(x for x in rows if x.stage.key)
                 identities=[('cycle',x.cycle_id) if x.cycle_id is not None else ('student',str(getattr(x,'student_id',''))) for x in rows]
                 if len(set(identities))!=len(rows):raise ValueError('duplicate_cycle_in_distribution')
-                counts=dict(Counter(x.stage.key for x in rows))
+                from dashboard_stage_presentation import distribution_stage_key
+                canonical=g['is_workflow_v2_active'](conn)
+                counts=dict(Counter(distribution_stage_key(x.stage.key,canonical=canonical) for x in rows))
                 if surface=='dashboard_overview':
                     html=self._dashboard_read_snapshot('GET',context,fragment_only=True,stage_students=rows)
                     fragments={'dashboard-overview':html}
                 else:
-                    html=g['dashboard_workflow_distribution_chart_html'](rows,canonical=g['is_workflow_v2_active'](conn))
+                    html=g['dashboard_workflow_distribution_chart_html'](rows,canonical=canonical)
                     fragments={'dashboard-workflow':html}
                 return {'total':len(rows),'counts':counts,'fragments':fragments,
                     'review_issues':self.business_change_visa_consistency_issues()}

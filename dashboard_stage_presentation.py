@@ -57,6 +57,28 @@ def stage_label(key, fallback):
     return '转学资料准备' if key == 'materials_preparation' else str(fallback or '')
 
 
+def distribution_stage_key(key, *, canonical=True):
+    """Homepage grouping only; preserve the underlying workflow stage."""
+    if key in {'school_application', '07_school_response', 'waiting_school_offer'}:
+        return '07_school_response' if canonical else 'waiting_school_offer'
+    return key
+
+
+def distribution_stage_label(key, fallback, *, canonical=True):
+    if distribution_stage_key(key) == '07_school_response':
+        return '等待学校发 Offer'
+    return stage_label(key, fallback)
+
+
+def distribution_stage_definitions(definitions, *, canonical=True):
+    """Deduplicate equivalent groups while retaining existing stage order."""
+    grouped = {}
+    for key, label in definitions:
+        grouped.setdefault(distribution_stage_key(key, canonical=canonical),
+                           distribution_stage_label(key, label, canonical=canonical))
+    return list(grouped.items())
+
+
 def ordered_stage_definitions(definitions):
     result = [(key, stage_label(key, label)) for key, label in definitions]
     transfer = [item for item in result if item[0] == 'materials_preparation']
