@@ -189,6 +189,8 @@ def resolve_dashboard_stage(*, form_live=False, form_submitted=False, contract=N
         return None
     if visa == "lodged":
         return "11_visa_result", ""
+    if visa == "preparing":
+        return "10_visa_submission", ""
     if accepted:
         if coe:
             return "10_visa_submission", ""
@@ -442,6 +444,16 @@ def load_dashboard_stages(connection, cycle_ids):
     optional_steps = load_optional_steps(connection, tuple(row["id"] for row in acceptance.values()))
 
     visas = {}
+    import json
+    visa_only_students=set()
+    if 'form_data_json' in {row[1] for row in connection.execute('PRAGMA table_info(students)')}:
+        for sid,profile in connection.execute(f"""SELECT student_id,form_data_json FROM students
+            WHERE student_id IN (SELECT student_id FROM application_cycles WHERE id IN ({marks}))""",cycle_ids):
+            try:
+                if json.loads(profile or '{}').get('application_service')=='visa_only':
+                    visa_only_students.add(str(sid))
+            except (ValueError,TypeError,AttributeError):
+                continue
     visa_retries = load_retries(connection, cycle_ids)
     for row in _rows(connection, f"""
         SELECT visa.*,result.effective_result,result.source_event_id FROM visa_cases visa
@@ -452,6 +464,9 @@ def load_dashboard_stages(connection, cycle_ids):
          ORDER BY coalesce(visa.actual_lodgement_date,'') DESC,visa.id DESC
     """, cycle_ids):
         status = _visa_status(row,connection)
+        if (not status and str(row.get('student_id')) in visa_only_students
+                and is_student_visa_case(row) and str(row.get('status') or '').strip().lower()=='ready to lodge'):
+            status='preparing'
         resumed = retry_key(row)
         if status in {"refused", "withdrawn"} and resumed and visa_retries.get(
             (row["id"], str(row["student_id"]))
@@ -461,6 +476,10 @@ def load_dashboard_stages(connection, cycle_ids):
             visas.setdefault(row["application_cycle_id"], status)
 
     today = datetime.now(ZoneInfo("Australia/Melbourne")).date().isoformat()
+    # University/TAFE Offers can legitimately have no school-city classification.
+    # They still belong to one explicit cycle and are not secondary-school Offer
+    # events. Never borrow an unassigned file or an older cycle's Offer here.
+    legacy_he_offers = legacy_he_offer_cycles(connection,cycle_ids,today)
     received_progression_offers = _received_progression_offer_cycles(connection,cycle_ids,today)
     contract_decisions = stage_decisions(connection, "cycle_contract_requirement_confirmed", cycle_ids)
     pathway_returns = stage_decisions(connection, "progression_school_return_confirmed", cycle_ids)
@@ -484,7 +503,7 @@ def load_dashboard_stages(connection, cycle_ids):
         valid_offer = any(
             not offer["offer_expiry_date"] or (expiry_dates[offer["id"]] or "") >= today
             for offer in current_offers
-        ) or cycle_id in received_progression_offers
+        ) or cycle_id in received_progression_offers or cycle_id in legacy_he_offers
         accepted = bool(choice and choice["active"])
         pathway = pathway_components.get(cycle_id, ())
         confirmed_coe = bool(fact.final_school_coe_confirmed)
@@ -578,4 +597,34 @@ def load_dashboard_stages(connection, cycle_ids):
             school = "、".join(dict.fromkeys(name for name in school_names if name))
             resolved = (key, " · ".join(filter(None, (school, pending))))
         stages[cycle_id] = (VISA_GRANTED, "已下签") if visas.get(cycle_id) == "granted" else resolved
+    from reviewed_application_stage import load_reviewed_stages
+    for cycle_id,review in load_reviewed_stages(connection,cycle_ids).items():
+        if visas.get(cycle_id) not in {'granted','refused','withdrawn','lodged'}:
+            stages[cycle_id]=review
     return stages
+
+
+
+def legacy_he_offer_cycles(connection,cycle_ids,today):
+    marks=','.join('?' for _ in cycle_ids)
+    invalid="('void','voided','cancelled','canceled','rejected','declined','withdrawn','superseded','expired','invalid_record')"
+    legacy_he_offers = {}
+    for row in _rows(connection, f"""SELECT offer.id,offer.application_cycle_id,offer.offer_expiry_date
+        FROM offers offer JOIN application_cycles cycle
+          ON cycle.id=offer.application_cycle_id AND cycle.student_id=offer.student_id
+        WHERE cycle.id IN ({marks}) AND cycle.education_stream='higher_education'
+          AND offer.document_type IN ('Offer','SignedOffer')
+          AND trim(coalesce(offer.offer_file_path,''))<>''
+          AND lower(trim(coalesce(offer.offer_status,''))) NOT IN {invalid}
+          AND NOT EXISTS (SELECT 1 FROM offer_received_events event
+               WHERE event.legacy_offer_id=offer.id AND event.application_cycle_id=cycle.id
+                 AND lower(coalesce((SELECT change.state FROM offer_received_event_state_events change
+                     WHERE change.offer_received_event_id=event.id ORDER BY change.occurred_at DESC,change.id DESC LIMIT 1),'active'))<>'active')
+          AND NOT EXISTS (SELECT 1 FROM student_documents document
+               WHERE document.student_id=offer.student_id AND document.file_path=offer.offer_file_path
+                 AND (document.is_active=0 OR lower(coalesce(document.document_status,'')) IN ('voided','deleted','archived')))
+    """, cycle_ids):
+        expiry=business_date_iso(row['offer_expiry_date'])
+        if not row['offer_expiry_date'] or expiry and expiry>=today:
+            legacy_he_offers[row['application_cycle_id']]=True
+    return legacy_he_offers

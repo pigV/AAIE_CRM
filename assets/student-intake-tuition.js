@@ -40,9 +40,34 @@ for (const fields of document.querySelectorAll('[data-school-course-tuition]')) 
       const enabled = !fields.hidden && [section.dataset.schoolCourseKind, 'both'].includes(mode.value);
       section.hidden = !enabled;
       for (const input of section.querySelectorAll('input,select,textarea')) input.disabled = !enabled;
+      const sector = section.querySelector('[data-course-sector]');
+      const school = section.querySelector('[data-course-school-value]');
+      const selected = school?.selectedOptions[0];
+      if (!sector?.value && selected?.dataset.sector) sector.value = selected.dataset.sector;
+      if (sector) sector.required = enabled;
+      const publicFields = section.querySelector('[data-course-public-fields]');
+      if (publicFields) {
+        publicFields.hidden = sector?.value !== 'public';
+        for (const input of publicFields.querySelectorAll('input,select')) {
+          input.disabled = !enabled || publicFields.hidden;
+          input.required = enabled && !publicFields.hidden;
+        }
+        const authority = publicFields.querySelector('select');
+        if (authority && !authority.value && selected?.dataset.state) authority.value = selected.dataset.state;
+      }
+      const start = section.querySelector('input[type=date]');
+      if (start) start.required = enabled;
     }
   };
   documentType?.addEventListener('change', sync);
   mode?.addEventListener('change', sync);
+  fields.addEventListener('change', event => {
+    if (event.target.matches('[data-course-school-value]')) {
+      const section = event.target.closest('[data-school-course-kind]');
+      const sector = section.querySelector('[data-course-sector]');
+      if (sector) sector.value = event.target.selectedOptions[0]?.dataset.sector || '';
+    }
+    sync();
+  });
   sync();
 }

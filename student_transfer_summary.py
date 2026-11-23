@@ -442,7 +442,7 @@ def build_student_transfer_summary(
 
 
 def render_student_transfer_badge(summary: StudentTransferSummary | None) -> str:
-    if summary is None or summary.state not in {'contract_pending', 'ready', 'active'}:
+    if summary is None or summary.state not in {'contract_pending', 'ready', 'active', 'history'}:
         return ''
     return '<span class="student-transfer-name-badge">转学</span>'
 

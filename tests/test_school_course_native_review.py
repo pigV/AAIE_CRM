@@ -112,3 +112,53 @@ class NativeCourseReviewTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class CoEMainOwnershipTests(unittest.TestCase):
+    setUp=NativeCourseReviewTests.setUp
+    def test_main_school_can_be_confirmed_at_coe_after_document_acceptance_without_offer_final_selection(self):
+        from application_cycle import close_cycle,create_student_cycle
+        from offer_acceptance import accept_offer_document
+        f=self.fixture
+        with self.db.transaction() as c:
+            close_cycle(c,f.cycle,'completed',f.stamp,f.actor['id'])
+            f.cycle=create_student_cycle(c,f.sid,'initial',f.stamp,f.actor['id']).id
+        self.h.form={}
+        document=f.review('Offer','Offer',{'school_name':f.school})
+        offer=self.db.one('SELECT * FROM offers WHERE student_id=? AND offer_file_path=?',(f.sid,document['file_path']))
+        with self.db.transaction() as c:
+            accept_offer_document(c,f.sid,offer['id'],dict(f.actor,can_manage_offer=True))
+        coe_doc=f.review('COE + OSHC','COE',{'school_name':f.school},
+            {'intake_defer_0':'1','extract_coe_provider_0':f.school,'extract_school_name_0':f.school,
+             'extract_coe_course_0':'Secondary Year 10','extract_coe_start_date_0':'2027-01-25','extract_coe_end_date_0':'2030-12-31'})
+        coe=self.db.one('SELECT id FROM coe_oshc WHERE file_path=?',(coe_doc['file_path'],))
+        self.h.form={'course_mode_0':'main','course_main_school_0':str(offer['school_id']),
+            'course_main_offer_0':str(offer['id']),'course_main_name_0':'Secondary Year 10',
+            'course_main_year_0':'2027','course_main_grade_0':'Year 10','course_main_aud_0':'12000',
+            'course_main_confirmed_0':'1','course_main_reference_0':'TEST CoE page 1'}
+        result=self.h.student_coe_course_confirmation('POST',f.sid,str(coe['id']))
+        self.assertEqual('success',result[2],result)
+        selected=self.db.one("SELECT school_id,signed_offer_completed_at,payment_completed_at FROM cycle_final_acceptances WHERE application_cycle_id=? AND acceptance_status='active'",(f.cycle,))
+        self.assertEqual((offer['school_id'],None,None),tuple(selected))
+
+class CourseConfirmationPermissionTests(unittest.TestCase):
+    setUp=NativeCourseReviewTests.setUp
+    def test_upload_confirmation_cannot_create_financial_course_without_tuition_permission(self):
+        f=self.fixture
+        token=app.create_upload_review(f.sid,'COE + OSHC',[
+            app.Upload('files','permission-coe.pdf','application/pdf',f.pdf('SYNTHETIC course permission'))],f.actor,
+            {'school_name':f.school,'application_cycle_id':str(f.cycle)})
+        school=self.db.one('SELECT id FROM schools WHERE school_name=?',(f.school,))[0]
+        offer=self.db.one('SELECT legacy_offer_id FROM offer_received_events WHERE application_cycle_id=? ORDER BY id LIMIT 1',(f.cycle,))[0]
+        self.h.form={'csrf':'synthetic','confirm_item_0':'1','document_type_0':'COE','course_mode_0':'language',
+            'course_language_school_0':str(school),'course_language_offer_0':str(offer),'course_language_name_0':'Intensive English',
+            'course_language_aud_0':'6000','course_language_confirmed_0':'1','course_language_reference_0':'page 1',
+            'extract_coe_provider_0':f.school,'extract_school_name_0':f.school,'extract_coe_course_0':'Intensive English',
+            'extract_coe_start_date_0':'2027-01-25','extract_coe_end_date_0':'2030-12-31'}
+        with self.assertLogs(level='ERROR') as denied,patch.object(app,'can_perform_revenue_action',return_value=False):
+            result=self.h.upload_review_confirm('POST',f.sid,token)
+        self.assertEqual('error',result[2],result)
+        _,review=app.load_upload_review(token)
+        item=self.db.one('SELECT error_message FROM upload_review_items WHERE id=?',(review['files'][0]['item_id'],))
+        self.assertTrue(item[0])
+        self.assertIn('权限',' '.join(denied.output))
+        self.assertEqual(0,self.db.one('SELECT count(*) FROM revenue_school_courses')[0])

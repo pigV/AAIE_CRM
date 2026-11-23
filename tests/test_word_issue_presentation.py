@@ -17,7 +17,7 @@ class WordIssuePresentationTests(unittest.TestCase):
 
     def test_transfer_header_badge_covers_ready_contract_but_not_ordinary_student(self):
         Summary = student_transfer_summary.StudentTransferSummary
-        for state in ('contract_pending', 'ready', 'active'):
+        for state in ('contract_pending', 'ready', 'active', 'history'):
             badge = student_transfer_summary.render_student_transfer_badge(Summary('S1', state, '转学'))
             self.assertIn('转学', badge)
         self.assertEqual('', student_transfer_summary.render_student_transfer_badge(None))

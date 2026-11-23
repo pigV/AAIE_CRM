@@ -49,6 +49,9 @@ class DashboardConfirmedStageTests(unittest.TestCase):
         )
         self.assertIsNone(resolve_dashboard_stage(contract="not_required",contract_required=False))
 
+    def test_explicit_visa_only_preparation_does_not_require_a_school_offer(self):
+        self.assertEqual(('10_visa_submission',''),resolve_dashboard_stage(visa='preparing'))
+
     def test_offer_and_visa_require_current_cycle_evidence(self):
         self.assertEqual(resolve_dashboard_stage(submitted=True)[0], "07_school_response")
         self.assertEqual(resolve_dashboard_stage(submitted=True, offer=True)[0], "08_offer_acceptance")

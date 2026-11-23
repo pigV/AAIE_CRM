@@ -7,7 +7,7 @@ def preview_panel(preview_url, download_url, filename):
     title=escape(str(filename),quote=True)
     return f'''                  <section class="review-preview-workspace upload-review-preview-panel" data-review-preview-root data-preview-src="{src}?size=large" data-download-url="{download}" data-preview-title="{title}">
                     <div class="review-preview-head">
-                      <div><strong>文件预览 / Document Preview</strong><small>对照右侧原件核对左侧字段；两边可分别滚动。</small></div>
+                      <div><strong>文件预览 / Document Preview</strong><small>完整查看当前页，对照原件核对字段；多页文件可切换页码。</small></div>
                       <div class="review-preview-head-actions">
                         <button type="button" class="secondary mini" data-review-preview-fullscreen>全屏查看</button>
                         <button type="button" class="ghost mini" data-review-preview-open-window>新窗口打开</button>

@@ -299,6 +299,24 @@ def classify_offer_school(connection, school_name: str) -> OfferClassification:
     return _classification_from_candidates(candidates)
 
 
+def offer_school_choices(connection):
+    """Expose the same scope resolution used when a selected school is saved.
+
+    Legacy schools without city_id remain searchable. Unresolved scope stays
+    visible for staff review; assign_offer_school still validates before save.
+    """
+    columns = _table_columns(connection, 'schools')
+    deleted = {int(row[0]) for row in connection.execute(
+        "SELECT id FROM schools WHERE COALESCE(deleted_at,'')<>''"
+    )} if 'deleted_at' in columns else set()
+    return sorted((dict(id=row.school_id, school_name=row.school_name,
+                        city_id=row.city_id, city_name=row.city_name or '城市待完善',
+                        sector_key=row.sector_key)
+                   for row in resolve_school_scopes(connection)
+                   if row.school_id not in deleted),
+                  key=lambda row: (row['city_name'], row['school_name']))
+
+
 @synchronized_offer_selection
 def assign_offer_school(connection, offer_id: int, school_id: int, actor) -> OfferClassification:
     """Assign a staff-selected canonical school and its validated scope to an Offer."""

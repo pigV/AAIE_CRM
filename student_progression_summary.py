@@ -577,8 +577,8 @@ def render_student_progression_summary(
     gate = summary.contract_gate
     gate_html = (
         '<p class="student-progression-contract-gate">'
-        f'<span>合同门禁</span><strong>{escape(gate.label)}</strong></p>'
-        if gate is not None else ""
+        f'<span>升学业务合同要求</span><strong>{escape(gate.label)}</strong></p>'
+        if gate is not None and summary.state in {"active", "draft"} else ""
     )
     records = "".join(
         '<li>'

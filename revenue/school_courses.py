@@ -42,12 +42,36 @@ def read_course_fields(form, index):
         entry={'course_kind':kind,'school_id':int(school),'course_name':name,
                'cents':cents,'year':None,'grade':'','confirmed':value(f'{kind}_confirmed')=='1',
                'reference':value(f'{kind}_reference'),'authority_state':value(f'{kind}_authority_state')}
+        sector=value(f'{kind}_sector')
+        if sector:
+            from datetime import date
+            if sector not in {'public','private'}:
+                raise ValueError('请选择公立或私立课程。')
+            start=value(f'{kind}_start_date')
+            try:
+                if date.fromisoformat(start).isoformat()!=start:
+                    raise ValueError()
+            except ValueError:
+                raise ValueError('请填写有效入学日期。') from None
+            number=value(f'{kind}_student_number') if sector=='public' else ''
+            if sector=='public' and (not number or len(number)>100):
+                raise ValueError('请填写Offer上的学校学号，不是CRM编号。')
+            if sector=='public' and entry['authority_state'] not in {'ACT','NSW','NT','QLD','SA','TAS','VIC','WA'}:
+                raise ValueError('请选择公立课程所属教育局。')
+            if sector=='private':
+                entry['authority_state']=''
+            entry.update(sector=sector,start_date=start,student_number=number)
         if kind=='language':
             offer=value('language_offer')
             if not re.fullmatch(r'[1-9]\d*',offer):
                 raise ValueError('请选择该语言课程已接受的Offer。')
             entry['offer_id']=int(offer)
         if kind=='main':
+            offer=value('main_offer')
+            if offer:
+                if not re.fullmatch(r'[1-9]\d*',offer):
+                    raise ValueError('请选择本课程已接受的Offer。')
+                entry['offer_id']=int(offer)
             from revenue.student_intake_tuition import read_review_fields
             fields={f'intake_year_{index}':value('main_year'),
                     f'intake_grade_{index}':value('main_grade'),
@@ -64,11 +88,13 @@ def coe_snapshot(row):
 
 
 def accepted_course_offers(connection,student_id,cycle_id):
+    offer_columns={r[1] for r in connection.execute('PRAGMA table_info(offers)')}
+    cycle_match=' AND o.application_cycle_id=e.application_cycle_id' if 'application_cycle_id' in offer_columns else ''
     rows=[dict(row) for row in connection.execute('''SELECT DISTINCT o.*,s.school_name AS crm_school_name
         FROM offers o JOIN offer_received_events e ON e.legacy_offer_id=o.id
         AND e.student_id=o.student_id AND e.school_id=o.school_id
         JOIN schools s ON s.id=o.school_id
-        WHERE o.student_id=? AND e.application_cycle_id=?
+        WHERE o.student_id=? AND e.application_cycle_id=?'''+cycle_match+'''
           AND (lower(trim(o.offer_status))='accepted' OR EXISTS(SELECT 1 FROM cycle_final_acceptances a
             WHERE a.offer_received_event_id=e.id AND a.acceptance_status='active'
               AND a.application_cycle_id=e.application_cycle_id AND a.student_id=o.student_id))
@@ -212,10 +238,43 @@ def save_coe_courses(connection, student_id, coe_id, entries, staged, actor, *, 
                     actor,f"revenue-component:acceptance:{acceptance['id']}",final_acceptance_id=acceptance['id'])
                 context=accepted_offer_context(connection,student_id)
         language_offers=accepted_course_offers(connection,student_id,coe['application_cycle_id'])
+        # Offer acceptance can precede enrolment selection. The first main
+        # enrolment is confirmed here, against the reviewed CoE and its exact
+        # accepted Offer. Never replace an existing different enrolment.
+        main=next((entry for entry in entries if entry['course_kind']=='main'),None)
+        if main and context and main.get('offer_id') and main['offer_id']!=context['legacy_offer_id']:
+            raise ValueError('所选主课Offer与当前入读依据不是同一份，请先核对现有入读依据。')
+        if main and not context and main.get('offer_id'):
+            selected=next((offer for offer in language_offers if offer['id']==main['offer_id']
+                           and offer['school_id']==main['school_id']),None)
+            school=connection.execute('SELECT * FROM schools WHERE id=?',(main['school_id'],)).fetchone()
+            if not selected or not school:
+                raise ValueError('主课须匹配同一周期已接受的Offer。')
+            validate_coe_course_owner(connection,coe,main,school,both=len(entries)==2)
+            existing=connection.execute("SELECT 1 FROM cycle_final_acceptances WHERE application_cycle_id=? AND acceptance_status='active'",(cycle['id'],)).fetchone()
+            if existing:
+                raise ValueError('已有入读依据，请先核对现有课程，不能覆盖。')
+            offer_columns={r[1] for r in connection.execute('PRAGMA table_info(offers)')}
+            if 'offer_id' in {r[1] for r in connection.execute('PRAGMA table_info(student_offer_acceptances)')}:
+                scope=' AND (o.application_cycle_id=? OR o.application_cycle_id IS NULL)' if 'application_cycle_id' in offer_columns else ''
+                args=(student_id,selected['id'],cycle['id']) if scope else (student_id,selected['id'])
+                if connection.execute('SELECT 1 FROM student_offer_acceptances a JOIN offers o ON o.id=a.offer_id WHERE a.student_id=? AND a.offer_id<>?'+scope,args).fetchone():
+                    raise ValueError('已有另一份历史入读Offer，请先核对，不能覆盖。')
+            event=connection.execute('SELECT id FROM offer_received_events WHERE legacy_offer_id=? AND application_cycle_id=? AND student_id=?',
+                                     (selected['id'],cycle['id'],student_id)).fetchone()
+            if not event:
+                raise ValueError('Offer周期关联尚未核对，请先核对材料归属。')
+            from workflow_offer_events import select_final_acceptance
+            accepted=select_final_acceptance(connection,cycle['id'],event[0],selected_at=repo.now(),actor_user_id=actor)
+            RevenueService(repo).link_enrolment_component(case['uid'],'school','final_acceptance',accepted.id,
+                actor,f"revenue-component:acceptance:{accepted.id}",final_acceptance_id=accepted.id)
+            context=accepted_offer_context(connection,student_id)
         for entry in entries:
             school=connection.execute('SELECT * FROM schools WHERE id=?',(entry['school_id'],)).fetchone()
             if not school or ('deleted_at' in school.keys() and school['deleted_at']):
                 raise ValueError('请选择有效CRM学校。')
+            if entry.get('sector') and str(school['sector_key'] or '')!=entry['sector']:
+                raise ValueError('公立／私立类别与所选学校资料不一致，请核对学校。')
             validate_coe_course_owner(connection,coe,entry,school,both=len(entries)==2)
             if entry['course_kind']=='main' and (not context or context['school_id']!=entry['school_id']
                     or context['application_cycle_id']!=coe['application_cycle_id']):
@@ -293,7 +352,8 @@ def save_coe_courses(connection, student_id, coe_id, entries, staged, actor, *, 
                 fact=RevenueService(repo).record_tuition(component['uid'],'whole_course','language_tuition',
                     entry['cents'],'official',actor,f"school-course-tuition:{course['uid']}:{coe_id}:{staged.sha256}",document_id)
             result.append({**course,'component_uid':component['uid'],'tuition_uid':fact['uid'],
-                           'tuition_cents':fact['tuition_cents']})
+                           'tuition_cents':fact['tuition_cents'],
+                           'profile':{key:entry.get(key,'') for key in ('sector','start_date','student_number','authority_state')}})
         return {'uid':f'coe-courses-{coe_id}','courses':result}
     kinds='-'.join(sorted(entry['course_kind'] for entry in entries))
     return repo.command(idempotency_key=f'coe-courses:{coe_id}:{staged.sha256}:{kinds}',command_type='school_course_tuition_confirmed',
@@ -323,7 +383,7 @@ def course_details(connection,student_id):
     if not available(connection):
         return []
     visibility=RevenueOperationalVisibility(connection)
-    rows=[dict(row) for row in connection.execute('''SELECT sc.*,s.school_name,ec.uid AS component_uid,
+    rows=[dict(row) for row in connection.execute('''SELECT sc.*,s.school_name,s.sector_key,s.state,ec.uid AS component_uid,
         t.uid AS tuition_uid,t.tuition_cents,t.evidence_document_id,t.academic_period,t.fee_component
         FROM revenue_school_courses sc JOIN revenue_commercial_cases c ON c.id=sc.commercial_case_id
         JOIN schools s ON s.id=sc.school_id JOIN revenue_enrolment_components ec ON ec.id=sc.enrolment_component_id
@@ -333,10 +393,54 @@ def course_details(connection,student_id):
                 AND lower(trim(t.academic_period)) IN ('year_1','first_year')))
         WHERE c.student_id=? AND sc.status='active' AND ec.status='active' AND '''+visibility.case_predicate('c')+
         ' ORDER BY sc.id',(student_id,))]
+    profiles={}
+    for event in connection.execute("""SELECT action,aggregate_uid,after_json FROM revenue_audit_events
+        WHERE (action='school_course_tuition_confirmed' AND aggregate_uid IN
+               (SELECT 'coe-courses-'||id FROM coe_oshc WHERE student_id=?))
+           OR (action='school_course_profile_corrected' AND aggregate_uid IN
+               (SELECT sc.uid FROM revenue_school_courses sc JOIN revenue_commercial_cases c
+                 ON c.id=sc.commercial_case_id WHERE c.student_id=?)) ORDER BY id DESC""",(student_id,student_id)):
+        payload=json.loads(event[2])
+        values=payload.get('courses',()) if event[0]=='school_course_tuition_confirmed' else (payload,)
+        for course in values:
+            profiles.setdefault(course['uid'],course.get('profile',{}))
     for row in rows:
+        row['profile']=dict(profiles.get(row['uid'],{}))
+        if not row['profile'].get('sector'):
+            row['profile']['sector']=row.get('sector_key') or ''
+        if row['profile']['sector']=='public' and not row['profile'].get('authority_state') and row.get('state') in {'ACT','NSW','NT','QLD','SA','TAS','VIC','WA'}:
+            row['profile']['authority_state']=row['state']
         row['revision']=sha256(canonical_json([row['uid'],row['tuition_uid'],row['tuition_cents'],
-                                              row['evidence_document_id'],row['status']]).encode()).hexdigest()
+                                              row['evidence_document_id'],row['status'],row['profile']]).encode()).hexdigest()
     return rows
+
+
+def correct_course_profile(connection,student_id,course_uid,form,actor):
+    """Correct reviewed enrolment metadata; financial facts remain immutable."""
+    from datetime import date
+    token=str(form.get('idempotency_key') or '')
+    reason=str(form.get('reason') or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',token) or not reason:
+        raise ValueError('请填写更正原因并重新打开表单。')
+    try:
+        start=date.fromisoformat(str(form.get('start_date') or '')).isoformat()
+    except ValueError:
+        raise ValueError('请填写有效入学日期。') from None
+    repo=RevenueRepository(connection)
+    def operation():
+        row=next((r for r in course_details(connection,student_id) if r['uid']==course_uid),None)
+        if not row or row['revision']!=form.get('revision'):
+            raise ValueError('课程已变化，请重新打开表单。')
+        school=connection.execute('SELECT sector_key FROM schools WHERE id=?',(row['school_id'],)).fetchone()
+        public=school[0]=='public'
+        number=str(form.get('student_number') or '').strip() if public else ''
+        state=str(form.get('authority_state') or '').strip() if public else ''
+        if public and (not number or len(number)>100 or state not in {'ACT','NSW','NT','QLD','SA','TAS','VIC','WA'}):
+            raise ValueError('请核对Offer学校学号及所属教育局。')
+        profile=dict(sector=school[0],start_date=start,student_number=number,authority_state=state)
+        return {'uid':course_uid,'student_id':student_id,'profile':profile,'previous_profile':row['profile'],'reason':reason}
+    return repo.command(idempotency_key=f'course-profile:{course_uid}:{token}',command_type='school_course_profile_corrected',
+        aggregate_type='school_course',payload={'student_id':student_id,'course_uid':course_uid,'form':form},actor_user_id=actor,operation=operation)
 
 
 def correct_course_tuition(connection,student_id,course_uid,form,actor):
@@ -416,8 +520,22 @@ def render_course_details(rows,student_id,csrf,token):
             continue
         action=f'/students/{quote(str(student_id),safe="")}/coe/course-tuition/{quote(row["uid"],safe="")}'
         label='语言全课程学费' if row['course_kind']=='language' else '主课首年学费'
+        profile=row.get('profile',{})
+        q=lambda value:escape(str(value or ''),quote=True)
+        public=profile.get('sector')=='public'
+        public_fields=(f'<label>所属教育局（州／领地）<select name="authority_state">'+''.join(
+            f'<option value="{state}"{' selected' if state==profile.get("authority_state") else ""}>{state}</option>'
+            for state in ('ACT','NSW','NT','QLD','SA','TAS','VIC','WA'))+'</select></label>'
+            f'<label>Offer 学校学号<input name="student_number" value="{q(profile.get("student_number"))}" maxlength="100" required></label>') if public else ''
+        profile_editor=f'''<p>入学日期：{q(profile.get('start_date')) or '待核对'}{(' · 学校学号：'+q(profile.get('student_number'))) if public else ''}</p>
+          <details><summary>修改入学日期与学校学号</summary><form method="post" action="{action}/profile" class="stack-form">
+            <input type="hidden" name="csrf" value="{q(csrf)}"><input type="hidden" name="revision" value="{row['revision']}">
+            <input type="hidden" name="idempotency_key" value="{q(token)}">
+            <label>入学日期<input type="date" name="start_date" value="{q(profile.get('start_date'))}" required></label>{public_fields}
+            <label>更正原因<input name="reason" required maxlength="600"></label><button class="primary">保存修改</button>
+          </form></details>'''
         parts.append(f'''<article><h4>{escape(row['school_name'])} · {escape(row['course_name'])}</h4>
-          <p>{label}：AUD {cents//100:,}.{cents%100:02d}</p><details><summary>更正课程学费</summary>
+          {profile_editor}<p>{label}：AUD {cents//100:,}.{cents%100:02d}</p><details><summary>更正课程学费</summary>
           <form method="post" action="{action}" class="stack-form">
           <input type="hidden" name="csrf" value="{escape(csrf,quote=True)}">
           <input type="hidden" name="revision" value="{row['revision']}">
@@ -427,7 +545,7 @@ def render_course_details(rows,student_id,csrf,token):
     return '<section data-school-course-details><h3>课程学费</h3>'+''.join(parts)+'</section>' if parts else ''
 
 
-def render_course_fields(index,schools,context=None,*,offers=()):
+def render_course_fields(index,schools,context=None,*,offers=(),show_submit=True):
     """School choices are actual CRM IDs; client-side hiding is presentation only."""
     context=context or {}
     values=(context.get('offer') or {}).get('values',{})
@@ -436,17 +554,19 @@ def render_course_fields(index,schools,context=None,*,offers=()):
     for kind,label in (('language','语言课程'),('main','主课')):
         selected=context.get('school_id') if kind=='main' else None
         options='<option value="">请选择实际课程学校</option>'+''.join(
-            f'<option value="{int(s["id"])}"{" selected" if selected==s["id"] else ""}>{escape(s["school_name"])}</option>' for s in schools)
+            f'<option value="{int(s["id"])}"{" selected" if selected==s["id"] else ""} data-sector="{quoted(s.get("sector_key"))}" data-state="{quoted(s.get("state"))}">{escape(s["school_name"])}</option>' for s in schools)
         cents=values.get('cents') if kind=='main' else None
         amount=f'{cents//100}.{cents%100:02d}' if isinstance(cents,int) else ''
         proposal=context.get(kind+'_course_name','')
+        start_date=context.get(kind+'_start_date','') or context.get('start_date','')
         year_grade=(f'<label>入学年份<input name="course_main_year_{index}" inputmode="numeric" maxlength="4" value="{quoted(values.get("year"))}"></label>'
                     f'<label>入学年级<input name="course_main_grade_{index}" maxlength="24" value="{quoted(values.get("grade"))}"></label>') if kind=='main' else ''
         offer_field=''
-        if kind=='language':
+        if kind in {'language','main'}:
             offer_options='<option value="">请选择已接受的语言Offer</option>'+''.join(
                 f'<option value="{int(o["id"])}">Offer #{int(o["id"])} · {escape(o.get("crm_school_name") or o.get("school_name") or "")}</option>' for o in offers)
-            offer_field=f'<label>已接受Offer<select name="course_language_offer_{index}">{offer_options}</select></label>'
+            offer_options=offer_options.replace('已接受的语言Offer','本课程已接受的Offer')
+            offer_field=f'<label>本课程已接受的Offer<select name="course_{kind}_offer_{index}">{offer_options}</select></label>'
         fields.append(f'''<section data-school-course-kind="{kind}"><h4>{label}</h4>{offer_field}
           <div class="course-school-picker" data-course-school-picker>
             <label for="course-school-search-{kind}-{index}">实际学校</label>
@@ -457,15 +577,26 @@ def render_course_fields(index,schools,context=None,*,offers=()):
             <div id="course-school-results-{kind}-{index}" class="course-school-results" role="listbox" aria-label="学校搜索结果" hidden></div>
             <small data-course-school-status role="status" aria-live="polite"></small>
           </div>
-          <label>课程名称<input name="course_{kind}_name_{index}" maxlength="200" value="{quoted(proposal)}"></label>
-          <label>CoE课程来源位置<input name="course_{kind}_reference_{index}" maxlength="600" placeholder="页码及课程段落"></label>
-          <label>教育局所属州／领地（教育局CoE须核对）<select name="course_{kind}_authority_state_{index}">
-          <option value="">不适用／尚未核对</option>{''.join(f'<option value="{state}">{state}</option>' for state in ('ACT','NSW','NT','QLD','SA','TAS','VIC','WA'))}</select></label>
-          <label><input type="checkbox" name="course_{kind}_confirmed_{index}" value="1">我已核对该CoE原件中的实际学校、课程及费用</label>
-          {year_grade}<label>{'全课程语言学费' if kind=='language' else '主课首年学费'}（AUD）
-          <input name="course_{kind}_aud_{index}" inputmode="decimal" maxlength="12" value="{amount}"></label></section>''')
+          <label>{'语言学校类别' if kind=='language' else '主课学校类别'}<select name="course_{kind}_sector_{index}" data-course-sector>
+            <option value="">请选择公立／私立</option><option value="public">{'公立语言' if kind=='language' else '公立学校'}</option>
+            <option value="private">{'私立语言' if kind=='language' else '私立学校'}</option></select></label>
+          <label>入学日期<input type="date" name="course_{kind}_start_date_{index}" value="{quoted(start_date)}"></label>
+          <label>{'整个语言课程学费' if kind=='language' else '主课首年学费'}（AUD）
+            <input name="course_{kind}_aud_{index}" inputmode="decimal" maxlength="12" value="{amount}"></label>
+          <div data-course-public-fields class="course-detail-grid">
+            <label>所属教育局（州／领地）<select name="course_{kind}_authority_state_{index}">
+              <option value="">请选择教育局</option>{''.join(f'<option value="{state}">{state}</option>' for state in ('ACT','NSW','NT','QLD','SA','TAS','VIC','WA'))}</select></label>
+            <label>学校学号（Offer 上的学生编号）<input name="course_{kind}_student_number_{index}" maxlength="100" autocomplete="off"></label>
+          </div>
+          <details><summary>课程详情与原件核对</summary><div class="course-detail-grid">
+            <label>课程名称<input name="course_{kind}_name_{index}" maxlength="200" value="{quoted(proposal)}"></label>
+            <label>原件来源位置<input name="course_{kind}_reference_{index}" maxlength="600" placeholder="页码及课程段落"></label>{year_grade}
+          </div></details>
+          <label class="course-proof-check"><input type="checkbox" name="course_{kind}_confirmed_{index}" value="1">已核对本课程的学校、学号、日期及学费</label>
+          </section>''')
+    submit = '<button class="primary" type="submit">保存并确认所选文件</button>' if show_submit else ''
     return f'''<script src="/assets/course-school-search.js?v=1" defer></script><fieldset data-school-course-tuition><legend>CoE课程与学费</legend>
       <label>文件包含的课程<select name="course_mode_{index}" data-school-course-mode>
       <option value="">稍后核对课程费用</option><option value="main">仅主课</option>
       <option value="language">仅语言课程</option><option value="both">语言课程及主课</option></select></label>
-      <p>按文件分别确认实际学校及金额；语言佣金须另有已核对的语言合同条款。</p>{''.join(fields)}</fieldset>'''
+      <p>语言与主课分别保存；公立、私立语言均为全课程学费，主课为首年学费。</p>{''.join(fields)}{submit}</fieldset>'''

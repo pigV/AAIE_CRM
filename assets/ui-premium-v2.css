@@ -26817,3 +26817,50 @@
 .ui-premium-v2 .visa-management-compact .visa-management-list-panel .panel-head h2 { margin:0; }
 .ui-premium-v2 .finance-contract-fields label:has(input[type=checkbox]) { display:flex; align-items:center; gap:8px; }
 .ui-premium-v2 .finance-contract-fields input[type=checkbox] { width:18px!important; height:18px; min-height:0; padding:0; flex:0 0 18px; }
+
+/* Document review: a full source page with one ordinary page scroll. */
+.ui-premium-v2 .upload-review-page { width:min(100%,1600px); }
+.ui-premium-v2 .upload-review-page .upload-review-file-card:not(.upload-review-file-card--removed):not(.is-fullscreen) {
+  height:auto; max-height:none; grid-template-rows:auto; align-items:start;
+}
+.ui-premium-v2 .upload-review-page .upload-review-file-card:not(.is-fullscreen) > .upload-review-file-meta {
+  height:auto; max-height:none; overflow:visible; overscroll-behavior:auto;
+}
+.ui-premium-v2 .upload-review-page .upload-review-file-card:not(.is-fullscreen) > .upload-review-preview-panel {
+  height:auto; min-height:0; max-height:none;
+}
+.ui-premium-v2 .upload-review-page .upload-review-file-card:not(.is-fullscreen) .review-preview-body,
+.ui-premium-v2 .upload-review-page .upload-review-file-card:not(.is-fullscreen) .upload-review-preview-stage {
+  height:auto; max-height:none; min-height:0; overflow:visible;
+}
+.ui-premium-v2 .upload-review-page .upload-review-file-card:not(.is-fullscreen) .upload-review-preview-stage img {
+  max-height:none; height:auto; object-fit:contain;
+}
+.ui-premium-v2 .upload-review-page .upload-review-file-meta > [data-school-course-tuition] {
+  grid-column:1 / -1; width:100%; min-width:0;
+}
+.ui-premium-v2 [data-school-course-tuition] {
+  display:grid; grid-template-columns:minmax(0,1fr); gap:14px;
+  border:1px solid var(--border); border-radius:14px; padding:18px; margin:0; min-width:0;
+}
+.ui-premium-v2 [data-school-course-kind] {
+  display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px;
+  padding:16px 0; border-top:1px solid var(--border); min-width:0;
+}
+.ui-premium-v2 [data-school-course-kind] > :is(h4,.course-school-picker,details,.course-proof-check,[data-course-public-fields]) { grid-column:1 / -1; }
+.ui-premium-v2 [data-school-course-kind] > .course-proof-check {
+  display:flex; align-items:center; gap:8px;
+}
+.ui-premium-v2 [data-school-course-kind] > .course-proof-check > input[type=checkbox] {
+  width:18px!important; height:18px; min-height:0; padding:0; margin:0; flex:0 0 18px;
+}
+.ui-premium-v2 [data-course-public-fields] { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.ui-premium-v2 [data-school-course-kind] details > .course-detail-grid {
+  display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; padding-top:12px;
+}
+.ui-premium-v2 [data-school-course-kind][hidden],.ui-premium-v2 [data-course-public-fields][hidden] { display:none; }
+@media(max-width:760px) {
+  .ui-premium-v2 [data-school-course-kind],
+  .ui-premium-v2 [data-school-course-kind] details > .course-detail-grid,
+  .ui-premium-v2 [data-course-public-fields] { grid-template-columns:minmax(0,1fr); }
+}

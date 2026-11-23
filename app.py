@@ -28070,9 +28070,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/(\d+)/offer$", self.offer_create),
                 (r"^/students/(\d+)/offer/first-year-tuition$", self.student_first_year_tuition_update),
                 (r"^/students/(\d+)/coe/course-tuition/([A-Za-z0-9_-]+)$", self.student_course_tuition_update),
+                (r"^/students/(\d+)/coe/course-tuition/([A-Za-z0-9_-]+)/profile$", self.student_course_profile_update),
+                (r"^/students/(\d+)/coe/enrolment/(\d+)/withdraw$", self.student_coe_enrolment_withdraw),
                 (r"^/students/(\d+)/coe/(\d+)/course-tuition$", self.student_coe_course_confirmation),
                 (r"^/students/(\d+)/offer/(\d+)/update$", self.offer_update),
                 (r"^/students/(\d+)/offer/(\d+)/classify$", self.offer_classify),
+                (r"^/students/(\d+)/school-materials/corrections$", self.student_school_material_corrections),
                 (r"^/students/(\d+)/documents/(\d+)/withdraw-source$", self.student_source_material_withdraw),
                 (r"^/students/(\d+)/offer/(\d+)/accept$", self.offer_accept),
                 (r"^/students/(\d+)/offer/(\d+)/select-final$", self.offer_select_final),
@@ -61904,7 +61907,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 return self.error_page('课程功能尚未完成迁移。',400)
             from revenue.student_intake_tuition import accepted_offer_context
             context = accepted_offer_context(connection,student_id)
-            schools = [dict(row) for row in connection.execute("SELECT id,school_name FROM schools WHERE COALESCE(deleted_at,'')='' ORDER BY school_name")]
+            schools = [dict(row) for row in connection.execute("SELECT id,school_name,sector_key,state FROM schools WHERE COALESCE(deleted_at,'')='' ORDER BY school_name")]
             offers = accepted_course_offers(connection,student_id,record['application_cycle_id'])
         if method == 'POST':
             try:
@@ -61934,14 +61937,23 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             except (ValueError,PermissionError,OSError) as exc:
                 return self.flash_redirect(f'/students/{student_id}/coe/{coe_id}/course-tuition',str(exc),'error')
             return self.flash_redirect(f'/students/{student_id}?tab=coe','课程学费已确认，CoE原件和原业务记录保持可追溯。')
-        fields = render_course_fields(0,schools,context,offers=offers)
-        body = f"""<section class="panel upload-review"><h2>核对现有 CoE 的课程学费</h2>
+        from document_review_layout import preview_panel
+        fields = render_course_fields(0,schools,context,offers=offers,show_submit=False)
+        original = preview_panel(f'/coe-oshc/{int(coe_id)}/preview',
+                                 f'/coe-oshc/{int(coe_id)}/download',
+                                 Path(record['file_path'] or '').name or f'CoE #{int(coe_id)}')
+        body = f"""<div class="upload-review-page coe-course-confirmation-page"><section class="panel"><h2>核对现有 CoE 的课程学费</h2>
           <p>CoE #{int(coe_id)} · 不重新上传，不新增重复CoE记录。</p>
-          <a href="/coe-oshc/{int(coe_id)}/download" class="secondary button-link">查看CoE原件</a>
+          <a href="/students/{student_id}?tab=coe" class="secondary button-link">返回学生 CoE</a></section>
           <form method="post" class="stack-form"><input type="hidden" name="csrf" value="{esc(self.csrf)}">
-          <article data-upload-review-workbench><select data-document-type-select hidden><option value="COE" selected>COE</option></select>{fields}</article>
-          <button class="primary">确认课程学费</button></form></section><script src="/assets/student-intake-tuition.js" defer></script>"""
-        return self.send_html(page('核对课程学费',body,self.user,self.csrf,'students',nas.status()))
+          <article class="upload-review-workbench upload-review-file-card" data-upload-review-workbench>
+            <section class="review-fields-workspace upload-review-file-meta" data-review-fields-pane>
+              <select data-document-type-select hidden><option value="COE" selected>COE</option></select>{fields}
+            </section>{original}</article>
+          <div class="dialog-actions upload-review-actions"><button class="primary" type="submit">确认课程学费</button></div>
+          </form></div><script src="/assets/student-intake-tuition.js" defer></script>"""
+        message, kind = self.message()
+        return self.send_html(page('核对课程学费',body,self.user,self.csrf,'students',nas.status(),message,kind))
 
     def student_course_tuition_panel(self, student_id):
         from business_changes.snapshots import read_scope
@@ -61954,13 +61966,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             rows = course_details(connection,str(student_id))
         return render_course_details(rows,str(student_id),self.csrf,new_token())
 
-    def student_course_tuition_update(self, method, student_id, course_uid):
+    def student_course_profile_update(self, method, student_id, course_uid):
+        return self.student_course_tuition_update(method,student_id,course_uid,profile=True)
+
+    def student_course_tuition_update(self, method, student_id, course_uid, *, profile=False):
         from business_changes.commands import TransactionView
         if method != 'POST':
             return self.error_page('不支持此请求方式。',405)
         if not self._can_correct_student_tuition():
             return self.error_page('无权限修改课程学费。',403)
-        from revenue.school_courses import correct_course_tuition
+        from revenue.school_courses import correct_course_tuition,correct_course_profile
         from business_changes.authorization import current_staff
         try:
             with db.transaction() as connection:
@@ -61973,10 +61988,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             raise PermissionError('课程学费修改权限已变化。')
                     finally:
                         self.user = previous_actor
-                correct_course_tuition(connection,str(student_id),course_uid,self.form,int(actor['id']))
+                command=correct_course_profile if profile else correct_course_tuition
+                command(connection,str(student_id),course_uid,self.form,int(actor['id']))
         except (ValueError,PermissionError) as exc:
             return self.flash_redirect(f'/students/{student_id}?tab=coe',str(exc),'error')
-        return self.flash_redirect(f'/students/{student_id}?tab=coe','课程学费已更正，历史证据与发票记录保留。')
+        return self.flash_redirect(f'/students/{student_id}?tab=coe',
+            '课程入学资料已更正，原件与历史记录保留。' if profile else '课程学费已更正，历史证据与发票记录保留。')
 
     def student_first_year_tuition_update(self, method, student_id):
         if method != "POST":
@@ -62143,16 +62160,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         ) and db.one(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='school_cities'"
         )
-        school_choices = (
-            db.all(
-                """SELECT s.id,s.school_name,c.city_name,s.sector_key
-                   FROM schools s JOIN school_cities c ON c.id=s.city_id
-                   WHERE s.sector_key IN ('public','private') AND COALESCE(s.deleted_at,'')=''
-                   ORDER BY c.city_name,s.school_name"""
-            )
-            if has_school_master
-            else []
-        )
+        school_choices = []
+        if has_school_master:
+            from offer_acceptance import offer_school_choices
+            from business_changes.snapshots import read_scope
+            with read_scope(db) as connection:
+                school_choices = offer_school_choices(connection)
         document_acceptance_ids = {int(row['new_offer_id']) for row in db.all(
             "SELECT DISTINCT new_offer_id FROM offer_acceptance_history WHERE student_id=? AND previous_offer_restored_status=?",
             (str(student_id), '__document_acceptance__'))}
@@ -62248,7 +62261,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 if is_current_accepted else ""
             )
             school_options = '<option value="">选择 CRM 学校</option>' + "".join(
-                f'<option value="{int(school["id"])}" {"selected" if offer_school_id == school["id"] else ""}>{esc(school["school_name"])} · {esc(school["city_name"])} · {"公校" if school["sector_key"] == "public" else "私校"}</option>'
+                f'<option value="{int(school["id"])}" {"selected" if offer_school_id == school["id"] else ""}>{esc(school["school_name"])} · {esc(school["city_name"])} · { {"public":"公校","private":"私校"}.get(school["sector_key"],"分类待完善")}</option>'
                 for school in school_choices
             )
             classification_form = f"""
@@ -62289,24 +62302,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     f'{int(transfer_binding["case_id"])}#transfer-v2-offers">'
                     '在 Transfer V2 确认 / Accept / Reject / Withdraw</a>'
                 )
-            elif is_current_accepted:
-                accept_action = f"""
-                  <form method="post" action="/students/{student_id}/offer/{offer['id']}/withdraw-acceptance" data-offer-withdraw-acceptance-form data-ajax-student-tab-form>
-                    <input type="hidden" name="csrf" value="{esc(self.csrf)}">
-                    <label>撤回原因<input name="reason" required placeholder="说明撤回 Acceptance 的原因"></label>
-                    <button class="danger compact" type="submit">撤回最终入读选择</button>
-                  </form>"""
-            elif legacy_accepted_conflict:
-                accept_action = '<span class="offer-accept-disabled">历史最终入读选择待核实</span>'
-            elif not is_current_accepted and classification_resolved:
-                accept_action = f"""
-                  <form method="post" action="/students/{student_id}/offer/{offer['id']}/select-final" data-offer-accept-form>
-                    <input type="hidden" name="csrf" value="{esc(self.csrf)}">
-                    <input type="hidden" name="coe_warning_acknowledged" value="0">
-                    <button class="primary compact" type="submit">设为最终入读学校</button>
-                  </form>"""
-            elif not is_current_accepted:
-                accept_action = '<span class="offer-accept-disabled">完善学校匹配后可选择最终入读学校</span>'
             if transfer_binding is None:
                 document_accepted = str(offer['offer_status'] or '').lower() == 'accepted'
                 document_action = ('<span class="offer-accepted-badge">此 Offer 已接受</span>' if document_accepted else
@@ -62319,7 +62314,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         f'<input type="hidden" name="csrf" value="{esc(self.csrf)}">'
                         '<label>撤回此文件接受的原因<input name="reason" required></label>'
                         '<button class="danger compact" type="submit">撤回此 Offer 接受</button></form>')
-                accept_action = document_action + accept_action
+                if is_current_accepted:
+                    document_action += '<small class="muted">入读依据及其更正请在 CoE 页面核对，Offer 接受记录保留。</small>'
+                accept_action = document_action
             rows.append(
                 f'<article id="offer-card-{offer["id"]}" class="student-file-record offer-record-card{" offer-record-card--muted" if is_muted else ""}" data-offer-current-accepted="{"true" if is_current_accepted else "false"}" data-offer-accept-eligible="{"true" if classification_resolved and not legacy_accepted_conflict else "false"}">'
                 f'<div class="student-file-record-main">'
@@ -62343,32 +62340,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 f'</article>'
             )
         resume_selection = ""
-        if can_workflow_module_save(self.user, "Offer") and is_workflow_v2_active(db):
-            selections = db.all(
-                """SELECT entry.id,cycle.sequence_no FROM cycle_final_acceptances entry
-                     JOIN application_cycles cycle ON cycle.id=entry.application_cycle_id
-                    WHERE entry.student_id=? AND cycle.status='active' AND cycle.cycle_type<>'transfer'
-                      AND entry.acceptance_status='withdrawn'
-                      AND entry.id=(SELECT max(latest.id) FROM cycle_final_acceptances latest
-                                     WHERE latest.application_cycle_id=cycle.id)
-                      AND NOT EXISTS (SELECT 1 FROM cycle_final_acceptances current
-                                       WHERE current.application_cycle_id=cycle.id
-                                         AND current.acceptance_status='active')
-                      AND NOT EXISTS (SELECT 1 FROM audit_logs audit
-                                       WHERE audit.action_type='dashboard_offer_selection_resumed'
-                                         AND audit.module_name='offers'
-                                         AND audit.record_id=CAST(entry.id AS TEXT)
-                                         AND audit.student_id=entry.student_id)""",
-                (student_id,),
-            )
-            resume_selection = "".join(
-                f"""<form method="post" action="/students/{student_id}/offer/resume-selection">
-                  <input type="hidden" name="csrf" value="{esc(self.csrf)}">
-                  <input type="hidden" name="acceptance_id" value="{entry['id']}">
-                  <button class="secondary" type="submit">确认继续选校（周期 #{entry['sequence_no']}）</button>
-                </form>"""
-                for entry in selections
-            )
         offer_cards = "".join(rows) or '<div class="empty">暂无 Offer</div>'
         document_type_options = "".join(
             f'<option value="{esc(kind)}">{esc(module_document_type_label("Offer", kind))}</option>'
@@ -62376,8 +62347,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         )
         return f"""
         <section class="panel offer-panel">
-          <div class="panel-head"><div><h2>Offer 管理</h2><p>上传 Offer 后自动识别学校、日期、有效期和接收定金；识别结果可以人工修改。</p></div><div class="row-actions"><button class="secondary" type="button" data-offer-save-all>保存全部修改</button><button class="secondary" type="button" data-dialog-open="offer-dialog">手动新增</button></div></div>
-          {('<div class="notice warn">当前最终入读 Offer 的接受前状态尚未确认；仍可选择其他有效最终学校，撤回该文件接受前需核实原状态。</div>' if current_requires_history_review else '')}
+          <div class="panel-head"><div><h2>Offer 管理</h2><a class="secondary button-link compact" href="/students/{student_id}/school-materials/corrections">误传材料及归属纠错</a><p>上传 Offer 后自动识别学校、日期、有效期和接收定金；识别结果可以人工修改。</p></div><div class="row-actions"><button class="secondary" type="button" data-offer-save-all>保存全部修改</button><button class="secondary" type="button" data-dialog-open="offer-dialog">手动新增</button></div></div>
+          {('<div class="notice warn">历史入读依据的接受前状态尚未确认；请在 CoE 页面核对原件与关联，Offer 接受记录保留。</div>' if current_requires_history_review else '')}
           <form class="upload-box" method="post" enctype="multipart/form-data" action="/students/{student_id}/offer">
             <input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="offer_status" value="received">
             {transfer_branch_field}<input type="file" name="file" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" required><button class="primary">上传 Offer 并自动识别</button>
@@ -62499,6 +62470,63 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             connection, student_id, submitted_form.get("coe_application_cycle_id"),
         )
 
+    def coe_enrolment_controls(self, student_id):
+        if not (self._can_correct_student_tuition() and allowed(self.user,'coe.manage')):
+            return ''
+        from business_changes.snapshots import read_scope
+        with read_scope(db) as connection:
+            rows=connection.execute("""SELECT a.id,a.school_name_snapshot,a.acceptance_status FROM cycle_final_acceptances a
+                JOIN application_cycles c ON c.id=a.application_cycle_id AND c.student_id=a.student_id
+                WHERE a.student_id=? AND c.status='active' AND c.cycle_type='initial'
+                  AND a.id=(SELECT max(latest.id) FROM cycle_final_acceptances latest WHERE latest.application_cycle_id=c.id)""",(student_id,)).fetchall()
+        forms=[]
+        for row in rows:
+            if row['acceptance_status']=='active':
+                forms.append(f'''<details class="panel"><summary>核对主课入读依据：{esc(row['school_name_snapshot'])}</summary>
+                  <form method="post" action="/students/{student_id}/coe/enrolment/{row['id']}/withdraw" data-ajax-student-tab-form data-refresh-tab="coe" class="stack-form">
+                    <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                    <label>更正原因<input name="reason" required maxlength="600"></label>
+                    <button class="secondary" type="submit">撤回这条入读依据</button>
+                    <small>Offer接受、原件及历史保留；已有课程或财务采用时须先核对对应业务。</small>
+                  </form></details>''')
+            elif row['acceptance_status']=='withdrawn':
+                forms.append(f'''<form method="post" action="/students/{student_id}/offer/resume-selection" class="row-actions">
+                  <input type="hidden" name="csrf" value="{esc(self.csrf)}"><input type="hidden" name="acceptance_id" value="{row['id']}">
+                  <button class="secondary">继续核对录取与入读</button></form>''')
+        return ''.join(forms)
+
+    def student_coe_enrolment_withdraw(self, method, student_id, acceptance_id):
+        if method!='POST':return self.json_response({'ok':False,'message':'不支持此请求方式。'},405)
+        from business_changes.authorization import current_staff
+        from business_changes.commands import TransactionView
+        from workflow_offer_events import withdraw_final_acceptance
+        try:
+            with db.transaction() as connection:
+                actor=current_staff(connection,self.user['id'])
+                with db.business_scope(TransactionView(connection,'bc_staff_authorization')):
+                    if not (can_workflow_module_save(actor,'Offer') and can_perform_revenue_action(actor,'cases/tuition') and allowed(actor,'coe.manage')):
+                        raise PermissionError('没有核对入读依据及财务关联的权限。')
+                reason=str(self.form.get('reason') or '').strip()
+                if not reason or len(reason)>600:raise ValueError('请填写更正原因。')
+                row=connection.execute("""SELECT a.*,e.legacy_offer_id FROM cycle_final_acceptances a
+                    JOIN application_cycles c ON c.id=a.application_cycle_id AND c.student_id=a.student_id
+                    JOIN offer_received_events e ON e.id=a.offer_received_event_id
+                    WHERE a.id=? AND a.student_id=? AND a.acceptance_status='active'
+                      AND c.status='active' AND c.cycle_type='initial'""",(int(acceptance_id),student_id)).fetchone()
+                if not row:raise ValueError('入读依据已变化，请刷新页面。')
+                for table,field in (('revenue_school_courses','enrolment_component_id'),('revenue_tuition_facts','enrolment_component_id'),
+                                    ('revenue_commission_lines','enrolment_component_id'),('revenue_commencement_facts','enrolment_component_id')):
+                    if connection.execute('SELECT 1 FROM '+table+' WHERE '+field+' IN (SELECT id FROM revenue_enrolment_components WHERE final_acceptance_id=?) LIMIT 1',(row['id'],)).fetchone():
+                        raise ValueError('该入读依据已被课程或财务采用，请先核对课程与财务，不能直接撤回。')
+                current=get_current_accepted_offer(connection,student_id)
+                if current and current.offer_id==row['legacy_offer_id']:
+                    withdraw_accepted_offer(connection,student_id,dict(actor,can_manage_offer=True),reason=reason)
+                else:
+                    withdraw_final_acceptance(connection,row['application_cycle_id'],occurred_at=now_iso(),actor_user_id=actor['id'],reason=reason)
+        except (ValueError,PermissionError,OfferAcceptanceError) as exc:
+            return self.json_response({'ok':False,'message':str(exc)},403 if isinstance(exc,PermissionError) else 400)
+        return self.json_response({'ok':True,'message':'入读依据已撤回，Offer接受、原件与历史保留。'})
+
     def coe_panel(self, student_id, records):
         lifecycle_contexts = getattr(self, "_student_lifecycle_record_contexts", {})
         records = [self.backfill_coe_record(student_id, record) for record in records]
@@ -62605,13 +62633,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         cycle_selection = self.coe_cycle_selection_html(student_id) if not transfer_branch_field else ""
         return f"""
         <section class="panel coe-panel">
-          <div class="panel-head"><div><h2>COE + OSHC</h2><p>上传文件后进入 Review，确认文件类型后保存到对应分区。</p></div><button class="secondary" type="button" data-dialog-open="coe-dialog">手动新增</button></div>
+          <div class="panel-head"><div><h2>COE + OSHC</h2><a class="secondary button-link compact" href="/students/{student_id}/school-materials/corrections">误传材料及归属纠错</a><p>上传文件后进入 Review，确认文件类型后保存到对应分区。</p></div><button class="secondary" type="button" data-dialog-open="coe-dialog">手动新增</button></div>
           <form class="upload-box coe-upload-box" method="post" enctype="multipart/form-data" action="/students/{student_id}/coe">
             <input type="hidden" name="csrf" value="{esc(self.csrf)}">
             {transfer_branch_field}
             <input type="file" name="file" accept=".pdf,.docx,.txt,.jpg,.jpeg,.png" multiple required>
             <button class="primary" type="submit">上传 COE / CAAW / OSHC / Letter of Confirmation 并进入 Review</button>
           </form>
+          {self.coe_enrolment_controls(student_id)}
           {self.student_course_tuition_panel(student_id)}
           <div class="coe-sections">{coe_section}{caaw_section}{oshc_section}{letter_section}</div>
         </section>
@@ -71598,7 +71627,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             with read_scope(db) as connection:
                 course_review_available = available(connection)
                 if course_review_available:
-                    course_school_choices = [dict(row) for row in connection.execute("SELECT id,school_name FROM schools WHERE COALESCE(deleted_at,'')='' ORDER BY school_name")]
+                    course_school_choices = [dict(row) for row in connection.execute("SELECT id,school_name,sector_key,state FROM schools WHERE COALESCE(deleted_at,'')='' ORDER BY school_name")]
                     for cycle in connection.execute("SELECT id FROM application_cycles WHERE student_id=? AND status='active' AND cycle_type<>'transfer'", (student_id,)):
                         course_offer_choices.extend(accepted_course_offers(connection,student_id,cycle[0]))
         target_label = config.get("target_label")
@@ -71668,7 +71697,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                   </section>
                   <section class="review-preview-workspace upload-review-preview-panel" data-review-preview-root data-preview-src="{preview_src}?size=large" data-download-url="{preview_src}/download" data-preview-title="{esc(file_meta["original_name"])}">
                     <div class="review-preview-head">
-                      <div><strong>文件预览 / Document Preview</strong><small>对照右侧原件核对左侧字段；两边可分别滚动。</small></div>
+                      <div><strong>文件预览 / Document Preview</strong><small>完整查看当前页，对照原件核对字段；多页文件可切换页码。</small></div>
                       <div class="review-preview-head-actions">
                         <button type="button" class="secondary mini" data-review-preview-fullscreen>全屏查看</button>
                         <button type="button" class="ghost mini" data-review-preview-open-window>新窗口打开</button>
@@ -72697,6 +72726,69 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if picker_context is not None
             else f"已确认并保存 {len(saved)} 个文件")+tuition_notice+"; ".join(visa_review_skipped),
         )
+
+    def student_school_material_corrections(self, method, student_id):
+        from business_changes.authorization import current_staff
+        from business_changes.commands import TransactionView,Mutation
+        from business_changes.contracts import Subject
+        from business_changes.domain import run_domain_write
+        from school_material_corrections import material_state,correct_material
+        if method not in {'GET','POST'}:
+            return self.error_page('不支持此请求方式。',405)
+        if not (can_workflow_module_save(self.user,'Offer') and allowed(self.user,'coe.manage')):
+            return self.error_page('没有学校材料纠错权限。',403)
+        if db.one('SELECT 1 FROM students WHERE student_id=? AND deleted_at IS NULL',(student_id,)) is None:
+            return self.error_page('学生不存在。',404)
+        target=f'/students/{student_id}/school-materials/corrections'
+        if method=='POST':
+            try:
+                kind=str(self.form.get('kind') or '')
+                record_id=int(self.form.get('record_id') or 0)
+                action=str(self.form.get('action') or '')
+                cycle=int(self.form.get('target_cycle') or 0) or None
+                with db.transaction() as connection:
+                    actor=current_staff(connection,self.user['id'])
+                    with db.business_scope(TransactionView(connection,'bc_staff_authorization')):
+                        if not (can_workflow_module_save(actor,'Offer') and allowed(actor,'coe.manage')):
+                            raise PermissionError('学校材料纠错权限已变化。')
+                    def capture(view):return material_state(view,student_id,kind,record_id)
+                    def describe(view,result,before,after):
+                        scopes=[Subject('student',str(student_id)),Subject('dashboard','workflow'),Subject('dashboard','overview'),
+                                Subject('module','offers'),Subject('module','coe')]
+                        for cid in {before['record'].get('application_cycle_id'),after['record'].get('application_cycle_id')} - {None}:
+                            scopes.append(Subject('application_cycle',str(cid)))
+                        return Mutation('school_material.corrected',Subject('school_material',kind+':'+str(record_id)),tuple(scopes))
+                    run_domain_write(connection,event_type='school_material.corrected',actor_kind='user',actor_ref=str(actor['id']),capture=capture,
+                        operation=lambda view:correct_material(view,student_id=student_id,kind=kind,record_id=record_id,action=action,
+                            revision=self.form.get('revision',''),reason=self.form.get('reason',''),actor_id=actor['id'],stamp=now_iso(),target_cycle=cycle),
+                        describe=describe)
+            except (ValueError,PermissionError) as exc:
+                return self.flash_redirect(target,str(exc),'error')
+            return self.flash_redirect(target,'材料归属或状态已更正；原件和历史记录保留。')
+        cards=[]
+        from business_changes.snapshots import read_scope
+        with read_scope(db) as connection:
+            cycles=list(connection.execute('SELECT id,cycle_type,sequence_no,status FROM application_cycles WHERE student_id=? ORDER BY sequence_no DESC',(student_id,)))
+            options='<option value="">仅调整归属时选择</option>'+''.join(
+                f'<option value="{row[0]}">周期 #{row[0]} · {esc(row[1])} #{row[2]} · {esc(row[3])}</option>' for row in cycles)
+            for kind,table in (('offer','offers'),('coe','coe_oshc')):
+                for record in connection.execute('SELECT id FROM '+table+' WHERE student_id=? ORDER BY id DESC',(student_id,)).fetchall():
+                    state=material_state(connection,student_id,kind,record[0]);row=state['record']
+                    label=row.get('document_type') or row.get('document_kind') or 'Offer'
+                    status=row.get('offer_status') or row.get('document_kind') or ''
+                    cards.append(f'''<article class="panel"><h3>{esc(label)} #{row['id']} · {esc(row.get('school_name') or '学校待核对')}</h3>
+                      <p>所属周期 #{row.get('application_cycle_id') or '未关联'} · {esc(status)}</p>
+                      <form method="post" class="dialog-grid"><input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                        <input type="hidden" name="kind" value="{kind}"><input type="hidden" name="record_id" value="{row['id']}">
+                        <input type="hidden" name="revision" value="{state['revision']}">
+                        <label>纠错操作<select name="action"><option value="void">作废误传材料（保留原件）</option><option value="restore">恢复本入口作废的材料</option><option value="reassign">调整所属周期</option></select></label>
+                        <label>目标周期<select name="target_cycle">{options}</select></label>
+                        <label>核对依据及原因<input name="reason" required maxlength="600"></label>
+                        <div><button class="secondary" type="submit">确认纠错</button></div>
+                      </form></article>''')
+        body=f'''<section class="panel"><h2>学校材料纠错</h2><p>作废可恢复，原文件及业务历史保留。已被正式入读或财务业务采用的材料须先核对对应业务。</p>
+          <a class="secondary button-link" href="/students/{student_id}?tab=offer">返回学生档案</a></section><div class="stack-form">{''.join(cards) or '<p>暂无学校材料</p>'}</div>'''
+        return self.send_html(page('学校材料纠错',body,self.user,self.csrf,'students',nas.status()))
 
     def student_source_material_withdraw(self, method, student_id, document_id):
         from student_document_lifecycle import set_document_withdrawn

@@ -1079,6 +1079,11 @@ class BusinessChangeSyncMixin:
             actor=fresh_actor(view)
             if not g['can_review_module_action'](actor,module_key,'confirm'):
                 raise PermissionError('你没有确认当前模块材料的权限。')
+            if module_key=='COE + OSHC' and any(str(key).startswith('course_mode_') and value for key,value in self.form.items()):
+                with database.business_scope(view):
+                    if not (g['can_workflow_module_save'](actor,'Offer')
+                            and g['can_perform_revenue_action'](actor,'cases/tuition') and g['allowed'](actor,'coe.manage')):
+                        raise PermissionError('确认课程入读及学费需要Offer、CoE及课程财务权限。')
             if document_type not in g['module_document_types'](module_key):
                 raise ValueError('请选择当前模块允许的 DocumentType。')
         def command(conn,path,version,after):
