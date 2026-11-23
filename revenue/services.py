@@ -462,6 +462,9 @@ class RevenueService:
     def ensure_visa_fee(self, case_uid, account_uid, item, actor, key, rule_uid):
         with self.repository.fee_write_transaction():
             case = self.repository.require_by_uid("revenue_commercial_cases", case_uid)
+            from revenue.historical_receipts import blocks_repricing
+            if blocks_repricing(self.connection, case["application_cycle_id"], "student_visa", item.get("visa_case_id")):
+                return "NEEDS_ATTENTION", []
             visa_id = item["visa_case_id"]
             if not self.connection.execute(
                 "SELECT 1 FROM visa_cases WHERE id=? AND application_cycle_id=?",
@@ -544,6 +547,11 @@ class RevenueService:
         def operation():
             case = self.repository.require_by_uid("revenue_commercial_cases", commercial_case_uid)
             account = self.repository.require_by_uid("revenue_billing_accounts", billing_account_uid)
+            from revenue.historical_receipts import blocks_repricing, fee_kind
+            if any(blocks_repricing(self.connection, case["application_cycle_id"],
+                                    fee_kind(item.get("milestone_code")), item.get("visa_case_id"))
+                   for item in items):
+                raise ValueError("已有历史收款核对，请保留历史金额，不得按现价重新收费")
             cycle = self.connection.execute(
                 "SELECT cycle_type FROM application_cycles WHERE id=?",
                 (case["application_cycle_id"],),

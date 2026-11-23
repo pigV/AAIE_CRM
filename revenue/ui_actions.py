@@ -79,6 +79,45 @@ class RevenueUIActions:
             return configured_write_root(legacy, configuration)
         return configured_root(configuration)
 
+    def historical_collection(self, operation, form, upload=None):
+        from decimal import Decimal, InvalidOperation
+        from revenue.historical_receipts import HistoricalReceiptService
+        service = HistoricalReceiptService(self.repository, self.actor_user_id, self.actor_role)
+        key = self._required(form, "idempotency_key")
+        if operation == "save":
+            values = {k: self._optional(form, k) for k in (
+                "student_id", "application_cycle_id", "service_kind", "received_date", "currency_code",
+                "method_code", "source_note", "contract_state", "visa_case_id", "expected_revision", "review_uid")}
+            values["claimed_received"] = str(form.get("claimed_received")) == "1"
+            for name in ("agreed_aud_cents", "actual_cents", "settled_aud_cents"):
+                raw = str(form.get(name) or "").strip()
+                if not raw:
+                    values[name] = None
+                    continue
+                import re
+                if not re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2})?", raw):
+                    raise ValueError("金额须为最多两位小数的非负数")
+                values[name] = int(Decimal(raw) * 100)
+            return service.save(values, key)
+        if operation == "confirm":
+            return service.confirm(self._required(form,"review_uid"), int(self._required(form,"revision")), key,
+                                   acknowledged=str(form.get("acknowledged"))=="1")
+        if operation == "cancel":
+            return service.cancel(self._required(form,"review_uid"), int(self._required(form,"revision")), key)
+        if operation != "evidence" or upload is None:
+            raise ValueError("请选择历史凭证")
+        service._admin()
+        kind = self._required(form,"evidence_kind")
+        if kind not in {"payment_evidence", "external_receipt"}: raise ValueError("凭证类型无效")
+        staged = stage_revenue_upload(self.document_root / "historical",upload,{".pdf",".png",".jpg",".jpeg"},max_bytes=20*1024*1024)
+        try:
+            with self.repository.transaction():
+                document=self.service.register_document("historical_"+kind,str(staged.path),staged.sha256,staged.mime_type,staged.size_bytes,"upload",self.actor_user_id,key+":document")
+                return service.attach(self._required(form,"review_uid"),document["uid"],kind,key)
+        except BaseException:
+            discard_unregistered_upload(staged)
+            raise
+
     def upload_contract(self, form: dict, upload) -> dict:
         key = self._required(form, "idempotency_key")
         staged = stage_revenue_upload(

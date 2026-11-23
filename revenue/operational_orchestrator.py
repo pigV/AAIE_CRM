@@ -117,6 +117,9 @@ class RevenueOperationalOrchestrator:
             case = self.repository.require_by_uid(
                 "revenue_commercial_cases", event["commercial_case_uid"]
             )
+            from revenue.historical_receipts import blocks_repricing
+            if blocks_repricing(self.connection, cycle.id, "client_service"):
+                return {**event, "fee_status":"HISTORICAL_REVIEW", "reason":"historical_collection_review", "fee_items":[]}
             legacy_transfer = False
             if is_transfer:
                 import json
@@ -278,6 +281,10 @@ class RevenueOperationalOrchestrator:
         case = self.repository.require_by_uid(
             "revenue_commercial_cases", event["commercial_case_uid"]
         )
+        from revenue.historical_receipts import blocks_repricing
+        from revenue.visa_fee_policy import visa_subclass
+        if visa_subclass(dict(visa)) == "500" and blocks_repricing(self.connection, cycle.id, "student_visa", fact.id):
+            return {**event, "fee_status":"HISTORICAL_REVIEW", "reason":"historical_collection_review", "visa_fee_cents":None, "fee_items":[]}
         fee_facts = self._client_fee_facts_for_visa(cycle, case, visa)
         authoritative_contracts = self._active_fully_executed_contracts(
             fact.application_cycle_id

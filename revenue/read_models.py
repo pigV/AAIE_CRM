@@ -1076,6 +1076,10 @@ class RevenueReadModels:
                        "href": self.cases_href + "?" + urlencode({"student": sid})}
                 if not cases:
                     row["missing_case"] = self._missing_case_info(student["missing_case_reason"])
+            from revenue.historical_receipts import reviews, summary
+            historical = [r for r in reviews(self.connection, student_id=sid) if r["status"] != "cancelled"]
+            if historical and not cases:
+                row["billing_status"] = " / ".join(dict.fromkeys(summary(r) for r in historical))
             rows.append(row)
         def link(number):
             return self.cases_href + "?" + urlencode({"q": q, "filter": active_filter, "page": number})
@@ -1897,6 +1901,18 @@ class RevenueReadModels:
                 if possible_duplicate:
                     totals["possible_duplicate"] = True
                 result[group] = totals
+        from revenue.historical_receipts import reviews, summary
+        cycle = self.connection.execute("SELECT application_cycle_id FROM revenue_commercial_cases WHERE id=?", (case_id,)).fetchone()
+        for record in reviews(self.connection, cycle[0]) if cycle else []:
+            if record["status"] == "cancelled": continue
+            key = "visa_service_fee" if record["service_kind"] == "student_visa" else "client_service_fee"
+            raw = (record["currency_code"] or "币种待核实") + (" " + format(record["actual_cents"] / 100, ",.2f") if record["actual_cents"] is not None else " 金额待核实")
+            groups = (key, "student_visa_fee") if record["service_kind"] == "student_visa" else (key,)
+            for group in groups:
+                if result.get(group) is not None:
+                    result[group]["historical_note"] = summary(record) + " · " + raw
+                else:
+                    result[group] = {"received_cents":0,"outstanding_cents":0,"historical_label":summary(record)+" · "+raw}
         if other_count:
             result["other_fee_count"] = other_count
         return result
@@ -2358,8 +2374,11 @@ class RevenueReadModels:
             (case_id,),
         ).fetchone()
         fee_count, final_base, received = map(int, totals)
+        from revenue.historical_receipts import reviews, summary
+        cycle_id = self.connection.execute("SELECT application_cycle_id FROM revenue_commercial_cases WHERE id=?", (case_id,)).fetchone()
+        historical = [r for r in reviews(self.connection, cycle_id[0]) if r["status"] != "cancelled"] if cycle_id else []
         if not fee_count:
-            return "未建立"
+            return " / ".join(dict.fromkeys(summary(r) for r in historical)) or "未建立"
         if received <= 0:
             return "待收款"
         if received < final_base:

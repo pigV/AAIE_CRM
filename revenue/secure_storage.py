@@ -99,6 +99,20 @@ def _open_directory(value, *, create=False, writable_mount=None):
         # may anchor this exception, and it must pass the managed checks.
         writable_mount = _DATA_MOUNT
         private_root = _PRODUCTION_REVENUE_ROOT
+    elif writable_mount is None and os.environ.get('AAIE_CRM_ENV') == 'staging':
+        # Opt-in Staging already validates source/root/ports and rejects aliases.
+        # Do not grant the shared-mount exception to fixtures or arbitrary paths.
+        from staging_environment import ACTIVE, Staging, IsolationError
+        if isinstance(ACTIVE, Staging):
+            try:
+                stage_root = ACTIVE.check(ACTIVE.root / 'revenue_documents')
+            except IsolationError as exc:
+                raise StorageUnavailable() from exc
+            if (stage_root.is_relative_to(_DATA_MOUNT / 'AAIE_CRM/worktrees')
+                    and os.environ.get('REVENUE_SECURE_STORAGE_ROOT') == str(stage_root)
+                    and path.is_relative_to(stage_root)):
+                writable_mount = _DATA_MOUNT
+                private_root = stage_root
     fd = -1
     try:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC

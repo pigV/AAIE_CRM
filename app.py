@@ -27699,7 +27699,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/mobile$", self.mobile_dashboard),
                 (r"^/revenue$", self.revenue_workspace),
                 (r"^/revenue/initialization$", self.revenue_initialization),
-                (r"^/revenue/(contracts/upload|contracts/manual-extraction|contracts/extraction/review|contracts/activate|contracts/school/(?:bind|register|mail-recipient|upload|preview|activate|toorak-draft|toorak-preview|toorak-activate|toorak-analyze|toorak-review|configurable-draft|configurable-analyze|configurable-review|configurable-preview|configurable-activate|stage)|master-agent/import|master-agent/match/confirm|master-agent/invoice|master-agent/payment|direct-commission/claim|direct-commission/invoice|direct-commission/payment|billing/payment|billing/receipt|cases/tuition|cases/commencement)$", self.revenue_action),
+                (r"^/revenue/(contracts/upload|contracts/manual-extraction|contracts/extraction/review|contracts/activate|contracts/school/(?:bind|register|mail-recipient|upload|preview|activate|toorak-draft|toorak-preview|toorak-activate|toorak-analyze|toorak-review|configurable-draft|configurable-analyze|configurable-review|configurable-preview|configurable-activate|stage)|master-agent/import|master-agent/match/confirm|master-agent/invoice|master-agent/payment|direct-commission/claim|direct-commission/invoice|direct-commission/payment|billing/payment|billing/receipt|historical/(?:save|confirm|cancel|evidence)|cases/tuition|cases/commencement)$", self.revenue_action),
                 (r"^/revenue/contracts/upload-school$", self.revenue_school_contract_upload),
                 (r"^/revenue/institution-commission-drafts/([^/]+)$", self.revenue_institution_commission_draft),
                 (r"^/revenue/vic-rcti/([a-z0-9-]+)(?:/([a-z0-9-]+))?$", self.revenue_vic_rcti),
@@ -27712,6 +27712,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/revenue/cases/([^/]+)/toorak-settlement/(delivery|payment|reconcile)$", self.revenue_case_toorak_settlement),
                 (r"^/revenue/cases/([^/]+)/toorak-claim/(evidence|preview|issue|invoice)$", self.revenue_case_toorak_claim),
                 (r"^/revenue/cases/([^/]+)/toorak-forecast/(preview|save)$", self.revenue_case_toorak_forecast),
+                (r"^/(?:mobile/)?revenue/historical-receipts$", self.revenue_historical_receipts),
                 (r"^/revenue/cases/([^/]+)/billing/(payment|receipt)$", self.revenue_case_billing_action),
                 (r"^/revenue/cases/([^/]+)/billing$", self.revenue_case_billing),
                 (r"^/revenue/cases/([^/]+)$", self.revenue_case_workbench),
@@ -29409,6 +29410,25 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                               HTTPStatus.BAD_REQUEST if error else HTTPStatus.OK,
                               headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop")
 
+    def revenue_historical_receipts(self, method):
+        if not can_access_revenue(self.user):
+            return self.error_page("无权限访问该功能。", HTTPStatus.FORBIDDEN)
+        if method != "GET":
+            return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
+        from revenue.historical_receipt_views import page_data, render
+        mobile = self.path.startswith("/mobile/")
+        connection = db.connect()
+        try:
+            data = page_data(connection, (self.query.get("student") or [""])[0],
+                             (self.query.get("review") or [""])[0])
+            body = render(data, self.csrf, new_token(), mobile=mobile, can_administer=is_revenue_admin(self.user))
+        finally:
+            db._release_connection(connection)
+        if mobile:
+            return self.send_html(self.mobile_shell("历史收款核对", body, ""))
+        return self.send_html(page("历史收款核对", body, self.user, self.csrf, REVENUE_MODULE_KEY, nas.status()),
+                              presentation_surface="desktop")
+
     def revenue_initialization(self, method):
         if not is_revenue_admin(self.user):
             return self.error_page("无权限访问该功能。", HTTPStatus.FORBIDDEN)
@@ -30380,8 +30400,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if payment_json:
                 return self.json_response({"ok": False, "message": StorageUnavailable.message}, HTTPStatus.SERVICE_UNAVAILABLE)
             return self.error_page(StorageUnavailable.message, HTTPStatus.SERVICE_UNAVAILABLE)
+        except PermissionError:
+            return self.error_page("无权限执行该操作。", HTTPStatus.FORBIDDEN)
         except ValueError as error:
             detail = str(error)
+            if action_name.startswith("historical/"):
+                return self.error_page(detail if any("\u4e00" <= ch <= "\u9fff" for ch in detail) else "核对资料无效或版本已变化，请刷新后重试。", HTTPStatus.BAD_REQUEST)
             if payment_json:
                 if "allocation exceeds Fee Item final base" in detail:
                     message = "本次服务费不能超过当前未收金额。"
@@ -30442,6 +30466,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
             if upload is None:
                 raise ValueError("请选择需要上传的文件。")
+        if action_name == "historical/evidence":
+            upload = next((f for f in self.files if f.field_name == "historical_evidence" and f.filename), None)
         if action_name == "billing/payment":
             upload = next(
                 (
@@ -30715,7 +30741,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             elif action_name == "master-agent/payment":
                 actions.record_master_agent_payment(self.form)
                 destination, message = "/revenue/master-agent", "一级代理收款已确认并对账。"
+            elif action_name.startswith("historical/"):
+                result = actions.historical_collection(action_name.split("/")[1], self.form, upload)
+                sid = result.get("student_id")
+                if not sid:
+                    sid = connection.execute("SELECT student_id FROM revenue_historical_receipts WHERE uid=?", (result["uid"],)).fetchone()[0]
+                destination = "/revenue/historical-receipts?" + urlencode({"student":sid})
+                message = "历史收款核对已保存。" if action_name != "historical/confirm" else "历史实际收款已确认；没有新增收费或发票。"
             elif action_name == "billing/payment":
+                if upload is None:
+                    raise ValueError("普通收款必须上传付款凭证；历史资料请使用历史收款核对。")
                 actions.record_client_payment(self.form, upload)
                 destination = (
                     desktop_case_url(scoped_case_uid)
@@ -31385,6 +31420,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         document = db.one("SELECT * FROM revenue_documents WHERE uid=?", (document_uid,))
         if not document:
             return self.error_page("Revenue 文件不存在。", HTTPStatus.NOT_FOUND)
+        if document["document_kind"] in {"historical_payment_evidence", "historical_external_receipt"}:
+            from revenue.historical_receipts import can_view_evidence
+            connection = db.connect()
+            try:
+                visible = can_view_evidence(connection, document_uid)
+            finally:
+                db._release_connection(connection)
+            if not visible:
+                return self.error_page("该学生凭证当前不可访问。", HTTPStatus.FORBIDDEN)
         from revenue.vic_rcti_reconciliation import DOCUMENTS as VIC_RCTI_DOCUMENTS
         if document["document_kind"] in VIC_RCTI_DOCUMENTS:
             return self.error_page("请从维州 RCTI 记录打开原件。", HTTPStatus.FORBIDDEN)

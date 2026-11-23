@@ -227,8 +227,10 @@ class RevenueWorkbench:
             "exceptions": exceptions,
             "timeline_audit": audit,
         }
+        from revenue.historical_receipts import reviews
         return {
             "schema_version": "revenue.v1",
+            "historical_collections": reviews(self.connection, cycle["id"]),
             "case": case,
             "cycle": cycle,
             "title": "收费与佣金档案",

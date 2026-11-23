@@ -32,6 +32,7 @@ from revenue.visa_fee_policy import (
 EXCEPTION_MESSAGES = {
     "signed_visa_package_required": "首次学生签证套餐待核对，请确认双方签妥的 A$2,400 套餐包含学生签证递交。",
     "visa_fee_conflict": "签证收费有重复或金额不同，请核对现有收费。",
+    "historical_collection_review": "已有历史收款核对，保留原金额，不能按现价重新生成收费。",
     "missing_student_authority": "Application Cycle has no authoritative Student.",
     "ambiguous_engagement_contract": "Multiple FullyExecuted contracts have no authoritative supersession.",
     "missing_engagement_contract": "No FullyExecuted engagement contract is authoritative for client fee evaluation.",
@@ -248,6 +249,9 @@ class ControlledOnboardingService:
                 "rule_version_uid": None,
                 "net_cents": None,
             }, ["unresolved_fee_classification"]
+        from revenue.historical_receipts import blocks_repricing
+        if blocks_repricing(self.connection, cycle["id"], "client_service"):
+            return {"status":"blocked", "reason":"historical_collection_review", "rule_version_uid":None, "net_cents":None}, ["historical_collection_review"]
         he_category = None
         if cycle["education_stream"] == "higher_education":
             he_category = self._he_category(authority.get("higher_education_applications", []))

@@ -888,6 +888,11 @@ def render_revenue_workspace_page(
         '<p>合同上传、对账单导入、正式申领与收款确认请在桌面端完成。</p></aside>'
         if mobile else _render_workspace_action(data, csrf, action_token)
     )
+    if data.get("title") in {"学生收费与佣金档案", "客户收费"}:
+        from urllib.parse import urlencode
+        selected_sid = (data.get("student_detail") or {}).get("student_id") or (data.get("search_controls") or {}).get("q", "")
+        historical_href = ("/mobile/revenue/historical-receipts" if mobile else "/revenue/historical-receipts") + ("?" + urlencode({"student":selected_sid}) if selected_sid else "")
+        action_content = '<section class="revenue-panel"><a href="' + escape(historical_href, quote=True) + '">历史收款与凭证核对</a></section>' + action_content
     multi = data.get("multischool_commission")
     if (not mobile and data.get("can_administer") and data.get("school_commission")
             and not multi):
@@ -1464,9 +1469,12 @@ def render_revenue_case_workbench(
                 ("付款凭证", evidence),
                 ("收据", receipt),
             ]))
+        empty_message = "暂无收款记录"
+        if any(r["status"] != "cancelled" for r in data.get("historical_collections") or []):
+            empty_message = "暂无普通收费收款记录；历史收款及凭证见上方核对。"
         return (
             '<div class="revenue-history-group"><h3>收款记录</h3>'
-            + ("".join(payment_cards) or '<p class="revenue-empty">暂无收款记录</p>')
+            + ("".join(payment_cards) or '<p class="revenue-empty">' + empty_message + '</p>')
             + '</div>'
         )
 
@@ -1605,6 +1613,8 @@ def render_revenue_case_workbench(
     summary = data.get("business_summary") or {}
     student_name = str(summary.get("student_name") or "姓名待关联")
     student_id = str(summary.get("student_id") or "—")
+    from revenue.historical_receipt_views import render_case_summary
+    historical_html = render_case_summary(data.get("historical_collections") or [], student_id, mobile)
     return f"""
     <link rel="stylesheet" href="/assets/revenue.css">
     <main class="revenue-workspace revenue-case-workbench{variant}" data-revenue-schema="{escape(str(data['schema_version']))}">
@@ -1612,6 +1622,7 @@ def render_revenue_case_workbench(
       <header class="revenue-page-heading revenue-case-identity"><div><span class="revenue-eyebrow">{access_badge}</span><h1>{escape(str(data['title']))}</h1><p><strong>{escape(student_name)}</strong><span>{escape(student_id)}</span></p></div><a class="revenue-back-link" href="{escape(case_list_href, quote=True)}">返回档案列表</a></header>
       <nav class="revenue-case-contexts" aria-label="权威业务上下文">{contexts}</nav>
       {actions}
+      {historical_html}
       <div class="revenue-case-sections">{''.join(sections)}</div>
       {other_operations}
     </main>"""
@@ -1710,6 +1721,8 @@ def render_revenue_workspace(
     def fee_text(fee):
         if fee is None:
             return "尚未创建收费"
+        if fee.get("historical_label"):
+            return escape(fee["historical_label"])
         received, due = fee["received_cents"], fee["outstanding_cents"]
         gst = fee.get("gst_received_cents", 0)
         amount = f"{aud(received)}（另收 GST {aud(gst)}）" if gst else aud(received)
@@ -1722,6 +1735,8 @@ def render_revenue_workspace(
 
     def fee_with_warning(fee):
         value = fee_text(fee)
+        if fee and fee.get("historical_note"):
+            value += "；历史核对：" + escape(fee["historical_note"])
         if fee and fee.get("possible_duplicate"):
             value += "（疑似重复收费，待核对）"
         return value

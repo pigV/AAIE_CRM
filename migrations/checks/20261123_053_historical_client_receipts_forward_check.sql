@@ -1,0 +1,1 @@
+SELECT (SELECT COUNT(*)=2 FROM sqlite_master WHERE type='table' AND name IN ('revenue_historical_receipts','revenue_historical_receipt_evidence')) AND (SELECT COUNT(*)=4 FROM sqlite_master WHERE type='trigger' AND name IN ('historical_receipt_confirmed_no_update','historical_receipt_no_delete','historical_receipt_evidence_no_update','historical_receipt_evidence_no_delete'));
