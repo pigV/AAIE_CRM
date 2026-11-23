@@ -116,3 +116,35 @@ def ensure_revenue_case_for_parent_submission(
                             "initiated_by_user_id": int(issuer),
                             "application_cycle_id": int(application_cycle_id)},
     )
+
+
+def retire_empty_initial_case(connection, old_cycle_id, replacement_cycle_id, actor_user_id, occurred_at):
+    """Retain an audited empty historical container after exact Transfer takeover."""
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(revenue_commercial_cases)')}
+    if not {'id','uid','status','closed_at'}.issubset(columns):
+        return None
+    from student_lifecycle.transfer_state import cycle_has_financial_facts
+    if cycle_has_financial_facts(connection, old_cycle_id):
+        raise ValueError('原申请周期已有财务记录，不能自动关闭或接管。')
+    match = connection.execute('''SELECT old.student_id FROM application_cycles old
+        JOIN application_cycles replacement ON replacement.student_id=old.student_id
+        WHERE old.id=? AND replacement.id=? AND old.status='closed'
+          AND old.outcome='superseded_by_transfer' AND old.cycle_type='initial'
+          AND replacement.cycle_type='transfer' AND replacement.status='active' ''',
+        (old_cycle_id, replacement_cycle_id)).fetchone()
+    if not match:
+        raise ValueError('原申请轮次与替代转学轮次归属不一致。')
+    case = connection.execute('SELECT uid,id FROM revenue_commercial_cases WHERE application_cycle_id=?',
+                              (old_cycle_id,)).fetchone()
+    if not case:
+        return None
+    def operation():
+        connection.execute("UPDATE revenue_commercial_cases SET status='closed',closed_at=? WHERE id=?",
+                           (occurred_at, case[1]))
+        return {'uid':case[0], 'status':'closed', 'reason':'empty_initial_superseded_by_transfer',
+                'old_cycle_id':int(old_cycle_id), 'replacement_cycle_id':int(replacement_cycle_id)}
+    return RevenueRepository(connection, now=lambda:occurred_at).command(
+        idempotency_key=f'empty-initial-case-retired:{int(old_cycle_id)}:{int(replacement_cycle_id)}',
+        command_type='empty_initial_case_retired', aggregate_type='commercial_case',
+        payload={'old_cycle_id':int(old_cycle_id),'replacement_cycle_id':int(replacement_cycle_id)},
+        actor_user_id=actor_user_id, operation=operation)

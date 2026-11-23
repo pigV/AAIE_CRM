@@ -171,12 +171,15 @@ class ContractSourceSelectorTests(unittest.TestCase):
         method.body = method.body[:boundary] + [ast.Return(value=ast.Name(id='transfer_source_fields', ctx=ast.Load()))]
         import sqlite3
         import transfer_v2_views
+        from student_lifecycle import transfer_intake, transfer_intake_views
+        from html import escape
         namespace = dict(
             db=SimpleNamespace(connect=lambda: self.db, _release_connection=lambda connection: None),
             can_generate_contract=lambda user: True, can_manage_transfer_contract=lambda user: True,
             restrict_contract_creation_for_transfer_context=lambda *args: False,
             published_contract_generation_active=lambda: True,
             transfer_source_authority=source, transfer_v2_views=transfer_v2_views,
+            transfer_intake=transfer_intake, transfer_intake_views=transfer_intake_views, esc=escape,
             transfer_contract_authority=SimpleNamespace(commercials=lambda *args, **kwargs: {'base_fee':'2400','final_fee':'2400'}),
             now_iso=lambda: '2026-10-31', format_money=str, money_decimal=str, sqlite3=sqlite3,
         )

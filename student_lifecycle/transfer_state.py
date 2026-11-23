@@ -335,6 +335,24 @@ def cycle_has_application_facts(
     return False
 
 
+def cycle_has_financial_facts(connection: sqlite3.Connection, cycle_id: int) -> bool:
+    """An empty container is safe; any case-owned financial fact requires review."""
+    if not _table_exists(connection, "revenue_commercial_cases"):
+        return False
+    tables = [row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'revenue_%'")]
+    for table in tables:
+        if "commercial_case_id" not in _columns(connection, table):
+            continue
+        if connection.execute(
+            f'SELECT 1 FROM "{table}" f JOIN revenue_commercial_cases c '
+            'ON c.id=f.commercial_case_id WHERE c.application_cycle_id=? LIMIT 1',
+            (int(cycle_id),),
+        ).fetchone() is not None:
+            return True
+    return False
+
+
 def _active_non_transfer_cycle(connection: sqlite3.Connection, student_id: str):
     if not _table_exists(connection, "application_cycles"):
         return None
@@ -354,6 +372,7 @@ def _safe_initial_takeover(
         str(cycle[1] or "") == "initial"
         and cycle[2] is None
         and not cycle_has_application_facts(connection, int(cycle[0]))
+        and not cycle_has_financial_facts(connection, int(cycle[0]))
     )
 
 

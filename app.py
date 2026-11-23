@@ -403,6 +403,7 @@ from student_lifecycle.workbench import (
     render_enrolment_workbench,
     resolve_school_snapshot,
 )
+from student_lifecycle import transfer_intake, transfer_intake_views
 from student_lifecycle.external_transfer_contract import can_orchestrate_external_transfer
 from student_lifecycle.external_intake_views import render_external_intake
 from application_cycle import (
@@ -11199,6 +11200,11 @@ def record_contract_completion_fact(
         == TRANSFER_APPLICATION_CONTRACT
         and not contract["application_cycle_id"]
     )
+    if hasattr(db, "transaction") and is_pre_cycle_transfer_contract:
+        # Archive success is retained even if downstream work needs staff review.
+        with db.transaction() as connection:
+            transfer_intake.attempt_signed_transfer(
+                connection, contract_id, actor_user_id=actor_user_id, occurred_at=occurred_at)
     if hasattr(db, "connect") and not is_pre_cycle_transfer_contract:
         revenue_connection = db.connect()
         try:
@@ -27941,6 +27947,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/deleted$", self.deleted_students),
                 (r"^/students/(\d+)/transfer-cases$", self.student_transfer_case_create),
                 (r"^/students/(\d+)/external-transfer-contracts/(\d+)/orchestrate$", self.student_external_transfer_contract_orchestrate),
+                (r"^/students/(\d+)/transfer-intake/(\d+)/(confirm|retry)$", self.student_transfer_intake_action),
                 (r"^/students/(\d+)/progression-cases$", self.student_progression_case_create),
                 (r"^/students/(\d+)/lifecycle-cycles/(\d+)/modules/(applications|offer|coe_oshc|visa|payments|homestay_airport)/disposition$", self.student_lifecycle_module_disposition),
                 (r"^/students/(\d+)/progression-cases/(\d+)/activate$", self.student_progression_case_activate),
@@ -29475,6 +29482,17 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("不支持此请求方式。", HTTPStatus.METHOD_NOT_ALLOWED)
         connection = db.connect()
         try:
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='transfer_source_authorities'").fetchone():
+                replacements = connection.execute("""SELECT DISTINCT replacement.uid
+                    FROM revenue_commercial_cases original
+                    JOIN application_cycles old ON old.id=original.application_cycle_id
+                    JOIN transfer_source_authorities source ON source.student_id=original.student_id
+                        AND source.parent_form_token=old.parent_form_token
+                    JOIN revenue_commercial_cases replacement ON replacement.application_cycle_id=source.application_cycle_id
+                    WHERE original.uid=? AND old.status='closed' AND old.outcome='superseded_by_transfer'
+                      AND replacement.status='open'""", (case_uid,)).fetchall()
+                if len(replacements) == 1:
+                    return self.redirect(f"/revenue/cases/{quote(str(replacements[0][0]))}/billing")
             data = {
                 **RevenueReadModels(connection).workspace(
                     "billing", self.query, case_uid=case_uid
@@ -29486,7 +29504,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("收费与佣金档案不存在。", HTTPStatus.NOT_FOUND)
         finally:
             db._release_connection(connection)
-        body = render_revenue_workspace_page(
+        handoff_html = self._transfer_intake_panels(data["student_context"]["student_id"])
+        body = handoff_html + render_revenue_workspace_page(
             data, self.csrf, new_token(), mobile=False
         )
         return self.send_html(
@@ -57133,8 +57152,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 raise ValueError("target schools must be unique")
             seen_targets.add(identity)
             target_rows.append((target_id, submitted_name, selected))
-        if not target_rows:
-            raise ValueError("at least one target school is required")
         current_school_id = self.transfer_case_optional_id(
             form_text_value(self.form, "current_school_id")
         )
@@ -60175,6 +60192,81 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             f"/students/{quote(str(student_id))}/school-enrolments",
             "Current Enrolment已确认。",
         )
+
+    def _confirm_transfer_parent_school(self, connection, student_id, source):
+        token = source.get("parent_form_token")
+        if not token or form_text_value(self.form, "transfer_current_token") != token:
+            raise ValueError("当前学校确认与本次转学家长资料不一致，请刷新后确认。")
+        raw_id = form_text_value(self.form, "transfer_current_school_id").strip()
+        school_id = self.transfer_case_optional_id(raw_id)
+        school_name = form_text_value(self.form, "transfer_current_school_name").strip()
+        if school_id is not None:
+            school = connection.execute(
+                "SELECT school_name FROM schools WHERE id=? AND COALESCE(deleted_at,'')=''",
+                (school_id,)).fetchone()
+            if school is None:
+                raise ValueError("所选学校不可用。")
+            school_name = str(school[0])
+        return transfer_intake.confirm_parent_current(
+            connection, student_id=student_id, parent_form_token=token,
+            school_id=school_id, school_name=school_name,
+            year_level=form_text_value(self.form, "transfer_current_year_level"),
+            confirmed=form_text_value(self.form, "transfer_current_confirmed") == "yes",
+            expected_digest=form_text_value(self.form, "transfer_current_digest"),
+            actor_user_id=int(self.user["id"]), occurred_at=now_iso())
+
+    def _transfer_intake_panels(self, student_id):
+        connection = db.connect()
+        try:
+            needed = {"transfer_source_authorities", "external_transfer_case_requests",
+                      "revenue_fee_item_contract_links", "revenue_fee_items"}
+            present = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if not needed.issubset(present):
+                return ""
+            return transfer_intake_views.signed_handoff_panels(
+                connection, str(student_id), csrf=self.csrf,
+                can_manage=can_manage_transfer_contract(self.user))
+        finally:
+            db._release_connection(connection)
+
+    def student_transfer_intake_action(self, method, student_id, contract_id, action):
+        if method != "POST":
+            return self.error_page("只允许POST。", HTTPStatus.METHOD_NOT_ALLOWED)
+        if not self.require("students.view") or not can_manage_transfer_contract(self.user):
+            return self.error_page("无权限处理转学签约衔接。", HTTPStatus.FORBIDDEN)
+        if self.student_capability_subject(student_id) is None:
+            return self.error_page("学生不存在。", HTTPStatus.NOT_FOUND)
+        contract = db.one("SELECT * FROM contracts WHERE id=? AND student_id=?",
+                          (int(contract_id), str(student_id)))
+        if contract is None:
+            return self.error_page("合同不存在。", HTTPStatus.NOT_FOUND)
+        fields = {"csrf", "transfer_current_token", "transfer_current_digest", "transfer_current_school_id",
+                  "transfer_current_school_name", "transfer_current_year_level", "transfer_current_confirmed"}
+        if action not in {"confirm", "retry"} or set(self.form) - fields:
+            return self.error_page("无效操作或字段。", HTTPStatus.BAD_REQUEST)
+        destination = f"/students/{quote(str(student_id))}?tab=contracts#contracts-section"
+        try:
+            with db.transaction() as connection:
+                if action == "confirm":
+                    source = transfer_source_authority.resolve_for_creation(
+                        connection, str(student_id), int(contract_id))
+                    if source["source_classification"] != "new_transfer":
+                        raise ValueError("已有学生请使用已确认的在读记录。")
+                    self._confirm_transfer_parent_school(connection, str(student_id), source)
+                result = transfer_intake.attempt_signed_transfer(
+                    connection, int(contract_id), actor_user_id=int(self.user["id"]), occurred_at=now_iso())
+                if result["status"] == "completed":
+                    case = connection.execute(
+                        "SELECT uid FROM revenue_commercial_cases WHERE application_cycle_id=?",
+                        (result["cycle_id"],)).fetchone()
+                    if case:
+                        destination = f"/revenue/cases/{quote(str(case[0]))}/billing"
+        except (ValueError, sqlite3.Error) as error:
+            return self.flash_redirect(destination, str(error), "error")
+        if result["status"] != "completed":
+            return self.flash_redirect(destination, "合同签署已保留；" + result.get("message", "转学收费待核对。"), "error")
+        return self.flash_redirect(destination, "转学档案与合同已衔接；收费已按现行规则处理，目标学校可稍后补充。")
 
     def student_external_transfer_contract_orchestrate(
         self, method, student_id, contract_id,
@@ -70922,11 +71014,40 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 transfer_source_error = "转学资料读取失败，请联系管理员检查资料库。"
             if can_manage_transfer:
                 try:
+                    source_options = transfer_source_authority.contract_source_options(authority_connection, str(student_id))
+                    evidence_keys = transfer_source_authority.EVIDENCE_FIELDS[1:]
+                    candidates = [(row, {"source_parent_form_token": row["token"]})
+                                  for row in source_options.get("intakes", ())]
+                    candidates += [(row, {"source_existing_evidence": ":".join(str(int(row.get(key) or 0)) for key in evidence_keys)})
+                                   for row in source_options.get("existing", ())]
+                    for candidate, selected_form in candidates:
+                        try:
+                            candidate_source = transfer_source_authority.identify_for_submission(
+                                authority_connection, str(student_id), preview_id, form=selected_form)
+                            candidate_source.setdefault("created_at", now_iso())
+                            if candidate_source["source_classification"] == "new_transfer":
+                                transfer_intake.parent_school_preview(
+                                    authority_connection, str(student_id), candidate_source["parent_form_token"])
+                            candidate["fee_authority"] = transfer_contract_authority.commercials(
+                                authority_connection, str(student_id), preview_id,
+                                payment_method="", source_authority=candidate_source)["base_fee"]
+                        except (ValueError, sqlite3.Error):
+                            pass  # A candidate with unresolved authority remains HOLD.
                     transfer_source_fields = transfer_v2_views.render_transfer_contract_source_fields(
-                        transfer_source_authority.contract_source_options(authority_connection, str(student_id)),
-                        error=transfer_source_error, authority=saved_transfer_source)
-                except (sqlite3.Error, transfer_source_authority.SourceAuthorityError):
-                    transfer_source_fields = '<p data-contract-transfer-source-fields hidden role="alert">转学资料不可用，请联系管理员检查资料库。</p>'
+                        source_options, error=transfer_source_error, authority=saved_transfer_source)
+                    current_fields = ""
+                    for intake in source_options.get("intakes", ()):
+                        try:
+                            current_fields += transfer_intake_views.confirmation_fields(
+                                authority_connection, str(student_id), intake["token"], disabled=True)
+                        except ValueError as error:
+                            current_fields += '<p role="alert">' + esc(str(error)) + '</p>'
+                    transfer_source_fields = transfer_source_fields.replace(
+                        "</section>", current_fields + "</section>")
+                except (sqlite3.Error, ValueError) as error:
+                    transfer_source_fields += (
+                        '<p data-contract-transfer-source-fields hidden role="alert">'
+                        + esc(str(error)) + '；请先核对家长学校资料。</p>')
         finally:
             db._release_connection(authority_connection)
         if published_mode:
@@ -71386,6 +71507,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return f"""
         <section class="contract-grid" id="contracts-section">
           <div class="panel contract-card active-contract"><div class="panel-head"><div><h2>合同生成</h2><p>三种合同共用同一生成引擎、表单和签署链路。</p></div><span class="status ok">Active</span></div>
+            {self._transfer_intake_panels(student_id)}
             {contract_creation_tools}
             <div class="table-wrap"><table class="contract-history-table"><thead><tr><th>合同</th><th>状态</th><th>生成时间</th><th>草稿</th><th>家长签署版</th><th>最终合同</th><th>操作</th></tr></thead><tbody>{"".join(contract_rows) or '<tr><td colspan="7" class="empty">暂无留学合同</td></tr>'}</tbody></table></div>
           </div>
@@ -84638,12 +84760,14 @@ sqlite3 database/aaie_crm.db 'PRAGMA quick_check;'"""
                 authority = transfer_source_authority.ensure_for_submission(
                     connection, str(student_id), contract_id, form=self.form,
                     actor_user_id=int(self.user["id"]), occurred_at=stamp)
+                if authority["source_classification"] == "new_transfer":
+                    self._confirm_transfer_parent_school(connection, str(student_id), authority)
                 contract_uid = connection.execute("SELECT contract_uid FROM contracts WHERE id=?", (contract_id,)).fetchone()[0]
                 commercial = transfer_contract_authority.commercials(
                     connection, str(student_id), contract_id,
                     payment_method=str(self.form.get("service_fee_currency") or "").strip(),
                     discount=str(self.form.get("discount_amount") or "0") if self.form.get("discount_enabled") == "yes" else "0")
-        except (sqlite3.Error, transfer_source_authority.SourceAuthorityError) as exc:
+        except (sqlite3.Error, ValueError) as exc:
             return self.flash_redirect(
                 f"/students/{quote(str(student_id))}?tab=contracts#contracts-section",
                 f"转学合同暂不能生成：{exc}", "error")

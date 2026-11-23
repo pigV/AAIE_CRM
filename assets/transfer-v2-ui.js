@@ -178,7 +178,14 @@
       const remove = event.target.closest('[data-transfer-v2-remove-target]');
       if (!remove || !list) return;
       const rows = list.querySelectorAll('[data-transfer-v2-target-row]');
-      if (rows.length > 1) remove.closest('[data-transfer-v2-target-row]')?.remove();
+      if (rows.length > 1) {
+        remove.closest('[data-transfer-v2-target-row]')?.remove();
+      } else {
+        const selector = remove.closest('[data-transfer-v2-target-row]')?.querySelector('[data-transfer-v2-school-selector]');
+        const name = selector?.querySelector('[data-transfer-v2-school-name]');
+        if (name) name.value = '';
+        if (selector) clearSchoolSelection(selector);
+      }
     });
     create?.querySelector('form')?.addEventListener('submit', (event) => {
       const submitter = event.submitter || create.querySelector('[data-transfer-v2-create]');

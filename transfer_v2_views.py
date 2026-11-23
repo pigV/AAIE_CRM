@@ -438,13 +438,14 @@ def _school_selector(
     region: str = "",
     school_type: str = "",
     school_choices: Sequence[Mapping[str, object]] = (),
+    required: bool = True,
 ) -> str:
     selected_name = school_name if school_id is not None else ""
     return f"""
     <div class="transfer-v2-school-selector" data-transfer-v2-school-selector
       data-selected-school-name="{escape(selected_name, quote=True)}">
       <input name="{field_prefix}_school_name" value="{escape(school_name, quote=True)}"
-        autocomplete="off" required role="combobox" aria-autocomplete="list"
+        autocomplete="off" {'required' if required else ''} role="combobox" aria-autocomplete="list"
         aria-expanded="false"
         placeholder="搜索学校；学校库搜不到时手动输入" data-transfer-v2-school-name>
       <select name="{field_prefix}_school_id" data-transfer-v2-school-library-result
@@ -481,10 +482,14 @@ def render_transfer_contract_source_fields(options, *, error="", authority=None)
     records = options.get('existing', ())
     unique = len(intakes) + len(records) == 1
     locked = bool(authority and authority.get('id'))
+    def fee_attributes(row):
+        fee = row.get('fee_authority')
+        return (f' data-transfer-source-fee="{escape(str(fee),quote=True)}" data-transfer-source-verified="true"'
+                if fee is not None else '')
     choices = '<option value="">' + ('请选择本次家长资料' if intakes else '暂无可用的新学生转学家长资料') + '</option>'
     for index, row in enumerate(intakes, 1):
         selected = ' selected' if (row['token'] == authority.get('parent_form_token') if locked else unique) else ''
-        choices += (f'<option value="{escape(str(row["token"]), quote=True)}"{selected}>'
+        choices += (f'<option value="{escape(str(row["token"]), quote=True)}"{selected}{fee_attributes(row)}>'
                     f'家长资料 {index} · 新学生转学 · 提交于 {escape(str(row.get("submitted_at") or ""))}</option>')
     if locked and authority.get('parent_form_token') and not any(
             row['token'] == authority['parent_form_token'] for row in intakes):
@@ -504,7 +509,7 @@ def render_transfer_contract_source_fields(options, *, error="", authority=None)
         if row.get('proof_date'):
             label += ' · ' + str(row['proof_date'])
         selected = ' selected' if (all(row.get(key) == authority.get(key) for key in keys) if locked else unique) else ''
-        existing += f'<option value="{value}"{selected}>{escape(label)}</option>'
+        existing += f'<option value="{value}"{selected}{fee_attributes(row)}>{escape(label)}</option>'
     if locked and authority.get('current_enrolment_id') and not any(
             all(row.get(key) == authority.get(key) for key in keys) for row in records):
         value = ':'.join(str(int(authority.get(key) or 0)) for key in keys)
@@ -527,7 +532,7 @@ def render_transfer_contract_source_fields(options, *, error="", authority=None)
         diagnostics = '<details data-transfer-source-diagnostics open><summary>资料可用情况与补齐入口</summary><ul>' + diagnostics + '</ul></details>'
     profile = (f'<p>当前学生：{escape(str(options["student_id"]))} · '
                f'<a href="/students/{student_id}?tab=profile">查看学生及家长档案</a></p>') if student_id else ''
-    alert = f'<p role="alert">{escape(error)}</p>' if error else ''
+    alert = f'<p role="alert" data-transfer-source-selection-error>{escape(error)}</p>' if error else ''
     if locked:
         alert += '<p>本合同的转学来源已确认，显示已绑定资料；如需变更，请先核对合同及来源记录。</p>'
     return f'''<section class="contract-section" data-contract-transfer-source-fields hidden>
@@ -597,7 +602,7 @@ def render_transfer_v2_creation_form(
         school_choices=school_choices,
     )
     target_selector = _school_selector(
-        field_prefix="target", school_choices=school_choices
+        field_prefix="target", school_choices=school_choices, required=False
     )
     current_year_options = _choice_options(
         TRANSFER_YEAR_LEVELS, str(current_year_level or "")
@@ -649,11 +654,12 @@ def render_transfer_v2_creation_form(
         <label>当前学校
           {current_selector}
         </label>
+        <p>建立转学记录会确认所填当前学校及年级；已有在读记录存在冲突时停止处理。</p>
         <label>当前年级<select name="current_year_level" required>{current_year_options}</select></label>
         <label>申请年级<select name="application_year_level" required>{application_year_options}</select></label>
         <label>转学年份<input name="transfer_year" type="number" min="2000" max="2200" required></label>
         <label>转学学期<select name="transfer_term" required>{term_options}</select></label>
-        <fieldset><legend>目标学校</legend>
+        <fieldset><legend>目标学校（可稍后补充）</legend><p>签约收费不依赖目标学校；确定学校后再添加申请分支。</p>
           <div class="transfer-v2-target-list" data-transfer-v2-target-list>
             <div class="transfer-v2-target-row" data-transfer-v2-target-row>
               <div>{target_selector}</div>

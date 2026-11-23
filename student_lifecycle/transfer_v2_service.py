@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ from uuid import uuid4
 from business_changes.transfer import record_transfer_change
 from business_changes.identities import stable_command_identity,find_command_identity
 
-from revenue.cycle_integration import ensure_revenue_case_for_cycle
+from revenue.cycle_integration import ensure_revenue_case_for_cycle, retire_empty_initial_case
 from revenue.operational_integration import process_revenue_contract_completion
 
 from student_lifecycle.transfer_contract_gate import evaluate_transfer_contract_gate
@@ -146,8 +146,6 @@ class TransferV2Service:
             raise TransferV2ValidationError("student not found")
         if not 2000 <= int(request.transfer_year) <= 2200:
             raise TransferV2ValidationError("invalid transfer year")
-        if not request.targets:
-            raise TransferV2ValidationError("at least one target school is required")
         target_rows: list[dict[str, object]] = []
         target_identities: set[tuple[str, object]] = set()
         for target in request.targets:
@@ -251,7 +249,11 @@ class TransferV2Service:
         *,
         actor_user_id: int,
         idempotency_key: str,
+        connection=None,
     ) -> TransferV2Overview:
+        owns_connection = connection is None
+        if not owns_connection and not connection.in_transaction:
+            raise TransferV2ValidationError("caller transaction required")
         key = self._required_text(idempotency_key, "idempotency key")
         student_id = self._required_text(request.student_id, "student")
         operation = "create_transfer_v2"
@@ -261,8 +263,9 @@ class TransferV2Service:
         request_hash = lifecycle_repository.payload_hash(request_payload)
         event_uid = self.uid_factory(f"transfer-v2-create-{key}")
         timestamp = self.clock()
-        with closing(self._connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with (closing(self._connect()) if owns_connection else nullcontext(connection)) as connection:
+            if owns_connection:
+                connection.execute("BEGIN IMMEDIATE")
             actor_name = self._require_actor(connection, actor_user_id)
             previous_receipt = connection.execute(
                 "SELECT payload_sha256 FROM student_lifecycle_idempotency_receipts "
@@ -286,8 +289,9 @@ class TransferV2Service:
                 ) from None
             if replay is not None:
                 cycle_id = int(replay.cycle_id)
-                connection.commit()
-                return self.load_overview(cycle_id)
+                if owns_connection:
+                    connection.commit()
+                return self.load_overview(cycle_id, connection=connection)
             values = self._validate_request(connection, request)
             creation = evaluate_transfer_creation_state(
                 connection, str(values["student_id"])
@@ -322,6 +326,14 @@ class TransferV2Service:
             except source_authority.SourceAuthorityError as exc:
                 raise TransferV2ValidationError(str(exc)) from exc
             values["source_label"] = authority["source_classification"]
+            from student_lifecycle.transfer_intake import confirm_staff_current, _require_completed_fee
+            try:
+                current_enrolment_id = confirm_staff_current(
+                    connection, student_id=str(values["student_id"]),
+                    school_id=values["current_school_id"], school_name=values["current_school_name"],
+                    year_level=values["current_year_level"], actor_user_id=int(actor_user_id), occurred_at=timestamp)
+            except ValueError as exc:
+                raise TransferV2ValidationError(str(exc)) from exc
             if takeover_cycle_id is not None:
                 supersede_safe_initial_for_transfer(
                     connection,
@@ -387,6 +399,8 @@ class TransferV2Service:
                     values["current_region"], values["current_school_type"],
                 ),
             )
+            from student_lifecycle.case_enrolment import bind_case_current_enrolment
+            bind_case_current_enrolment(connection, case_id=case_id, lifecycle_type="transfer")
             for index, target in enumerate(values["targets"], start=1):
                 branch_uid = self.uid_factory(f"transfer-v2-branch-{cycle_id}-{index}")
                 branch_id = int(connection.execute(
@@ -448,6 +462,10 @@ class TransferV2Service:
             process_revenue_contract_completion(
                 connection, int(gate.source_contract_id), int(actor_user_id), timestamp,
             )
+            _require_completed_fee(connection, int(gate.source_contract_id), cycle_id)
+            if takeover_cycle_id is not None:
+                retire_empty_initial_case(connection, int(takeover_cycle_id), cycle_id,
+                                          int(actor_user_id), timestamp)
             connection.execute(
                 """INSERT INTO case_events(
                      case_id,event_type,entity_type,entity_id,new_value_json,
@@ -501,11 +519,12 @@ class TransferV2Service:
                 occurred_at=timestamp,
             )
             record_transfer_change(connection,event_type='transfer.created',cycle_id=cycle_id,actor_user_id=actor_user_id,idempotency_key=key,stamp=timestamp,previous_cycle_ids=(takeover_cycle_id,))
-            connection.commit()
-        return self.load_overview(cycle_id)
+            if owns_connection:
+                connection.commit()
+            return self.load_overview(cycle_id, connection=connection)
 
-    def load_overview(self, cycle_id: int) -> TransferV2Overview:
-        with closing(self._connect()) as connection:
+    def load_overview(self, cycle_id: int, *, connection=None) -> TransferV2Overview:
+        with (closing(self._connect()) if connection is None else nullcontext(connection)) as connection:
             row = repository.cycle_case_row(connection, int(cycle_id))
             if row is None:
                 raise TransferV2NotFound("Transfer Cycle not found")

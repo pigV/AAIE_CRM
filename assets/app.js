@@ -1740,7 +1740,25 @@
     const sourceFields = q("[data-contract-transfer-source-fields]", form);
     if (sourceFields) {
       sourceFields.hidden = !sourceAuthoritativeTransfer;
-      qa("select", sourceFields).forEach((control) => {
+      const intakeSelect = q('select[name="source_parent_form_token"]', sourceFields);
+      const existingSelect = q('select[name="source_existing_evidence"]', sourceFields);
+      if (sourceAuthoritativeTransfer && (intakeSelect || existingSelect)) {
+        const selected = intakeSelect?.value && !existingSelect?.value ? intakeSelect
+          : existingSelect?.value && !intakeSelect?.value ? existingSelect : null;
+        const option = selected?.selectedOptions?.[0];
+        const verified = option?.dataset.transferSourceVerified === "true";
+        form.dataset.contractTransferSourceHold = verified ? "false" : "true";
+        form.dataset.contractTransferFeeAuthority = verified ? option.dataset.transferSourceFee : "";
+        const error = q('[data-transfer-source-selection-error]', sourceFields);
+        if (error) error.hidden = verified;
+      }
+      const selectedIntake = q('select[name="source_parent_form_token"]', sourceFields)?.value || "";
+      qa("[data-transfer-current-confirmation]", sourceFields).forEach((group) => {
+        const active = sourceAuthoritativeTransfer && group.dataset.transferIntakeToken === selectedIntake;
+        group.hidden = !active;
+        qa("input, select", group).forEach((control) => { control.disabled = !active; });
+      });
+      qa("select[data-source-empty]", sourceFields).forEach((control) => {
         control.disabled = !sourceAuthoritativeTransfer || control.dataset.sourceEmpty === "true"
           || control.dataset.sourceLocked === "true";
       });
@@ -2028,7 +2046,7 @@
         });
       }
     });
-    qa("[data-contract-published-payment-method], [data-contract-published-gst-free], [data-contract-payment-plan-toggle]", root).forEach((control) => {
+    qa('[data-contract-published-payment-method], [data-contract-published-gst-free], [data-contract-payment-plan-toggle], select[name="source_parent_form_token"], select[name="source_existing_evidence"]', root).forEach((control) => {
       const form = control.closest("form");
       if (control.dataset.contractPublishedPricingBound !== "true") {
         control.dataset.contractPublishedPricingBound = "true";
