@@ -13,7 +13,7 @@ from visa_only_materials import VisaOnlyMaterialsMixin
 AI_UNAVAILABLE_MESSAGE = 'AI-READY · AI is not enabled. Visa documents continue to use the approved deterministic workflow.'
 
 
-def document_workspace_html(case_id, csrf, documents, submissions, extractions, result=None, *, show_official_review=True, official_decision_confirmed=False, include_result_section=True, compact_result_controls=False):
+def document_workspace_html(case_id, csrf, documents, submissions, extractions, result=None, *, show_official_review=True, official_decision_confirmed=False, include_result_section=True, compact_result_controls=False, official_review_only=False):
     from visa_ai_candidate import provider_from_environment, VisaAIError
     try: ai_available = provider_from_environment() is not None
     except VisaAIError: ai_available = False
@@ -32,7 +32,7 @@ def document_workspace_html(case_id, csrf, documents, submissions, extractions, 
             from visa_document_processing_ui import document_edit_html
             actions+=document_edit_html(case_id,csrf,d)
         meta = f'<div class="visa-document-card__meta"><span>Version {d["version"]}</span><span>{"Archived" if d["archived_at"] else "Active"}</span></div>'
-        prepared.append(f'<article class="visa-document-card"><div class="visa-document-card__main"><h3 class="visa-document-card__name">{escape(d.get("display_name") or d["original_name"])}</h3>{meta}</div><div class="visa-document-card__actions"><a class="button-link secondary" href="/visa-management/cases/{case_id}/documents/{did}/file">Preview / Download</a>{actions}</div></article>')
+        prepared.append(f'<article class="visa-document-card" id="visa-document-{did}"><div class="visa-document-card__main"><h3 class="visa-document-card__name">{escape(d.get("display_name") or d["original_name"])}</h3>{meta}</div><div class="visa-document-card__actions"><a class="button-link secondary" href="/visa-management/cases/{case_id}/documents/{did}/file">Preview / Download</a>{actions}</div></article>')
     submitted=''.join(f'<article class="panel">Submission #{s["id"]} · Document #{s["document_id"]} · Version {s["version"]} · {escape(str(s["status"]))}<p>Staff #{s["submitted_by"]} · {escape(str(s["submitted_at"]))}</p></article>' for s in submissions)
     reviews=[]
     for x in extractions:
@@ -56,7 +56,11 @@ def document_workspace_html(case_id, csrf, documents, submissions, extractions, 
             field_value=values.get(key) or (values.get('document_kind') if key=='decision_type' else '')
             inputs+=f'<input type="hidden" name="{key}" value="{escape(str(field_value or ""),quote=True)}">'
         inputs+=f'<label>Grant / Refusal Date<input type="date" name="decision_date" value="{escape(str(values.get("decision_date") or ""),quote=True)}"></label><label>Length of Stay<input name="length_of_stay" value="{escape(str(values.get("length_of_stay") or ""),quote=True)}"></label><button>Confirm official Visa decision</button>'
-        reviews.append(f'<details class="visa-result-document"><summary>Confirm official Visa decision · {label}</summary>{form("confirm",inputs)}</details>')
+        reviews.append(f'<details class="visa-result-document"><summary>核对并确认官方签证结果 · {label}</summary>{form("confirm",inputs)}</details>')
+    if official_review_only:
+        return ('<section class="panel" id="visa-official-review"><h3>核对并确认官方签证结果</h3>'
+                '<p>请核对原信上的正式下签日期。此处提交后结果才正式生效；下签信发送日期另行保存。</p>'
+                + ''.join(reviews) + '</section>') if reviews else ''
     result=result or {'effective_result':'Pending','authority':'legacy','auto_detected_result':None,'manual_override':False,'conflict':False,'history':[]}
     authority='Manual / 人工' if result.get('manual_override') else 'Auto / 自动' if result.get('authority')=='auto' else 'Current record / 当前记录'
     conflict='<p class="visa-result-conflict" role="alert">Conflicting Grant and Refusal evidence requires Staff review.</p>' if result.get('conflict') else ''
@@ -165,7 +169,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                 'matched keyword: Bridging Visa' if item else 'Bridging Visa target item is not in current checklist')
         suggestion = self.suggest_visa_material_item_for_filename(filename, available_items)
         if suggestion['item_id'] and suggestion['confidence'] in {'High', 'Medium'}:
-            if suggestion['item_title'] != 'IMMI Grant Letter / IMMI Refusal Letter':
+            if suggestion['item_title'] not in {'IMMI Grant Letter / IMMI Refusal Letter', 'IMMI Acknowledgment Letter', 'IMMI Acknowledgement Letter', 'Health Examination', 'Bridging Visa'}:
                 return suggestion
         if 'target item is not in current checklist' in suggestion['matched_reason'] or (
             suggestion['matched_reason'] == 'No unique matching academic checklist item'
@@ -426,7 +430,23 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         note=('官方结果与信件发送日期分开记录。请以核对后的官方信件为准。' if compact else 'Retained official values; separate from processing sent-on dates. Original notes remain in the Student VISA record.')
         html='<section class="panel"><h2>'+('官方签证结果 / ' if compact else '')+'Official Visa decision</h2><p>Date of Grant: '+escape(grant)+'</p><p>Length of Stay: '+escape(stay)+'</p><p>Visa expiry date: '+escape(expiry)+'</p>'+source+'<p>'+note+'</p></section>'
         from visa_result_workspace_ui import official_review_url
-        html+=f'<p><a href="{escape(official_review_url(case),quote=True)}">Confirm official Visa decision</a></p>'
+        with self._visa_fact_read_scope() as conn:
+            from visa_documents_candidate import active_letter_extractions
+            from visa_document_lifecycle import active_documents
+            present={row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            pending=[]
+            confirmed=(conn.execute('SELECT 1 FROM visa_case_confirmed_decisions WHERE visa_case_id=?',(cid,)).fetchone()
+                       if 'visa_case_confirmed_decisions' in present else None)
+            if not confirmed and {'visa_case_documents','visa_case_confirmed_decisions','visa_letter_extractions'} <= present:
+                active={d['id']:d for d in active_documents(conn,cid) if d.get('id')
+                        and d.get('authority_category') in {'grant_letter','refusal_letter'}}
+                for extraction in active_letter_extractions(conn,cid):
+                    if extraction['document_id'] not in active:continue
+                    extraction=dict(extraction)
+                    extraction['document_label']=active[extraction['document_id']]['original_name']
+                    pending.append(extraction)
+        inline_review=document_workspace_html(cid,self.csrf,[],[],pending,official_review_only=True)
+        html+=inline_review or ('' if confirmed else f'<p><a href="{escape(official_review_url(case),quote=True)}">核对官方结果材料 / Review official Visa decision</a></p>')
         html+=processing_dates_html(cid,self.csrf,summary,documents,compact=compact)
         grant_value=projection.get('recorded_grant_date',projection['grant_date'] or dict(case).get('grant_date') or '') if getattr(self,'business_changes_enabled',lambda:False)() else projection['grant_date']
         grant_form=f'<form method="post" action="/visa-management/cases/{cid}/workspace"><input type="hidden" name="csrf" value="{escape(self.csrf,quote=True)}"><input type="hidden" name="action" value="correct-grant-date"><label>Date of Grant<input type="date" name="grant_date" value="{escape(grant_value,quote=True)}"></label><button>Save Date of Grant</button></form>'

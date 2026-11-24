@@ -413,6 +413,7 @@ def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occur
     cycle_id = _student_cycle_id(conn, case) if kind and student_decision else None
     if kind and not case.get('student_id') and case.get('application_cycle_id'):
         raise ValueError('Standalone applicant cannot own a Student Application Cycle')
+    current_result = None
     with _atomic(conn):
         review_cursor = conn.execute('''INSERT INTO visa_letter_reviews(extraction_id,visa_case_id,confirmed_json,confirmed_by,confirmed_at)
             VALUES(?,?,?,?,?)''', (extraction_id, case_id, _json(effective), actor_user_id, occurred_at))
@@ -469,8 +470,10 @@ def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occur
                 from visa_document_lifecycle import case_projection
                 current_result={'effective_result':case_projection(conn,case_id)['result_status']}
             from business_changes.runtime import enabled
+            if kind=='grant' and project_decision and current_result['effective_result'] in {'Refused','Withdrawn'}:
+                raise ValueError('当前拒签或撤回结果与下签信冲突，请先完成正式结果冲突复核。')
             if (enabled(conn) and kind=='grant' and project_decision and current_result
-                    and current_result['effective_result']=='Pending' and not current_result.get('manual_override')):
+                    and current_result['effective_result']=='Pending'):
                 # This explicit Staff confirmation is the authority being
                 # established here; a prior upload's projection stays Pending.
                 current_result=dict(current_result,effective_result='Granted')
@@ -506,6 +509,10 @@ def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occur
                     confirmed_json,confirmed_by,confirmed_at,canonical_event_id) VALUES(?,?,?,?,?,?,?,?)''',
                     (case_id,extraction_id,kind,effective['decision_date'],_json(effective),actor_user_id,occurred_at,canonical_id))
                 result = _row(conn, 'SELECT * FROM visa_case_confirmed_decisions WHERE id=?', (cursor.lastrowid,))
+                if kind=='grant' and current_result and current_result.get('manual_override'):
+                    from visa_result_status import record_manual_result
+                    record_manual_result(conn,case_id,'Granted',actor_user_id=actor_user_id,
+                        occurred_at=occurred_at,reason='工作人员核对并确认官方下签信及日期')
         _audit(conn, case_id, document['id'], 'letter_confirmed', json.loads(extraction['proposed_json']), effective, actor_user_id, occurred_at)
     return result
 

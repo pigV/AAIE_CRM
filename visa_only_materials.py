@@ -22,13 +22,9 @@ class VisaOnlyMaterialsMixin:
         return f"/visa-management/cases/{int(case_id)}/applicant/material-batch-upload"
 
     def visa_only_material_file_rows(self, case_id, item_id):
-        return self._visa_runtime()["db"].all(
-            """SELECT d.id, d.original_name FROM visa_only_material_uploads u
-               JOIN visa_case_documents d ON d.id=u.document_id AND d.visa_case_id=u.visa_case_id
-               WHERE u.visa_case_id=? AND u.item_id=? AND d.archived_at IS NULL
-               ORDER BY d.id""",
-            (case_id, item_id),
-        )
+        from visa_material_reclassification import independent_material_rows
+        with self._visa_fact_read_scope() as connection:
+            return independent_material_rows(connection,int(case_id),int(item_id))
 
     def visa_only_material_review(self, case, documents, notices=()):
         message = "".join(f"<li>{escape(notice)}</li>" for notice in notices)

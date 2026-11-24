@@ -232,11 +232,12 @@ class VisaDocumentsCandidateTests(unittest.TestCase):
             reason='Staff verified the effective result is refusal',
         )
 
-        result=self.service.confirm_letter(
-            self.conn,1,extraction['id'],values=json.loads(extraction['proposed_json']),**self.actor
-        )
+        with self.assertRaisesRegex(ValueError, '冲突|conflict'):
+            self.service.confirm_letter(
+                self.conn,1,extraction['id'],values=json.loads(extraction['proposed_json']),**self.actor
+            )
 
-        self.assertIsNone(result.get('canonical_event_id'))
+        self.assertEqual(0,self.conn.execute('SELECT COUNT(*) FROM visa_letter_reviews').fetchone()[0])
         self.assertEqual(0,self.conn.execute('SELECT COUNT(*) FROM visa_decision_events').fetchone()[0])
         self.assertEqual(0,self.conn.execute('SELECT COUNT(*) FROM visas').fetchone()[0])
         self.assertEqual('Refused',self.conn.execute('SELECT result_status FROM visa_cases WHERE id=1').fetchone()[0])

@@ -87,6 +87,9 @@ def edit_document_metadata(conn,case_id,document_id,*,display_name=None,category
         if category is not None:
             from visa_document_lifecycle import check_upload
             check_upload(conn,case_id,'',category,exclude_document_id=document_id)
+            from visa_material_reclassification import sync_material_category
+            sync_material_category(conn,case_id,document_id,category,
+                actor_user_id=actor_user_id,occurred_at=occurred_at)
         conn.execute('''INSERT INTO visa_document_metadata(document_id,display_name,manual_category,updated_by,updated_at) VALUES(?,?,?,?,?)
           ON CONFLICT(document_id) DO UPDATE SET display_name=COALESCE(excluded.display_name,visa_document_metadata.display_name),manual_category=COALESCE(excluded.manual_category,visa_document_metadata.manual_category),updated_by=excluded.updated_by,updated_at=excluded.updated_at''',(document_id,display_name,category,actor_user_id,occurred_at))
         result=effective_metadata(conn,case_id,document_id);_audit(conn,case_id,document_id,'document_metadata_edited',before,result,actor_user_id,occurred_at)

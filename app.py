@@ -69898,7 +69898,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def visa_material_batch_review_html(self, student_id, case, documents, *, selected_items=None):
         from visa_material_workspace_ui import material_upload_target
-        from document_review_layout import preview_panel
         requested_tab = form_text_value(getattr(self, 'form', {}) or {}, 'return_tab') or self.visa_case_active_tab()
         return_tab = 'visa_result' if requested_tab == 'visa_result' else 'material_checklist'
         return_label = 'Visa Result' if return_tab == 'visa_result' else 'Material Checklist'
@@ -69910,10 +69909,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             suggested_label = suggestion.get("chinese_label") or "Unmatched / 待确认"
             selected_id = suggestion.get("item_id") if suggestion["confidence"] in {"High", "Medium"} else ""
             selected_id = (selected_items or {}).get(doc["id"], target_item or selected_id)
-            preview_url=(f"/students/{quote(student_id)}/visa-cases/{case['id']}/material-batch-upload/preview/{doc['id']}" if student_id else
-                         f"/visa-management/cases/{case['id']}/applicant/material-batch-upload/preview/{doc['id']}")
-            download_url=preview_url+'?download=1'
-            rows.append(f'''<article class="upload-review-workbench upload-review-file-card visa-material-batch-review-row" data-upload-review-workbench>
+            rows.append(f'''<article class="upload-review-file-card visa-material-batch-review-row">
               <section class="review-fields-workspace upload-review-file-meta visa-batch-fields" data-review-fields-pane>
                 <h3>{esc(doc['original_name'])}</h3><input type="hidden" name="document_ids" value="{esc(doc['id'])}">
                 <dl><dt>系统建议材料项</dt><dd>{esc(suggestion.get('item_title') or 'Unmatched')}</dd>
@@ -69922,8 +69918,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 <label>Final Item / 最终选择<select name="final_item_{esc(doc['id'])}">{self.visa_material_batch_item_options_html(available_items, selected_id)}</select></label>
                 <label>Unknown result document type<select name="result_type_{esc(doc['id'])}"><option value="">Use recognized type</option><option value="grant_letter">IMMI Grant Letter</option><option value="refusal_letter">IMMI Refusal Letter</option></select></label>
                 <p>留空跳过：文件仍保留为 pending，不会变成正式材料或结果。</p>
-              </section>{preview_panel(preview_url,download_url,doc['original_name'])}</article>''')
+              </section></article>''')
         return f"""
+        <link rel="stylesheet" href="/assets/visa-material-workspace.css?v=2">
         <div class="visa-management-page visa-material-batch-review-page upload-review upload-review-page">
           <section class="panel visa-management-hero visa-material-batch-header">
             <div><span class="eyebrow">Review / 确认页面</span><h2>文件已上传，正在确认材料归类</h2><p>系统建议仅用于辅助判断。请为每个文件确认最终材料项；留空跳过的文件仍会保留为 pending，不会显示到正式 Material Checklist。</p></div>
@@ -69940,7 +69937,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             </form>
           </section>
         </div>
-        {preview_dialog_html()}"""
+"""
 
     def visa_material_batch_upload_page_html(self, student_id, case):
         from visa_material_workspace_ui import material_upload_target
@@ -70053,6 +70050,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
         documents = []
         skipped = []
+        duplicate_links = []
         seen_hashes = set()
         pending_by_hash = {}
         for doc in db.all(
@@ -70101,6 +70099,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     else "。已保存于当前 Visa Case 的文件工作区"
                 )
                 skipped.append(f"{upload.filename}: {exc}{location}")
+                if exc.document.get('id'):
+                    duplicate_links.append(f'<a class="secondary button-link" href="/visa-management/cases/{int(case_id)}/workspace#visa-document-{int(exc.document["id"])}">核对已有文件并重新归类：{esc(upload.filename)}</a>')
                 continue
             except (ValueError, OSError) as exc:
                 skipped.append(f"{upload.filename}: {exc}")
@@ -70137,6 +70137,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             pass
         review=self.visa_material_batch_review_html(student_id, case, documents)
         if skipped:review='<p role="status">'+esc("; ".join(skipped))+"</p>"+review
+        review=''.join(duplicate_links)+review
         return self.send_html(page("Smart Batch Upload Review", review, self.user, self.csrf, "visa", nas.status()))
 
     def visa_material_pending_batch_document_or_404(self, student_id, case_id, document_id):

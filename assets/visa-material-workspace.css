@@ -138,3 +138,7 @@
 @media (prefers-color-scheme: dark) {
   [data-theme="dark"] .visa-material-workspace { --material-blue: #a8caff; --material-blue-soft: #213754; --material-amber: #f0cb83; --material-amber-soft: #342c1d; --material-green: #9ddcb6; --material-green-soft: #21392b; }
 }
+
+/* Visa batch confirmation keeps classification controls in one readable column. */
+.ui-premium-v2 .visa-material-batch-review-page .visa-material-batch-review-row { display:block; }
+.visa-material-batch-review-row .visa-batch-fields { width:100%; min-width:0; }

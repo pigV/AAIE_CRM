@@ -286,6 +286,12 @@ def record_manual_result(
         from visa_document_lifecycle import active_documents
         if not any(d['authority_category'] == 'grant_letter' for d in active_documents(conn, case_id)):
             raise ValueError('Confirm an active current Visa Result IMMI Grant Letter first.')
+        from business_changes.runtime import enabled
+        if enabled(conn):
+            from visa_business_state import has_confirmed_current_grant
+            case = _one(conn,'SELECT * FROM visa_cases WHERE id=?',(case_id,))
+            if not has_confirmed_current_grant(conn,case,active_documents(conn,case_id)):
+                raise ValueError('请先核对下签日期并确认官方签证结果 / Confirm the official Visa decision first.')
     current = _current(conn, case_id)
     previous = current["effective_result"] if current else _legacy_result(conn, case_id)
     auto_detected = current["auto_detected_result"] if current else None
