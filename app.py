@@ -224,6 +224,7 @@ from upload_review_document_classifier import classify_offer_filename
 from parent_form_repository import DraftRevisionConflict, ParentFormRepository
 from higher_education_repository import HigherEducationRepository, HigherEducationValidationError, course_type_for_pathway, derive_parent_requested_pathway
 from higher_education_workflow_adapter import student_higher_education_experience
+from student_context_display import student_type_badge_html
 from higher_education_views import render_higher_education_workspace
 from revenue.secure_storage import StorageUnavailable
 from revenue.access_policy import (
@@ -5103,6 +5104,15 @@ VISA_ONLY_HIDDEN_STUDENT_TABS = {"school_plans", "offer", "payments", "coe", "ho
 
 def student_application_service(profile):
     return "visa_only" if profile.get("application_service") == "visa_only" else "school"
+
+
+def unresolved_upload_review_files(metadata):
+    from business_changes.snapshots import read_scope
+    # Old manifests without database identities retain their original behavior.
+    if not metadata.get("session_id") or not all(item.get("item_id") for item in metadata["files"]):
+        return metadata["files"]
+    with read_scope(db) as connection:
+        return upload_review_confirmation_coordinator.pending_review_files(connection, metadata)
 
 
 def visa_only_progress_label(case, result):
@@ -10811,7 +10821,7 @@ def _lifecycle_module_disposition_form(module, management):
 
 
 def student_detail_business_operations_html(
-    lifecycle_view, module_statuses, *, management=None, can_edit_profile=False,
+    lifecycle_view, module_statuses, *, management=None, can_edit_profile=False, higher_education=False,
 ):
     """Retain original operations without emitting Lifecycle summary panels."""
     if lifecycle_view is None:
@@ -10820,10 +10830,10 @@ def student_detail_business_operations_html(
     student_id = quote(str(lifecycle_view.student_id))
     if can_edit_profile:
         active_lifecycle = getattr(lifecycle_view, "current", None)
-        if lifecycle_view.current_school is None or (
+        if not higher_education and (lifecycle_view.current_school is None or (
             active_lifecycle is not None
             and active_lifecycle.lifecycle_type == "initial"
-        ):
+        )):
             operations.append(
                 f'<a class="secondary button-link" href="/students/{student_id}/school-enrolments/current?local_admission=yes">确认入学（本地生）</a>'
             )
@@ -11906,7 +11916,7 @@ def student_management_table_row_html(student, uploaded_types, offer_expiry_date
     </tr>"""
 
 
-def student_management_application_row_html(student, summary, csrf, can_edit, can_delete=False):
+def student_management_application_row_html(student, summary, csrf, can_edit, can_delete=False, *, historical_transfer=False):
     actions = student_management_actions_html(student, csrf, can_edit, can_delete, compact=True)
     lifecycle_label = LIFECYCLE_LABELS.get(summary.lifecycle_type or "", "")
     lifecycle_html = (
@@ -11914,11 +11924,12 @@ def student_management_application_row_html(student, summary, csrf, can_edit, ca
         if lifecycle_label else ""
     )
     stage_label = "No Active Lifecycle" if summary.stage_key == "no_cycle" else summary.stage_label
+    historical_transfer_badge = '<span class="student-transfer-name-badge" title="已确认的历史转学">转学</span>' if historical_transfer else ''
     return f"""
     <tr class="student-management-row" data-student-application-summary-row>
       <td data-label="选择"><input type="checkbox" name="student_ids" value="{esc(student['student_id'])}"></td>
       <td data-label="学生号"><code>{esc(student['student_id'])}</code></td>
-      <td data-label="学生名"><a class="student-name-link" href="/students/{esc(student['student_id'])}">{esc(summary.student_name)}</a></td>
+      <td data-label="学生名"><a class="student-name-link" href="/students/{esc(student['student_id'])}">{esc(summary.student_name)}</a> {student_type_badge_html(student)} {historical_transfer_badge}</td>
       <td data-label="申请阶段" aria-label="当前业务 / 申请阶段">{lifecycle_html}<span class="status application-stage-{esc(summary.stage_key)}">{esc(stage_label)}</span></td>
       <td data-label="最终确认学校">{esc(summary.final_school_name or '待确认')}</td>
       <td data-label="申请年级">{esc(summary.applying_year_level or '未记录')}</td>
@@ -22617,7 +22628,7 @@ def refresh_upload_session_counts(session_id):
     total = sum(counts.values())
     confirmed = counts.get("Confirmed", 0)
     cancelled = counts.get("Cancelled", 0)
-    status = "Confirmed" if total and confirmed == total else "Cancelled" if total and cancelled == total else "NeedsReview"
+    status = "Confirmed" if confirmed and confirmed + cancelled == total else "Cancelled" if total and cancelled == total else "NeedsReview"
     db.execute(
         "UPDATE upload_sessions SET status=?,total_files=?,confirmed_files=?,cancelled_files=? WHERE id=?",
         (status, total, confirmed, cancelled, session_id),
@@ -40568,9 +40579,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 raise ValueError("已收到家长确认，但报告归档尚未完成，请联系管理员处理。")
             return None
         metadata = json.loads(event["metadata_json"] or "{}")
-        # Existing historical archives retain their original viewing path.
+        # A verified historical final archive remains valid even when its
+        # old temporary report path is no longer present after a move.
         if metadata.get("render_source") != "parent_page":
-            return None
+            from historical_archive_access import school_archive, archive_bytes
+            from business_changes.snapshots import read_scope
+            with read_scope(db) as connection:
+                archive = school_archive(connection, report_id=int(report["id"]), kind="report")
+            student = db.one("SELECT * FROM students WHERE student_id=?", (report["student_id"],))
+            if archive is None or student is None:
+                raise ValueError("已确认报告归档记录不可读取，请联系管理员处理。")
+            archive_bytes(archive, nas.student_folder(student))
+            return Path(archive.file_path)
         document = db.one(
             """SELECT file_path FROM student_documents WHERE id=? AND student_id=?
                AND folder_category='Applications' AND document_type='FinalConfirmedSchoolPlan' AND is_active=1""",
@@ -41158,8 +41178,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("确认 PDF 不存在。", HTTPStatus.NOT_FOUND)
         target = Path(row["confirmation_pdf_path"]).resolve()
         if SCHOOL_PLAN_CONFIRMATION_DIR.resolve() not in target.parents or not target.is_file():
-            return self.error_page("确认 PDF 不可访问。", HTTPStatus.NOT_FOUND)
-        payload = target.read_bytes()
+            from historical_archive_access import school_archive, archive_bytes
+            from business_changes.snapshots import read_scope
+            with read_scope(db) as connection:
+                archive = school_archive(connection, report_id=int(report_id), confirmation_id=int(confirmation_id))
+            student = db.one("SELECT * FROM students WHERE student_id=?", (row["student_id"],))
+            if archive is None or student is None:
+                return self.error_page("原确认PDF及其正式归档不可读取，请恢复原件。", HTTPStatus.NOT_FOUND)
+            try:
+                payload = archive_bytes(archive, nas.student_folder(student))
+            except (OSError, ValueError):
+                return self.error_page("确认PDF归档缺失或校验失败，请恢复原件。", HTTPStatus.NOT_FOUND)
+            target = Path(archive.file_path)
+        else:
+            payload = target.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", "application/pdf")
         self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(target.name)}")
@@ -41748,11 +41780,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         body = f"""
         <a class="back-link" href="/school-plan-reports">← 返回学校方案报告</a>
         <section class="dashboard-hero panel">
-          <div><span class="eyebrow">创建学校方案报告</span><h2>创建学校方案报告</h2><p>选择学生、学校和报告模块后，系统会保存数据快照，并生成页面预览与 PDF 文件。</p></div>
+          <div><span class="eyebrow">创建学校方案报告</span><h2>创建学校方案报告</h2></div>
           <span class="status ok">已启用 PDF 生成</span>
         </section>
         <section class="panel">
-          <div class="panel-head"><div><h2>1. 选择学生</h2><p>第一阶段最终会支持多选学生；当前骨架先支持从入口带入或手动选择。</p></div></div>
+          <div class="panel-head"><div><h2>1. 选择学生</h2></div></div>
           <form class="filter-bar" method="get" action="/school-plan-reports/create" data-school-plan-student-form data-school-plan-selected-student-id="{esc(selected_student_id)}">
             <label class="wide">学生<select name="student_id" data-school-plan-student-select>{student_options}</select><small>选择后自动载入学生信息</small></label>
           </form>
@@ -55624,9 +55656,19 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         student_name_suggestions = self.student_name_suggestions_html(student_name_suggestions_id)
         can_edit = can_edit_student_profile(self.user)
         can_delete = can_delete_student_record(self.user)
+        from business_changes.snapshots import read_scope
+        from reviewed_historical_transfer import load_historical_transfer_ownership
+        historical_transfer_map = {}
+        historical_transfer_flags = student_case_views.resolve_student_case_feature_flags(setting_reader=db.setting)
+        readable_history_ids = [str(row['student_id']) for row in rows_data if
+            student_capabilities.can_view_transfer_cases(self.user, row, flags=historical_transfer_flags)]
+        if readable_history_ids:
+            with read_scope(db) as connection:
+                historical_transfer_map = load_historical_transfer_ownership(connection, readable_history_ids)
         rows_html = "".join(
             student_management_application_row_html(
-                row, summary_map[row["student_id"]], self.csrf, can_edit, can_delete
+                row, summary_map[row["student_id"]], self.csrf, can_edit, can_delete,
+                historical_transfer=bool(historical_transfer_map.get(str(row['student_id'])))
             )
             for row in rows_data
         ) or '<tr><td colspan="10" class="empty">没有符合条件的学生</td></tr>'
@@ -61002,7 +61044,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 layers.append('<strong>等待学校结果</strong><ul class="student-detail-school-list">' + "".join(
                     f'<li>{esc(name)}</li>' for name in card_summary.schools.waiting_result_names) + '</ul>')
             if card_summary.schools.not_submitted_names:
-                layers.append('<strong>家长已确认，尚未递交</strong><ul class="student-detail-school-list">' + "".join(
+                layers.append(('<strong>尚未递交</strong><ul class="student-detail-school-list">' if higher_education_experience["higher_education_active"] and not higher_education_experience["school_education_active"] else '<strong>家长已确认，尚未递交</strong><ul class="student-detail-school-list">') + "".join(
                     f'<li>{esc(name)}</li>' for name in card_summary.schools.not_submitted_names) + '</ul>')
             school_names_html = "".join(layers) or (
                 '<ul class="student-detail-school-list">' + "".join(
@@ -61015,7 +61057,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         elif card_summary.schools.has_application_cycle is False:
             school_names_html = '<p class="student-detail-school-empty">尚未建立申请周期</p>'
         else:
-            school_names_html = '<p class="student-detail-school-empty">家长尚未确认递交学校</p>'
+            school_names_html = f'<p class="student-detail-school-empty">{esc(getattr(card_summary.schools, "empty_label", "") or "家长尚未确认递交学校")}</p>'
         school_more_html = (
             f'<p class="student-detail-school-more">另有 {int(card_summary.schools.remaining_count)} 所</p>'
             if card_summary.schools.remaining_count
@@ -61027,6 +61069,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if can_access_module(self.user, "school_plan_reports")
             else ""
         )
+        if higher_education_experience["higher_education_active"] and not higher_education_experience["school_education_active"]:
+            school_plan_link_html = '<a class="student-detail-card-link" href="/higher-education">查看高等教育申请</a>' if can_access_module(self.user, "school_plan_reports") else ""
         next_reminder = card_summary.next_reminder
         can_view_reminders = can_reminder_action(self.user, "view")
         if not can_view_reminders:
@@ -61083,10 +61127,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     latest_case, self.student_visa_result_display(latest_case)
                 )
         else:
-            stage_evidence = self.student_cycle_stage_evidence_html(
-                student_id, (workflow_projection_map or {}).get(str(student_id))
-            )
-        status_card_stage = current_status_text if visa_only else student_stage_display_label(card_summary.stage_label)
+            if not higher_education_experience["contract_applicable"]:
+                stage_evidence = '<p class="muted">大学申请无需服务合同</p>'
+            else:
+                stage_evidence = self.student_cycle_stage_evidence_html(
+                    student_id, (workflow_projection_map or {}).get(str(student_id))
+                )
+        status_card_stage = student_stage_display_label(card_summary.stage_label)
         status_card_html = f'''<div data-student-summary-fact data-student-detail-status-card>
               <span>当前状态</span>
               <strong class="student-detail-stage">{esc(status_card_stage)}</strong>
@@ -61104,6 +61151,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             lifecycle_view, workflow_module_statuses_override,
             management=workflow_module_management,
             can_edit_profile=can_edit_student_profile(self.user),
+            higher_education=bool(higher_education_experience["higher_education_active"] and not higher_education_experience["school_education_active"]),
         )
         file_storage_status_text = {
             "pending": "待同步",
@@ -61116,7 +61164,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         <section class="student-summary-card panel">
           <div class="student-summary-main">
             <a class="back-link" href="/students">← 学生列表</a>
-            <div class="student-title"><div class="avatar">{esc(student["passport_first_name"][:1])}</div><div><h2>{esc(student["passport_first_name"])} {esc(student["passport_last_name"])} <span data-student-transfer-name>{transfer_name_badge}</span></h2><p>{esc(student_id)} · {esc(current_status_text)}</p></div></div>
+            <div class="student-title"><div class="avatar">{esc(student["passport_first_name"][:1])}</div><div><h2>{esc(student["passport_first_name"])} {esc(student["passport_last_name"])} {student_type_badge_html(student)} <span data-student-transfer-name>{transfer_name_badge}</span></h2><p>{esc(student_id)} · {esc(current_status_text)}</p></div></div>
             <div class="alerts">{alert_html}</div><div class="student-actions" id="workflow-progress">{school_plan_button}{primary_action_grid}{edit_profile_button}{withdrawal_button}{delete_student_button}{business_operations}</div>
           </div>
           <div class="student-summary-facts">
@@ -62135,6 +62183,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def offer_panel(self, student_id, offers):
         lifecycle_contexts = getattr(self, "_student_lifecycle_record_contexts", {})
+        from tertiary_course_display import offer_course_annotations
+        from business_changes.snapshots import read_scope
+        with read_scope(db) as connection:
+            course_annotations = offer_course_annotations(connection, student_id, [offer['id'] for offer in offers])
         status_options = ("received", "sent_to_parent", "signed", "signed_received", "cancelled", "rejected", "expired")
         currency_options = ("AUD", "CNY", "USD")
         has_canonical_acceptances = db.one(
@@ -62321,6 +62373,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 f'<article id="offer-card-{offer["id"]}" class="student-file-record offer-record-card{" offer-record-card--muted" if is_muted else ""}" data-offer-current-accepted="{"true" if is_current_accepted else "false"}" data-offer-accept-eligible="{"true" if classification_resolved and not legacy_accepted_conflict else "false"}">'
                 f'<div class="student-file-record-main">'
                 f'{lifecycle_context_badge_html(lifecycle_contexts.get(int(offer["id"])))}'
+                f'{course_annotations.get(int(offer["id"]), "")}'
                 f'<div class="student-file-record-head"><div><span class="status">{esc(document_label)}</span>'
                 f'<strong>{esc(offer["school_name"])}</strong><small>{esc(file_title)}</small><div class="offer-state-badges">{accepted_badge}{classification_badge}</div></div>'
                 f'<small>{esc(display_datetime(uploaded_value))}</small></div>'
@@ -71601,6 +71654,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("Upload Review 与学生不匹配", 400)
         if not db.one("SELECT student_id FROM students WHERE student_id=?", (student_id,)):
             return self.error_page("学生不存在", 404)
+        pending_files = unresolved_upload_review_files(metadata)
+        if not pending_files:
+            return self.flash_redirect(f"/students/{student_id}?tab={config['tab']}", "本批材料已处理完成。")
         db.audit(
             self.user, "upload_review_opened", "upload_review",
             metadata.get("session_id"), new_value=json.dumps({"module": module}, ensure_ascii=False),
@@ -71633,7 +71689,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         course_offer_choices.extend(accepted_course_offers(connection,student_id,cycle[0]))
         target_label = config.get("target_label")
         cards = []
-        for file_meta in metadata["files"]:
+        for file_meta in pending_files:
             index = file_meta["index"]
             review_issue=''
             if file_meta.get('item_id'):
@@ -71741,7 +71797,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         cycle_selection = self.coe_cycle_selection_html(student_id, stored_form=metadata.get("form")) if module == "COE + OSHC" else ""
         body = f"""
         <section class="panel upload-review upload-review-page">
-          <div class="panel-head upload-review-header"><div><h2>Upload Review</h2><p class="upload-review-summary">确认后才会写入学生目录；此页面只显示 {esc(module)} 相关 DocumentType。</p>{optional_note}</div></div>
+          <div class="panel-head upload-review-header"><div><a class="back-link" href="/students/{esc(student_id)}?tab={esc(config['tab'])}">← 返回学生信息页</a><h2>Upload Review</h2><p class="upload-review-summary">确认后才会写入学生目录；此页面只显示 {esc(module)} 相关 DocumentType。</p>{optional_note}</div></div>
           <form method="post" action="/students/{student_id}/upload-review/{esc(token)}/confirm" class="stack-form upload-review-file-list">
             <input type="hidden" name="csrf" value="{esc(self.csrf)}">
             {cycle_selection}
@@ -72324,6 +72380,30 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         student = db.one("SELECT * FROM students WHERE student_id=?", (student_id,))
         if not student:
             return self.error_page("学生不存在", 404)
+        pending_files = unresolved_upload_review_files(metadata)
+        if not pending_files:
+            return self.flash_redirect(f"/students/{student_id}?tab={config['tab']}", "本批材料已处理完成。")
+        # Explicit removal is distinct from leaving a file unchecked. It must
+        # also work when the last pending file is the one being removed.
+        if not any(self.form.get(f"confirm_item_{item['index']}") == "1" for item in pending_files):
+            discarded = [item for item in pending_files if self.form.get(f"discard_item_{item['index']}") == "1"]
+            if discarded:
+                for item in discarded:
+                    if item.get("item_id"):
+                        if getattr(self, 'business_changes_enabled', lambda: False)():
+                            self.business_change_update_review_state(student_id, module, [item['item_id']], 'cancelled')
+                        else:
+                            db.execute("UPDATE upload_review_items SET status='Cancelled',cancelled_by=?,cancelled_at=? WHERE id=? AND student_id=? AND module_key=? AND status='NeedsReview'",
+                                (self.user['id'], now_iso(), item['item_id'], student_id, module))
+                if metadata.get('session_id'):
+                    if not getattr(self, 'business_changes_enabled', lambda: False)():
+                        refresh_upload_session_counts(metadata['session_id'])
+                    complete = not unresolved_upload_review_files(metadata)
+                else:
+                    complete = len(discarded) == len(pending_files)
+                if complete:
+                    delete_upload_review(token)
+                return self.flash_redirect(f"/students/{student_id}?tab={config['tab']}", "已移除所选待审文件，已有正式文件保持不变。")
         allowed_types = set(module_document_types(module))
         stored_form = metadata.get("form") or {}
         if module == "Offer":
@@ -72331,7 +72411,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 self.form.get(f"confirm_item_{item['index']}") == "1"
                 and str(self.form.get(f"extract_language_school_name_{item['index']}",
                                      stored_form.get("language_school_name") or "") or "").strip()
-                for item in metadata.get("files", ())
+                for item in pending_files
             )
             if needs_language_column and not any(
                 row["name"] == "language_school_name" for row in db.all("PRAGMA table_info('offers')")
@@ -72366,7 +72446,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             (self.form.get(f"document_type_{file_meta['index']}") or "").strip()
                         ) in {"COE", "COE_CAAW"}
                         and str(self.form.get(f"course_mode_{file_meta['index']}") or '') != 'language'
-                        for file_meta in metadata.get("files", ())
+                        for file_meta in pending_files
                     )
                     if not requires_acceptance:
                         transfer_branch_id = None
@@ -72455,7 +72535,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return_target = f"/students/{student_id}?tab={config['tab']}"
         saved = []
         selected_files = [
-            file_meta for file_meta in metadata["files"]
+            file_meta for file_meta in pending_files
             if self.form.get(f"confirm_item_{file_meta['index']}") == "1"
         ]
         if not selected_files:
@@ -72527,18 +72607,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         )
         visa_review_skipped=[]
         session_id = metadata.get("session_id")
-        for file_meta in metadata["files"]:
+        for file_meta in pending_files:
             index = str(file_meta["index"])
             item_id = file_meta.get("item_id")
             if file_meta not in selected_files:
-                if item_id:
-                    if getattr(self,'business_changes_enabled',lambda:False)():
-                        self.business_change_update_review_state(student_id,module,[item_id],'cancelled')
+                if self.form.get(f"discard_item_{index}") == "1" and item_id:
+                    if getattr(self, 'business_changes_enabled', lambda: False)():
+                        self.business_change_update_review_state(student_id, module, [item_id], 'cancelled')
                     else:
-                        db.execute(
-                            "UPDATE upload_review_items SET status='Cancelled',cancelled_by=?,cancelled_at=? WHERE id=?",
-                            (self.user["id"], now_iso(), item_id),
-                        )
+                        db.execute("UPDATE upload_review_items SET status='Cancelled',cancelled_by=?,cancelled_at=? WHERE id=? AND student_id=? AND module_key=? AND status='NeedsReview'",
+                            (self.user["id"], now_iso(), item_id, student_id, module))
                 continue
             doc_type = (self.form.get(f"document_type_{index}") or "").strip()
             if doc_type not in allowed_types:
@@ -72716,7 +72794,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 new_value=json.dumps({"saved": len(saved), "module": module}, ensure_ascii=False),
                 student_id=student_id, ip=self.client_address[0], device=self.headers.get("User-Agent"),
             )
-        if not visa_review_skipped:delete_upload_review(token)
+        if metadata.get("session_id") and all(item.get("item_id") for item in metadata["files"]):
+            batch_complete = not unresolved_upload_review_files(metadata)
+        else:
+            batch_complete = not visa_review_skipped and len(selected_files) == len(pending_files)
+        if batch_complete:
+            delete_upload_review(token)
         tuition_notice = ""
         if pending_coe_tuition:
             reasons = " ".join(dict.fromkeys(pending_coe_tuition.values()))

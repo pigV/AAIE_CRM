@@ -184,12 +184,15 @@ def _received_progression_offer_cycles(connection, cycle_ids, today):
 
 def resolve_dashboard_stage(*, form_live=False, form_submitted=False, contract=None, contract_required=True,
                             preparing=False, submitted=False, offer=False, accepted=False,
-                            outstanding=(), coe=False, visa=None, offer_hold=False):
-    if visa in {"granted", "refused", "withdrawn"} or offer_hold:
+                            outstanding=(), coe=False, visa=None, offer_hold=False,
+                            plan_optional=False, school_application_applicable=True):
+    if visa in {"granted", "refused", "withdrawn"} or (offer_hold and school_application_applicable):
         return None
     if visa == "lodged":
         return "11_visa_result", ""
     if visa == "preparing":
+        return "10_visa_submission", ""
+    if not school_application_applicable:
         return "10_visa_submission", ""
     if accepted:
         if coe:
@@ -202,7 +205,7 @@ def resolve_dashboard_stage(*, form_live=False, form_submitted=False, contract=N
     if submitted:
         return "07_school_response", ""
     if contract in {"signed", "not_required"}:
-        if preparing:
+        if preparing or (plan_optional and form_submitted):
             return "06_school_application_submission", ""
         if contract == "signed" or form_submitted:
             return "waiting_school_plan", "等待制作学校方案"
@@ -444,16 +447,8 @@ def load_dashboard_stages(connection, cycle_ids):
     optional_steps = load_optional_steps(connection, tuple(row["id"] for row in acceptance.values()))
 
     visas = {}
-    import json
-    visa_only_students=set()
-    if 'form_data_json' in {row[1] for row in connection.execute('PRAGMA table_info(students)')}:
-        for sid,profile in connection.execute(f"""SELECT student_id,form_data_json FROM students
-            WHERE student_id IN (SELECT student_id FROM application_cycles WHERE id IN ({marks}))""",cycle_ids):
-            try:
-                if json.loads(profile or '{}').get('application_service')=='visa_only':
-                    visa_only_students.add(str(sid))
-            except (ValueError,TypeError,AttributeError):
-                continue
+    from higher_education_workflow_adapter import visa_only_cycle_ids
+    visa_only_cycles = visa_only_cycle_ids(connection, cycle_ids)
     visa_retries = load_retries(connection, cycle_ids)
     for row in _rows(connection, f"""
         SELECT visa.*,result.effective_result,result.source_event_id FROM visa_cases visa
@@ -464,7 +459,7 @@ def load_dashboard_stages(connection, cycle_ids):
          ORDER BY coalesce(visa.actual_lodgement_date,'') DESC,visa.id DESC
     """, cycle_ids):
         status = _visa_status(row,connection)
-        if (not status and str(row.get('student_id')) in visa_only_students
+        if (not status and row.get('application_cycle_id') in visa_only_cycles
                 and is_student_visa_case(row) and str(row.get('status') or '').strip().lower()=='ready to lodge'):
             status='preparing'
         resumed = retry_key(row)
@@ -480,6 +475,9 @@ def load_dashboard_stages(connection, cycle_ids):
     # They still belong to one explicit cycle and are not secondary-school Offer
     # events. Never borrow an unassigned file or an older cycle's Offer here.
     legacy_he_offers = legacy_he_offer_cycles(connection,cycle_ids,today)
+    from higher_education_workflow_adapter import confirmed_higher_education_coe_cycles, legacy_higher_education_coe_schools
+    higher_coe_cycles = confirmed_higher_education_coe_cycles(connection, cycle_ids)
+    legacy_accepted_coe = legacy_higher_education_coe_schools(connection, cycle_ids)
     received_progression_offers = _received_progression_offer_cycles(connection,cycle_ids,today)
     contract_decisions = stage_decisions(connection, "cycle_contract_requirement_confirmed", cycle_ids)
     pathway_returns = stage_decisions(connection, "progression_school_return_confirmed", cycle_ids)
@@ -488,8 +486,12 @@ def load_dashboard_stages(connection, cycle_ids):
         choice = acceptance.get(cycle_id)
         cycle_offers = offers.get(cycle_id, {})
         chosen_offer = cycle_offers.get(choice["offer_received_event_id"]) if choice else None
+        # This map already excludes active selections, same-school withdrawals,
+        # invalid signatures and nonmatching CoEs. Only an unrelated withdrawn
+        # school may yield to independently verified new tertiary evidence.
         offer_hold = bool(choice and (
-            (choice["acceptance_status"] == "withdrawn" and not choice["selection_resumed"]) or
+            (choice["acceptance_status"] == "withdrawn" and not choice["selection_resumed"]
+             and cycle_id not in legacy_accepted_coe) or
             (choice["active"] and (not chosen_offer or chosen_offer["invalid"]))
         ))
         current_offers = [offer for offer in cycle_offers.values() if not offer["invalid"]]
@@ -504,10 +506,11 @@ def load_dashboard_stages(connection, cycle_ids):
             not offer["offer_expiry_date"] or (expiry_dates[offer["id"]] or "") >= today
             for offer in current_offers
         ) or cycle_id in received_progression_offers or cycle_id in legacy_he_offers
-        accepted = bool(choice and choice["active"])
+        accepted = bool(choice and choice["active"]) or cycle_id in legacy_accepted_coe
         pathway = pathway_components.get(cycle_id, ())
-        confirmed_coe = bool(fact.final_school_coe_confirmed)
-        school_names = (choice["school_name_snapshot"],) if accepted else ()
+        confirmed_coe = bool(fact.final_school_coe_confirmed) or cycle_id in higher_coe_cycles
+        school_names = ((choice["school_name_snapshot"],) if choice and choice['active']
+                        else (legacy_accepted_coe[cycle_id],) if cycle_id in legacy_accepted_coe else ())
         if pathway:
             accepted = fact.final_acceptance_selected
             offer_hold = offer_hold or any(
@@ -562,6 +565,9 @@ def load_dashboard_stages(connection, cycle_ids):
             if application not in answered or status not in WAITING_SCHOOL_RESPONSE
         }
         waiting_for_school = bool(responses & WAITING_SCHOOL_RESPONSE)
+        # A profile service choice applies only to this student's newest active
+        # initial cycle, never an independently owned transfer/progression case.
+        visa_only = cycle_id in visa_only_cycles
         resolved = resolve_dashboard_stage(
             form_live=form_live, form_submitted=form_submitted or gate == "waiting_contract_creation",
             contract=contract, contract_required=required,
@@ -569,6 +575,7 @@ def load_dashboard_stages(connection, cycle_ids):
             submitted=waiting_for_school, offer=valid_offer, accepted=accepted,
             outstanding=outstanding, coe=confirmed_coe,
             visa=visas.get(cycle_id), offer_hold=offer_hold,
+            plan_optional=stream == 'higher_education', school_application_applicable=not visa_only,
         )
         if resolved and resolved[0] == "07_school_response" and expired_offers:
             expired_names = sorted({offer["school_name_snapshot"] for offer in expired_offers
@@ -580,7 +587,7 @@ def load_dashboard_stages(connection, cycle_ids):
             expired_detail = f"{'、'.join(expired_names)} Offer 已过期".strip()
             waiting_detail = f"等待 {'、'.join(waiting_names)} 回复" if waiting_names else "等待其他学校回复"
             resolved = (resolved[0], f"{expired_detail} · {waiting_detail}")
-        if (responses or expired_offers) and not waiting_for_school and not valid_offer and not accepted and not (
+        if not visa_only and (responses or expired_offers) and not waiting_for_school and not valid_offer and not accepted and not (
             offer_hold or visas.get(cycle_id) in {"lodged", "granted", "refused", "withdrawn"}
         ):
             if responses and responses <= {"rejected", "withdrawn", "closed", "not_proceeding"}:

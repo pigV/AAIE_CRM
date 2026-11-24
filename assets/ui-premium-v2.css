@@ -26836,6 +26836,18 @@
 .ui-premium-v2 .upload-review-page .upload-review-file-card:not(.is-fullscreen) .upload-review-preview-stage img {
   max-height:none; height:auto; object-fit:contain;
 }
+/* Rotated images need a real layout box and a scrollable viewport. Keep the
+   normal full-page height, while making oversized zoomed edges reachable. */
+.ui-premium-v2 .upload-review-page .upload-review-file-card .upload-review-preview-stage.review-preview-canvas--sized {
+  overflow:auto; min-width:0; max-width:100%;
+}
+.ui-premium-v2 .upload-review-page [data-review-preview-frame] {
+  position:relative; margin:0 auto;
+}
+.ui-premium-v2 .upload-review-page [data-review-preview-frame] > img {
+  position:absolute; left:50%; top:50%; margin:0; max-width:none; max-height:none;
+  transition:none;
+}
 .ui-premium-v2 .upload-review-page .upload-review-file-meta > [data-school-course-tuition] {
   grid-column:1 / -1; width:100%; min-width:0;
 }

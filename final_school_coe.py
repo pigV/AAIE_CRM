@@ -68,12 +68,18 @@ def eligibility_reason(row, today=None):
     course = row["coe_course"] or ""
     if not course.strip() or not (row["coe_provider"] or row["school_name"] or "").strip():
         return "CoE 提供方或课程待核对"
-    if re.search(r"\b(elicos|english|language|foundation|pathway|preparatory|bridging)\b|语言|预科|衔接", course, re.I):
+    if re.search(r"\b(elicos|english|language|foundation|pathway|preparatory|preparation|bridging)\b|语言|预科|衔接", course, re.I):
         return "这份 CoE 属于语言或衔接课程，请核对主课 CoE"
     school_name = row["school_name_snapshot"]
     provider = row["coe_provider"] or row["school_name"]
     key = lambda value: re.sub(r"[^a-z0-9]", "", value.casefold())
     provider_names = re.split(r"\[|\(trading as:", provider, flags=re.I)
+    # A CRICOS provider may explicitly list several trading names. Compare
+    # whole names in that clause only; a shared city or a substring is not an
+    # identity, and an unlabelled 'and' is not evidence of an alias list.
+    trading = re.search(r"\(trading\s+as\s*:\s*([^)]*)", provider, re.I)
+    if trading:
+        provider_names.extend(re.split(r"\s+and\s+", trading.group(1), flags=re.I))
     if key(school_name) in {key(name) for name in provider_names}:
         return ""
     government_codes = {"VIC": "00861K", "NSW": "00588M", "SA": "00018A"}

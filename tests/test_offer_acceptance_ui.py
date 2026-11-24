@@ -1,9 +1,18 @@
 import inspect
 import unittest
+from contextlib import contextmanager
+import sqlite3
 
 
 class OfferPanelUiTests(unittest.TestCase):
     class DbStub:
+        @contextmanager
+        def read_snapshot(self):
+            connection=sqlite3.connect(':memory:')
+            connection.executescript('CREATE TABLE application_cycles(id,student_id); CREATE TABLE audit_logs(id,action_type,module_name,student_id,record_id,new_value);')
+            try:yield connection
+            finally:connection.close()
+
         def one(self, sql, params=()):
             if "student_offer_acceptances" in sql:
                 return {"offer_id": 1, "school_name": "Accepted School"}

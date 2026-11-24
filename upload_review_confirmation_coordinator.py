@@ -10,6 +10,25 @@ import record_picker_and_uploader
 from student_case_feature_flags import StudentCaseFeatureFlags
 
 
+def pending_review_files(connection, metadata):
+    """Return unresolved entries, preserving their original manifest indexes.
+
+    This is a read-only projection; never rewrite a sealed manifest after a
+    partial confirmation. Keep the original manifest for command verification.
+    """
+    pending=[]
+    for item in metadata['files']:
+        row=connection.execute('''SELECT status FROM upload_review_items
+            WHERE id=? AND upload_session_id=? AND student_id=? AND module_key=?''',
+            (item.get('item_id'),metadata.get('session_id'),str(metadata['student_id']),metadata['module'])).fetchone()
+        if row is None:
+            raise ValueError('材料审核清单与原记录不匹配，请核对原上传。')
+        if row[0]=='NeedsReview':pending.append(item)
+        elif row[0] not in {'Confirmed','Cancelled'}:
+            raise ValueError('材料审核状态未知，请联系管理员核对。')
+    return pending
+
+
 @dataclass(frozen=True)
 class ConfirmedUpload:
     module: str

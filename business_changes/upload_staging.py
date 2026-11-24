@@ -1,5 +1,6 @@
 """Prepare isolated pending-upload bytes and atomically register their manifest."""
 import json
+import hashlib
 import mimetypes
 from pathlib import Path
 import shutil
@@ -8,7 +9,46 @@ import zipfile
 
 from .files import persist_verified_file
 from .contracts import BusinessPermissionError
-from .upload_review import start_review
+from .upload_review import start_review, verify_review_manifest
+
+
+def reusable_pending_token(conn, g, *, student_id, module, actor_id, files, context):
+    """Reuse only a complete, sealed batch with identical bytes and intent.
+
+    Run under the caller's immediate transaction so two upload requests cannot
+    both register a new batch. Legacy/unreadable manifests remain pending and
+    are never inferred to be approved or deleted by this check.
+    """
+    signature=lambda items: [(i['original_name'],i['content_type'],i['file_size'],i['sha256']) for i in items]
+    # CSRF changes with a new login; it is transport authorization, not the
+    # material's business intent. Keep the original context in the sealed
+    # manifest and its receipt, and use that unchanged context for validation.
+    business_context=lambda form: {key:value for key,value in form.items() if key!='csrf'}
+    expected=signature(files)
+    candidates=conn.execute('''SELECT s.session_token FROM upload_sessions s
+        WHERE s.student_id=? AND s.module_key=? AND s.uploaded_by=?
+        AND EXISTS(SELECT 1 FROM upload_review_items i WHERE i.upload_session_id=s.id AND i.status='NeedsReview')
+        ORDER BY s.id DESC''',(str(student_id),module,actor_id)).fetchall()
+    for (token,) in candidates:
+        try:
+            folder=g['upload_review_path'](token)
+            metadata=json.loads((folder/'review.json').read_text(encoding='utf-8'))
+            if (metadata.get('business_sync_version')!=1
+                    or not isinstance(metadata.get('form'),dict)
+                    or business_context(metadata['form'])!=business_context(context)):continue
+            prepared=[{'original_name':item['original_name'],
+                'staging_path':str(g['ensure_within'](folder/item['blob'],folder)),
+                'content_type':item['content_type'],'file_size':item['size'],'sha256':item['sha256']}
+                for item in metadata['files']]
+            if signature(prepared)!=expected:continue
+            if not verify_review_manifest(conn,metadata=metadata,prepared_files=prepared):continue
+            if any(not Path(item['staging_path']).is_file()
+                   or hashlib.sha256(Path(item['staging_path']).read_bytes()).hexdigest()!=item['sha256']
+                   for item in prepared):continue
+            return token
+        except (OSError,ValueError,KeyError,TypeError):
+            continue
+    return None
 
 
 def create_pending_review(g,student_id,module,uploads,user,form,*,permission_policy):
@@ -80,6 +120,18 @@ def create_pending_review(g,student_id,module,uploads,user,form,*,permission_pol
             if module=='Visa':
                 from .visa_review_context import freeze_context
                 context=freeze_context(conn,student_id,context)
+            retained_token=reusable_pending_token(conn,g,student_id=student_id,module=module,
+                actor_id=actor['id'],files=files,context=context)
+            if retained_token:
+                from .commands import TransactionView
+                changes=conn.total_changes
+                authorize(TransactionView(conn,'pending_reuse_authorization'))
+                if conn.total_changes!=changes:
+                    raise ValueError('上传审核权限检查不得修改业务记录')
+                # Only our brand-new scratch folder is removed. The retained
+                # pending manifest, bytes and review records remain untouched.
+                shutil.rmtree(folder)
+                return retained_token
             start_review(conn,student_id=student_id,module_key=module,session_token=token,
                 prepared_files=files,actor=actor,occurred_at=stamp,request_context=context,
                 authorize=authorize,metadata_after=metadata_after)

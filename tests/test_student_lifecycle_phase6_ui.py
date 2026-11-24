@@ -338,7 +338,11 @@ class StudentLifecyclePhase6UIContracts(unittest.TestCase):
         import inspect
         import app
 
-        student_detail_source = inspect.getsource(app.CRMHandler.student_detail)
+        # The live handler owns a snapshot wrapper; shared business controls
+        # are rendered by its retained parent implementation.
+        wrapper_source = inspect.getsource(app.CRMHandler.student_detail)
+        self.assertIn("super().student_detail(", wrapper_source)
+        student_detail_source = inspect.getsource(app.CRMLegacyHandler.student_detail)
         self.assertNotIn("render_student_lifecycle_sections(", student_detail_source)
         self.assertNotIn("student_detail_workflow_overview_html(", student_detail_source)
         self.assertEqual(1, student_detail_source.count("student_detail_business_operations_html("))

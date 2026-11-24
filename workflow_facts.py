@@ -49,6 +49,15 @@ def _load_higher_education_facts(conn,ids,state):
             WHERE application_cycle_id IN ({higher_marks}) AND is_current=1
             AND lower(status) NOT IN ('draft','withdrawn') GROUP BY application_cycle_id''',higher_ids):
             state[int(cycle_id)]['submitted_application_count']=int(count)
+    from higher_education_workflow_adapter import confirmed_higher_education_coe_cycles, legacy_higher_education_coe_schools
+    confirmed = confirmed_higher_education_coe_cycles(conn, higher_ids)
+    legacy_coe = legacy_higher_education_coe_schools(conn, higher_ids)
+    for cycle_id, cycle_type in rows:
+        if cycle_type == 'initial':
+            state[int(cycle_id)]['final_school_coe_confirmed'] = int(cycle_id) in confirmed or int(cycle_id) in legacy_coe
+            if int(cycle_id) in legacy_coe:
+                state[int(cycle_id)].update(final_acceptance_selected=True, signed_offer_completed=True,
+                    actionable_offer_count=max(1,state[int(cycle_id)]['actionable_offer_count']), coe_exists=True)
 
 
 def _load_student_visa_facts(conn, ids, state):
@@ -503,5 +512,8 @@ def load_workflow_facts(
 
     _load_higher_education_facts(conn, ids, state)
     _load_student_visa_facts(conn, ids, state)
+    from higher_education_workflow_adapter import visa_only_cycle_ids
+    for cycle_id in visa_only_cycle_ids(conn, ids):
+        state[cycle_id]['school_application_applicable'] = False
 
     return {cycle_id: WorkflowFacts(**values) for cycle_id, values in state.items()}

@@ -63,6 +63,7 @@ class WorkflowFacts:
     final_school_coe_issue: str | None = None
     requires_fresh_parent_form: bool = False
     education_stream: str = 'school_education'
+    school_application_applicable: bool = True
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ def _issue_codes(facts: WorkflowFacts) -> tuple[str, ...]:
         issues.append("PLAN_CONFIRMED_WITHOUT_SENT_PLAN")
     if (
         facts.cycle_type != "progression"
+        and facts.education_stream != "higher_education"
         and facts.submitted_application_count
         and not facts.plan_confirmed
     ):
@@ -153,6 +155,9 @@ def resolve_workflow_stage(facts: WorkflowFacts) -> WorkflowStageResult:
         )
     if facts.requires_fresh_parent_form and not facts.parent_form_submitted:
         return _active_result(facts, 1, "等待家长提交新一轮申请表单", issues)
+    if not facts.school_application_applicable:
+        return _active_result(facts, 11 if facts.visa_submitted else 10,
+                              '等待签证结果' if facts.visa_submitted else '准备签证材料并正式递交 Visa', issues)
     if facts.cycle_type == "progression":
         if facts.contract_gate_status == "unclassified":
             return _active_result(
@@ -243,8 +248,10 @@ def resolve_workflow_stage(facts: WorkflowFacts) -> WorkflowStageResult:
         return _active_result(
             facts, 4, "已有方案，待重新发送", issues, title="等待发送学校方案"
         )
+    if facts.education_stream == 'higher_education' and facts.student_exists:
+        return _active_result(facts, 6, '准备大学申请材料与目标申请；学校方案按需制作', issues)
     if facts.contract_gate_status=='not_required' and facts.student_exists:
-        return _active_result(facts,4,'等待制作高等教育学校方案' if facts.education_stream=='higher_education' else '等待制作学校方案',issues)
+        return _active_result(facts, 4, '等待制作学校方案', issues)
     if facts.contract_execution_pending:
         return _active_result(
             facts, 3, "家长已签署，等待 AAIE 完成签章及完整合同归档", issues,

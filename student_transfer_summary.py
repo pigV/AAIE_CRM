@@ -47,6 +47,7 @@ class StudentTransferSummary:
     secondary_action_href: str | None = None
     records: tuple[StudentTransferRecord, ...] = ()
     creation_allowed: bool = False
+    historical_cycles: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -410,6 +411,8 @@ def build_student_transfer_summary(
         transfer_state = load_student_transfer_state_map(
             connection, (str(student_id),)
         ).get(str(student_id))
+        from reviewed_historical_transfer import load_historical_transfer_ownership
+        historical_cycles = load_historical_transfer_ownership(connection, (str(student_id),)).get(str(student_id), ())
     summary = _summary_from_facts(
         student_id=str(student_id),
         can_create=student_capabilities.can_create_transfer_case(
@@ -421,6 +424,13 @@ def build_student_transfer_summary(
         cycle_by_case=cycle_by_case,
         projection_by_cycle=projection_by_cycle,
     )
+    if summary.state == "empty" and historical_cycles and (transfer_state is None or transfer_state.state == "ordinary"):
+        latest = historical_cycles[0]
+        summary = replace(summary, state="history",
+            status_label="历史转学已完成", target_school=latest['target_school'],
+            action_label="查看原周期材料",
+            action_href=f"/students/{student_id}?application_cycle_id={latest['cycle_id']}&tab=coe",
+            historical_cycles=historical_cycles)
     if transfer_state is None or transfer_state.state == "ordinary":
         return summary
     if transfer_state.state in {"contract_pending", "ready"}:
@@ -479,7 +489,12 @@ def render_student_transfer_summary(summary: StudentTransferSummary | None) -> s
                 f'<a class="secondary button-link compact" href="{escape(href, quote=True)}">'
                 f"{escape(label)}</a>"
             )
-    records = "".join(
+    reviewed_history = "".join(
+        '<li><a href="' + escape(f"/students/{summary.student_id}?application_cycle_id={item['cycle_id']}&tab=coe", quote=True) + '">'
+        + f"历史转学 · 原业务周期 #{int(item['cycle_sequence'])} · {escape(item['target_school'])} · 已完成"
+        + '</a></li>' for item in summary.historical_cycles
+    )
+    records = reviewed_history + "".join(
         '<li>'
         f'<a href="{escape(item.href, quote=True)}">'
         f'<strong>转学记录 #{item.case_sequence}</strong>'

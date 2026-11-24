@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 import sqlite3
 from typing import Iterable
@@ -100,6 +100,7 @@ class RecordLifecycleContext:
     component_order: int | None = None
     component_role: str | None = None
     document_role: str | None = None
+    reviewed_historical_transfer: bool = False
 
 
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
@@ -674,13 +675,38 @@ def load_record_contexts(
             component_role=link.get("component_role"),
             document_role=link.get("document_role"),
         )
+    from reviewed_historical_transfer import load_historical_transfer_ownership
+    history = load_historical_transfer_ownership(connection, (str(student_id),)).get(str(student_id), ())
+    for ownership in history:
+        # Only explicitly reviewed evidence is re-labelled. Other original-cycle
+        # applications and contracts keep their existing context.
+        reviewed_ids = {
+            'offer': {ownership['offer_id']},
+            'coe': {ownership['confirmation_id']},
+            'document': {ownership['offer_document_id'], ownership['confirmation_document_id']},
+            'contract': set(),
+        }[record_type]
+        for record_id in reviewed_ids:
+            current = contexts.get(record_id)
+            if (record_id in direct_cycle and direct_cycle[record_id] != ownership['cycle_id']
+                    or links.get(record_id, {}).get('case_id') is not None):
+                # Explicit invalid/cross-owner links are not an unlinked legacy
+                # record. Preserve the existing fail-closed context.
+                continue
+            if (current is None or record_id in invalid_payment_documents or current.case_id is not None
+                    or current.cycle_id not in (None, ownership['cycle_id'])):
+                continue
+            contexts[record_id] = replace(current, cycle_id=ownership['cycle_id'],
+                cycle_sequence=ownership['cycle_sequence'], cycle_status='closed',
+                record_context='HISTORICAL', target_context=ownership['target_school'],
+                reviewed_historical_transfer=True)
     return contexts
 
 
 def render_record_context(context: RecordLifecycleContext | None) -> str:
     if context is None or context.record_context == "LEGACY_UNCONFIRMED":
         return "历史记录 · 办理状态待确认"
-    label = LIFECYCLE_LABELS.get(context.lifecycle_type or "", "学生业务")
+    label = "历史转学" if context.reviewed_historical_transfer else LIFECYCLE_LABELS.get(context.lifecycle_type or "", "学生业务")
     parts = [label]
     if context.cycle_sequence is not None:
         parts.append(f"业务周期 #{context.cycle_sequence}")

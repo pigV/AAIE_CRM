@@ -2712,11 +2712,51 @@
       if (thumbnailObserver) thumbnailObserver.disconnect();
     };
     const applyTransform = () => {
-      if (!image) return;
-      image.style.transform = `rotate(${rotation}deg) scale(${zoom})`;
-      image.style.transformOrigin = "top center";
-      if (zoomSelect) zoomSelect.value = String(zoom);
+      if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) return;
+      // CSS transforms do not reserve layout space. Reserve the rotated bounds
+      // explicitly so no edge ends up at an unreachable negative scroll offset.
+      let frame = q("[data-review-preview-frame]", canvas);
+      if (!frame) {
+        frame = document.createElement("div");
+        frame.dataset.reviewPreviewFrame = "";
+        image.before(frame);
+        frame.appendChild(image);
+        canvas.classList.add("review-preview-canvas--sized");
+      }
+      const style = getComputedStyle(canvas);
+      const availableWidth = Math.max(1, canvas.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
+      const quarterTurn = rotation % 180 !== 0;
+      const rotatedWidth = quarterTurn ? image.naturalHeight : image.naturalWidth;
+      const rotatedHeight = quarterTurn ? image.naturalWidth : image.naturalHeight;
+      let scale = availableWidth / rotatedWidth;
+      if (image.classList.contains("fit-page")) {
+        const availableHeight = Math.max(120, window.innerHeight - 280);
+        scale = Math.min(scale, availableHeight / rotatedHeight);
+      }
+      scale *= zoom;
+      frame.style.width = `${Math.max(availableWidth, rotatedWidth * scale)}px`;
+      frame.style.height = `${rotatedHeight * scale}px`;
+      image.style.width = `${image.naturalWidth * scale}px`;
+      image.style.height = `${image.naturalHeight * scale}px`;
+      image.style.transform = `translate(-50%, -50%) rotate(${rotation}deg)`;
+      image.style.transformOrigin = "center";
+      if (zoomSelect) {
+        if (!Array.from(zoomSelect.options).some(option => option.value === String(zoom))) {
+          zoomSelect.add(new Option(`${Math.round(zoom * 100)}%`, String(zoom)));
+        }
+        zoomSelect.value = String(zoom);
+      }
     };
+    image?.addEventListener("load", applyTransform);
+    if (canvas && "ResizeObserver" in window) {
+      let previousWidth = 0;
+      new ResizeObserver(() => {
+        if (canvas.clientWidth === previousWidth) return;
+        previousWidth = canvas.clientWidth;
+        applyTransform();
+      }).observe(canvas);
+    }
+    window.addEventListener("resize", applyTransform);
     const updateControls = () => {
       if (indicator) indicator.textContent = `${page} / ${pageCount}`;
       if (prev) prev.disabled = page <= 1;

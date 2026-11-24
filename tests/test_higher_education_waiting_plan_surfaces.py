@@ -1,4 +1,4 @@
-"""Submitted optional-contract intake must remain visible on all shared surfaces."""
+"""University intake stays visible while its school plan remains optional."""
 import unittest
 from higher_education_repository import HigherEducationRepository
 from tests import test_business_change_student_list as list_fixture
@@ -36,7 +36,7 @@ class HigherEducationWaitingPlanSurfaces(unittest.TestCase):
 
     def test_submitted_intake_and_native_plan_submission_update_all_four_surfaces(self):
         self.prepare()
-        self.assert_surfaces('waiting_school_plan','等待制作学校方案')
+        self.assert_surfaces('06_school_application_submission','准备学校申请')
         with self.db.transaction() as connection:
             repo=HigherEducationRepository(connection)
             provider=repo.create_provider('SYNTHETIC UNIVERSITY','University',1,self.f.stamp,review_status='Approved')

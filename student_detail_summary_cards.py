@@ -22,6 +22,7 @@ class SchoolPlanCardSummary:
     submitted_count: int = 0
     has_application_cycle: bool | None = None
     application_cycle_id: int | None = None
+    empty_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,10 +85,103 @@ def _canonical_school_submissions(connection,cycle_id,student_id,confirmed_ids):
     return result
 
 
+def _load_higher_education_school_summary(connection, student_id, cycle_id):
+    """University work owns its own schools; K-12 plans remain historical."""
+    names, offers, waiting, drafts = {}, {}, {}, {}
+    applications = {}
+    submitted_count = 0
+    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    def receipt_guard(source, alias):
+        if not {'offer_received_events','offer_received_event_state_events'} <= tables:
+            return ''
+        fields = {row[1] for row in connection.execute('PRAGMA table_info(offer_received_events)')}
+        if source not in fields:
+            return ''
+        return f'''AND NOT EXISTS (SELECT 1 FROM offer_received_events receipt
+            WHERE receipt.{source}={alias}.id AND receipt.application_cycle_id={alias}.application_cycle_id
+              AND lower(coalesce((SELECT state.state FROM offer_received_event_state_events state
+                  WHERE state.offer_received_event_id=receipt.id
+                  ORDER BY state.occurred_at DESC,state.id DESC LIMIT 1),'active'))<>'active')'''
+    if {'higher_education_applications', 'higher_education_providers'} <= tables:
+        for application_id, name, status, submitted_at in connection.execute('''
+            SELECT application.id,provider.provider_name,application.status,application.submitted_at
+            FROM higher_education_applications application
+            JOIN higher_education_providers provider ON provider.id=application.provider_id
+            WHERE application.application_cycle_id=? AND application.is_current=1
+              AND lower(application.status) NOT IN ('withdrawn','superseded','closed')
+            ORDER BY application.id''', (cycle_id,)):
+            name = ' '.join(str(name or '').split())
+            key = _school_key(name)
+            if not key:
+                continue
+            names.setdefault(key, name)
+            applications[application_id] = (key, name)
+            if submitted_at and str(status).casefold() != 'draft':
+                submitted_count += 1
+                waiting.setdefault(key, name)
+            else:
+                drafts.setdefault(key, name)
+        if applications and 'higher_education_offers' in tables:
+            for application_id, in connection.execute(f'''
+                SELECT offer.application_id FROM higher_education_offers offer
+                WHERE offer.application_cycle_id=? AND lower(offer.status) IN ('received','accepted')
+                  {receipt_guard('higher_education_offer_id','offer')}''', (cycle_id,)):
+                if application_id in applications:
+                    key, name = applications[application_id]
+                    offers.setdefault(key, name)
+    if 'offers' in tables:
+        document_guard = '''AND NOT EXISTS (SELECT 1 FROM student_documents document
+            WHERE document.student_id=offer.student_id AND document.file_path=offer.offer_file_path
+              AND (document.is_active=0 OR document.document_status IN ('voided','deleted','archived')
+                   OR document.voided_at IS NOT NULL))''' if 'student_documents' in tables else ''
+        from dashboard_business_time import business_date_iso
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo('Australia/Melbourne')).date().isoformat()
+        for name, expiry, status, kind in connection.execute(f'''
+            SELECT offer.school_name,offer.offer_expiry_date,offer.offer_status,offer.document_type FROM offers offer
+            WHERE offer.student_id=? AND offer.application_cycle_id=?
+              AND offer.document_type IN ('Offer','SignedOffer')
+              AND trim(coalesce(offer.offer_file_path,''))<>''
+              AND lower(coalesce(offer.offer_status,'')) NOT IN
+                  ('void','voided','cancelled','canceled','withdrawn','declined','rejected','superseded','invalid_record')
+              {document_guard} {receipt_guard('legacy_offer_id','offer')}
+              ORDER BY offer.id''', (student_id, cycle_id)):
+            expiry_date = business_date_iso(expiry)
+            expired = bool(expiry and (not expiry_date or expiry_date < today))
+            signed_history = str(status or '').casefold() in {'accepted','signed','signed_received'} or kind == 'SignedOffer'
+            if expired and not signed_history:
+                continue
+            name = ' '.join(str(name or '').split())
+            key = _school_key(name)
+            if key:
+                names.setdefault(key, name)
+                if not expired:
+                    offers.setdefault(key, name)
+    from canonical_acceptance import active_acceptance_predicate
+    accepted = connection.execute(f'''SELECT school_name_snapshot FROM cycle_final_acceptances
+        WHERE application_cycle_id=? AND {active_acceptance_predicate(connection)}''', (cycle_id,)).fetchone()
+    final_name = str(accepted[0] or '').strip() if accepted else ''
+    # A stale K-12 final acceptance is not a current university school.
+    is_final = bool(final_name and _school_key(final_name) in names)
+    return SchoolPlanCardSummary(
+        (final_name,) if is_final else tuple(names.values())[:3],
+        0 if is_final else max(len(names)-3, 0), is_final=is_final,
+        offer_received_names=tuple(offers.values()),
+        waiting_result_names=tuple(name for key,name in waiting.items() if key not in offers),
+        not_submitted_names=tuple(name for key,name in drafts.items() if key not in offers),
+        final_school_name=final_name if is_final else '', submitted_count=submitted_count,
+        has_application_cycle=True, application_cycle_id=cycle_id,
+        empty_label='暂无当前大学学校方案/申请',
+    )
+
+
 def _load_school_plan_card_summary(connection, student_id: str) -> SchoolPlanCardSummary:
     if is_workflow_v2_active(connection):
+        fields = {row[1] for row in connection.execute('PRAGMA table_info(application_cycles)')}
+        stream = 'education_stream' if 'education_stream' in fields else "'school_education'"
         cycle = connection.execute(
-            """SELECT id FROM application_cycles WHERE student_id=?
+            f"""SELECT id,{stream} FROM application_cycles WHERE student_id=?
                  ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
                           sequence_no DESC,id DESC LIMIT 1""",
             (student_id,),
@@ -95,6 +189,8 @@ def _load_school_plan_card_summary(connection, student_id: str) -> SchoolPlanCar
         if cycle is None:
             return SchoolPlanCardSummary((), has_application_cycle=False)
         cycle_id = int(cycle[0])
+        if str(cycle[1]) == 'higher_education':
+            return _load_higher_education_school_summary(connection, student_id, cycle_id)
         from canonical_acceptance import active_acceptance_predicate
 
         active_acceptance = active_acceptance_predicate(connection)

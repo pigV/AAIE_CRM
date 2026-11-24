@@ -65,6 +65,7 @@ class CoeRoutePreflightTests(CoeCycleSelectionTests):
         cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='CRMLegacyHandler')
         names={'coe_selected_cycle','upload_review_confirm','coe_create','coe_cycle_selection_html'}
         methods=[n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name in names]
+        pending_helper=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='unresolved_upload_review_files')
         self.metadata={'module':'COE + OSHC','student_id':'20260094','form':{},'files':[{'index':0}]}
         self.storage_calls=[]
         class BranchError(ValueError):pass
@@ -80,7 +81,7 @@ class CoeRoutePreflightTests(CoeCycleSelectionTests):
             'can_review_module_action':lambda *args:True,'module_document_types':lambda module:['COE'],
             'coe_kind_from_review':lambda value:value,'ensure_student_storage':storage,
             'can_workflow_module_save':lambda *args:True}
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(name='Handler',bases=[],keywords=[],body=methods,decorator_list=[])],type_ignores=[])),'actual-route-ast','exec'),ns)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[pending_helper,ast.ClassDef(name='Handler',bases=[],keywords=[],body=methods,decorator_list=[])],type_ignores=[])),'actual-route-ast','exec'),ns)
         self.ns=ns
         self.handler=ns['Handler']()
         self.handler.user={'id':1}
