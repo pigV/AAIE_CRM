@@ -127,7 +127,7 @@ def ensure_canonical_offer_event(connection, offer_id: int, actor=None):
     ).fetchone()
     if offer is None:
         raise OfferAcceptanceError("offer_not_found", "Offer 记录不存在。")
-    if str(_value(offer, "document_type", "Offer")) not in {"Offer", "SignedOffer"}:
+    if str(_value(offer, "document_type", "Offer")) not in {"Offer", "SignedOffer", "OfferAcceptance"}:
         return None
     if str(_value(offer, "classification_status", "")) != "resolved":
         return None

@@ -2,7 +2,7 @@
 from html import escape
 
 
-def render_coe_cycle_selection(connection, student_id, *, selected=None):
+def render_coe_cycle_selection(connection, student_id, *, selected=None, initial_only=False):
     columns = {
         row[1] for row in connection.execute('PRAGMA table_info(application_cycles)')
     }
@@ -14,7 +14,14 @@ def render_coe_cycle_selection(connection, student_id, *, selected=None):
              WHERE student_id=? AND status='active' ORDER BY id""",
         (str(student_id),),
     ).fetchall()
-    if len(cycles) <= 1:
+    active_count=len(cycles)
+    if initial_only:
+        allowed={row[0] for row in connection.execute(
+            "SELECT id FROM application_cycles WHERE student_id=? AND status='active' AND cycle_type='initial'",(str(student_id),))}
+        cycles=[row for row in cycles if row[0] in allowed]
+        if not cycles:
+            return '<p class="muted-line">转学或升学材料请从对应业务的上传入口提交。</p>'
+    if active_count <= 1:
         return ''
     offer_columns = {row[1] for row in connection.execute('PRAGMA table_info(offers)')}
     options = ['<option value="">请选择所属申请，不会自动选择</option>']

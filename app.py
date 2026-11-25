@@ -71807,6 +71807,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 </article>"""
             )
         cycle_selection = self.coe_cycle_selection_html(student_id, stored_form=metadata.get("form")) if module == "COE + OSHC" else ""
+        if module == 'Offer' and not (metadata.get('form') or {}).get('transfer_branch_id') and record_picker_and_uploader.upload_context_from_form(metadata.get('form') or {}) is None:
+            from reviewed_upload_workflow import render_offer_cycle_selection
+            with db.read_snapshot() as connection:
+                cycle_selection=render_offer_cycle_selection(connection,student_id,selected=(metadata.get('form') or {}).get('application_cycle_id'))
         body = f"""
         <section class="panel upload-review upload-review-page">
           <div class="panel-head upload-review-header"><div><a class="back-link" href="/students/{esc(student_id)}?tab={esc(config['tab'])}">← 返回学生信息页</a><h2>Upload Review</h2><p class="upload-review-summary">确认后才会写入学生目录；此页面只显示 {esc(module)} 相关 DocumentType。</p>{optional_note}</div></div>
@@ -72031,6 +72035,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         actor_user_id=int(self.user["id"]),occurred_at=lifecycle_stamp,
                     )
                 save_offer_language_school(connection, business_record_id, student_id, language_school_name)
+                if transfer_branch_id is None and is_workflow_v2_active(connection):
+                    from reviewed_upload_workflow import bind_reviewed_offer
+                    bind_reviewed_offer(connection,student_id,business_record_id,stored_form)
                 offer_classification = apply_offer_classification(
                     connection,business_record_id,school_name
                 )
@@ -72130,6 +72137,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         record_id=business_record_id,
                         application_cycle_id=coe_application_cycle_id,
                     )
+                    if is_workflow_v2_active(connection):
+                        from reviewed_upload_workflow import confirm_matching_school_coe
+                        confirm_matching_school_coe(connection,student_id,business_record_id,
+                            inferred.get('_reviewed_student_identity'),dict(self.user),lifecycle_stamp,
+                            can_select_offer=can_workflow_module_save(self.user,'Offer') and allowed(self.user,'offers.manage'))
                 if is_coe:
                     if self.form.get(f"intake_defer_{index}") == "1":
                         pending_coe_tuition[index] = "已选择稍后核对学费。"
@@ -72417,7 +72429,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     delete_upload_review(token)
                 return self.flash_redirect(f"/students/{student_id}?tab={config['tab']}", "已移除所选待审文件，已有正式文件保持不变。")
         allowed_types = set(module_document_types(module))
-        stored_form = metadata.get("form") or {}
+        stored_form = dict(metadata.get("form") or {})
+        if module == 'Offer' and self.form.get('offer_application_cycle_id'):
+            stored_form['application_cycle_id']=self.form['offer_application_cycle_id']
         if module == "Offer":
             needs_language_column = any(
                 self.form.get(f"confirm_item_{item['index']}") == "1"

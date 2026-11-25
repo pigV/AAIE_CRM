@@ -1011,6 +1011,9 @@ class BusinessChangeSyncMixin:
         elif module=='COE + OSHC':
             kind=g['coe_kind_from_review'](document_type)
             result['inferred']=g['infer_coe_oshc_details'](upload,kind)
+            if kind in {'COE','COE_CAAW'}:
+                from reviewed_upload_workflow import prepare_coe_identity
+                result['inferred']['_reviewed_student_identity']=prepare_coe_identity(upload.data)
             result['tuition_prepared']=True
             if kind in {'COE','COE_CAAW'} and self.form.get(f'intake_defer_{index}')!='1':
                 try:
