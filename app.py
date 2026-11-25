@@ -62199,6 +62199,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         from business_changes.snapshots import read_scope
         with read_scope(db) as connection:
             course_annotations = offer_course_annotations(connection, student_id, [offer['id'] for offer in offers])
+            from offer_acceptance import active_final_offer_ids
+            canonical_current_offer_ids = active_final_offer_ids(connection,student_id)
         status_options = ("received", "sent_to_parent", "signed", "signed_received", "cancelled", "rejected", "expired")
         currency_options = ("AUD", "CNY", "USD")
         has_canonical_acceptances = db.one(
@@ -62268,7 +62270,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 has_file=bool(file_path),
             )
             deposit_amount = "" if offer["deposit_amount"] is None else str(offer["deposit_amount"])
-            is_current_accepted = current_offer_id == int(offer["id"])
+            is_current_accepted = current_offer_id == int(offer["id"]) or int(offer['id']) in canonical_current_offer_ids
             is_muted = current_offer_id is not None and not is_current_accepted and str(offer["offer_status"] or "").lower() != "accepted"
             transfer_binding = db.one(
                 """SELECT cycle.source_student_case_id AS case_id,
@@ -62372,14 +62374,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     f'<form method="post" action="/students/{student_id}/offer/{offer["id"]}/accept" data-offer-accept-form>'
                     f'<input type="hidden" name="csrf" value="{esc(self.csrf)}">'
                     '<button class="primary compact" type="submit">设为已接受</button></form>')
-                if document_accepted and not is_current_accepted:
+                if document_accepted:
                     document_action += (
                         f'<form method="post" action="/students/{student_id}/offer/{offer["id"]}/withdraw-document-acceptance" data-ajax-student-tab-form>'
                         f'<input type="hidden" name="csrf" value="{esc(self.csrf)}">'
                         '<label>撤回此文件接受的原因<input name="reason" required></label>'
+                        + ('<label class="choice"><input type="checkbox" name="acknowledge_final" value="1" required>'
+                           '<span>同时撤回当前入读选择；CoE原件及付款保留，入读依据需重新核对。</span></label>' if is_current_accepted else '') +
                         '<button class="danger compact" type="submit">撤回此 Offer 接受</button></form>')
                 if is_current_accepted:
-                    document_action += '<small class="muted">入读依据及其更正请在 CoE 页面核对，Offer 接受记录保留。</small>'
+                    document_action += '<small class="muted">撤回仅更正CRM接受与入读选择，不撤销签署文件，不通知学校，也不自动退款。</small>'
                 accept_action = document_action
             rows.append(
                 f'<article id="offer-card-{offer["id"]}" class="student-file-record offer-record-card{" offer-record-card--muted" if is_muted else ""}" data-offer-current-accepted="{"true" if is_current_accepted else "false"}" data-offer-accept-eligible="{"true" if classification_resolved and not legacy_accepted_conflict else "false"}">'
@@ -73298,19 +73302,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             'accepted_offer_id':change.offer_id,'unchanged':change.unchanged})
 
     def offer_document_acceptance_withdraw(self, method, student_id, offer_id):
-        from offer_acceptance import withdraw_offer_document
+        from offer_acceptance import withdraw_offer_acceptance_and_selection
         if method != 'POST':
             return self.json_response({'ok':False,'message':'Method not allowed'},405)
         if not can_workflow_module_save(self.user,'Offer'):
             return self.json_response({'ok':False,'message':'没有撤回 Offer 接受的权限。'},403)
-        if set(self.form) - {'csrf','reason'}:
+        if set(self.form) - {'csrf','reason','acknowledge_final'}:
             return self.json_response({'ok':False,'message':'请求包含未允许字段。'},400)
         try:
             with db.transaction() as connection:
-                withdraw_offer_document(connection,student_id,int(offer_id),dict(self.user,can_manage_offer=True),reason=self.form.get('reason',''))
+                withdraw_offer_acceptance_and_selection(connection,student_id,int(offer_id),dict(self.user,can_manage_offer=True),
+                    reason=self.form.get('reason',''),acknowledge_final=self.form.get('acknowledge_final')=='1')
         except OfferAcceptanceError as exc:
             return self.json_response({'ok':False,'message':str(exc),'error_code':exc.code},400)
-        return self.json_response({'ok':True,'message':'已撤回此 Offer 文件接受，其他文件保持不变。'})
+        return self.json_response({'ok':True,'message':'已撤回此 Offer 接受；相关原件、付款及历史保留，入读依据请重新核对。'})
 
     def offer_select_final(self, method, student_id, offer_id):
         if method != "POST":

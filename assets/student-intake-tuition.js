@@ -45,6 +45,16 @@ for (const fields of document.querySelectorAll('[data-school-course-tuition]')) 
       const selected = school?.selectedOptions[0];
       if (!sector?.value && selected?.dataset.sector) sector.value = selected.dataset.sector;
       if (sector) sector.required = enabled;
+      const authorityLanguage = section.dataset.schoolCourseKind === 'language' && sector?.value === 'public';
+      const picker = section.querySelector('[data-course-school-picker]');
+      if (picker) {
+        picker.hidden = authorityLanguage;
+        for (const input of picker.querySelectorAll('input,select')) {
+          input.disabled = !enabled || authorityLanguage;
+          input.required = enabled && !authorityLanguage;
+          if (authorityLanguage) input.setCustomValidity('');
+        }
+      }
       const publicFields = section.querySelector('[data-course-public-fields]');
       if (publicFields) {
         publicFields.hidden = sector?.value !== 'public';

@@ -415,6 +415,19 @@ def confirm_letter(conn, case_id, extraction_id, *, values, actor_user_id, occur
         raise ValueError('Standalone applicant cannot own a Student Application Cycle')
     current_result = None
     with _atomic(conn):
+        if kind and student_decision and case.get('application_cycle_id') is None:
+            # The legacy resolver's unique-cycle fallback must become an owned
+            # fact on this same transaction before the canonical decision checks it.
+            current_case = _case(conn, case_id)
+            if current_case.get('student_id') != case['student_id'] or current_case.get('application_cycle_id') is not None:
+                raise ValueError('Visa Case ownership changed; refresh before confirming')
+            cycle_id = _student_cycle_id(conn, current_case)
+            changed = conn.execute('UPDATE visa_cases SET application_cycle_id=? WHERE id=? AND student_id=? AND application_cycle_id IS NULL',
+                                   (cycle_id,case_id,case['student_id']))
+            if changed.rowcount != 1:
+                raise ValueError('Visa Case ownership changed; refresh before confirming')
+            _audit(conn,case_id,document['id'],'case_cycle_bound',{'application_cycle_id':None},
+                   {'application_cycle_id':cycle_id,'reason':'staff confirmed official decision; unique active student cycle'},actor_user_id,occurred_at)
         review_cursor = conn.execute('''INSERT INTO visa_letter_reviews(extraction_id,visa_case_id,confirmed_json,confirmed_by,confirmed_at)
             VALUES(?,?,?,?,?)''', (extraction_id, case_id, _json(effective), actor_user_id, occurred_at))
         result = _row(conn, 'SELECT * FROM visa_letter_reviews WHERE id=?', (review_cursor.lastrowid,))

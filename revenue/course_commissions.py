@@ -14,19 +14,22 @@ def language_components(workflow):
         return []
     from revenue.read_models import RevenueReadModels
     model=RevenueReadModels(workflow.db)
-    rows=workflow.db.execute('''SELECT sc.id AS course_id,sc.uid AS course_uid,sc.school_id,s.school_name,
+    authority='authority_state' in {r[1] for r in workflow.db.execute('PRAGMA table_info(revenue_school_courses)')}
+    label="COALESCE(s.school_name,sc.authority_state||' 教育局（公立语言）')" if authority else 's.school_name'
+    state='sc.authority_state' if authority else 'NULL'
+    rows=workflow.db.execute(f'''SELECT sc.id AS course_id,sc.uid AS course_uid,sc.school_id,{label} AS school_name,{state} AS authority_state,
         sc.course_name AS course,c.student_id,c.id AS case_id,c.uid AS case_uid,
         ec.id AS component_id,ec.uid AS component_uid,'language' AS course_kind
         FROM revenue_school_courses sc JOIN revenue_commercial_cases c ON c.id=sc.commercial_case_id
         JOIN revenue_enrolment_components ec ON ec.id=sc.enrolment_component_id AND ec.commercial_case_id=c.id
-        JOIN schools s ON s.id=sc.school_id
+        LEFT JOIN schools s ON s.id=sc.school_id
         WHERE sc.status='active' AND sc.course_kind='language' AND ec.status='active'
           AND ec.source_kind='school_language_course' AND ec.source_id=sc.id AND '''+model.visibility.case_predicate('c'))
     assignment=school_commission_assignment(workflow.db)
     result=[]
     for row in rows:
         data=dict(row)
-        sector,state=assignment.get(row['school_id'],('',''))
+        sector,state=('public',row['authority_state']) if row['school_id'] is None else assignment.get(row['school_id'],('',''))
         if workflow.target[0]=='school':
             if row['school_id']!=workflow.target[1]:
                 continue
@@ -108,6 +111,8 @@ def evidence_current(connection,course_id,document_id):
     course=connection.execute('SELECT * FROM revenue_school_courses WHERE id=?',(course_id,)).fetchone()
     if not course or course['school_id']!=values.get('school_id'):
         return False
+    if course['school_id'] is None and ('authority_state' not in course.keys() or course['authority_state']!=values.get('authority_state')):
+        return False
     school=connection.execute('SELECT * FROM schools WHERE id=?',(course['school_id'],)).fetchone()
     both=connection.execute('''SELECT sc.school_id,sc.course_kind FROM revenue_school_course_evidence e
         JOIN revenue_school_courses sc ON sc.id=e.course_id WHERE e.coe_oshc_id=? AND e.document_id=?
@@ -126,7 +131,7 @@ def evidence_current(connection,course_id,document_id):
         from revenue.school_courses import offer_matches_language
         main_school=both['school_id'] if both and both['course_kind']=='main' else None
         if not any(o['id']==values.get('offer_id') and offer_matches_language(connection,o,school,
-                   bundled_main_school=main_school) for o in offers):
+                   bundled_main_school=main_school,authority_state=values.get('authority_state')) for o in offers):
             return False
     return True
 

@@ -26867,11 +26867,14 @@
   width:18px!important; height:18px; min-height:0; padding:0; margin:0; flex:0 0 18px;
 }
 .ui-premium-v2 [data-course-public-fields] { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.ui-premium-v2 .course-start-grade { display:grid; grid-column:2; grid-row:span 2; gap:14px; align-self:start; }
 .ui-premium-v2 [data-school-course-kind] details > .course-detail-grid {
   display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; padding-top:12px;
 }
-.ui-premium-v2 [data-school-course-kind][hidden],.ui-premium-v2 [data-course-public-fields][hidden] { display:none; }
+.ui-premium-v2 [data-school-course-kind][hidden],.ui-premium-v2 [data-course-public-fields][hidden],
+.ui-premium-v2 [data-course-school-picker][hidden] { display:none; }
 @media(max-width:760px) {
+  .ui-premium-v2 .course-start-grade { grid-column:auto; grid-row:auto; }
   .ui-premium-v2 [data-school-course-kind],
   .ui-premium-v2 [data-school-course-kind] details > .course-detail-grid,
   .ui-premium-v2 [data-course-public-fields] { grid-template-columns:minmax(0,1fr); }

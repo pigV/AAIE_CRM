@@ -869,3 +869,51 @@ def withdraw_offer_document(connection, student_id: str, offer_id: int, actor, *
         connection.execute('RELEASE SAVEPOINT withdraw_offer_document')
         raise
     return AcceptanceWithdrawal(str(student_id),int(offer_id),restored,stamp,reason)
+
+
+def active_final_offer_ids(connection, student_id):
+    """Exact active canonical choices, including choices with no legacy selector."""
+    if not {'legacy_offer_id','application_cycle_id','student_id'} <= _table_columns(connection,'offer_received_events'):
+        return set()
+    if not _table_columns(connection,'cycle_final_acceptances'):return set()
+    return {int(row[0]) for row in connection.execute('''SELECT e.legacy_offer_id FROM cycle_final_acceptances a
+        JOIN offer_received_events e ON e.id=a.offer_received_event_id AND e.student_id=a.student_id
+          AND e.application_cycle_id=a.application_cycle_id
+        WHERE a.student_id=? AND a.acceptance_status='active' AND e.legacy_offer_id IS NOT NULL''',(str(student_id),))}
+
+
+def withdraw_offer_acceptance_and_selection(connection, student_id, offer_id, actor, *,
+                                            reason, acknowledge_final=False, occurred_at=None):
+    """One explicit staff action, retaining signed originals and financial history."""
+    _authorized_actor(actor)
+    reason=str(reason or '').strip()
+    if not reason:raise OfferAcceptanceError('reason_required','撤回接受必须填写原因。')
+    offer=connection.execute('SELECT * FROM offers WHERE id=? AND student_id=?',(int(offer_id),str(student_id))).fetchone()
+    if not offer:raise OfferAcceptanceError('student_mismatch','该 Offer 不属于当前学生。')
+    _validate_offer_document_owner(connection,offer)
+    current=get_current_accepted_offer(connection,str(student_id))
+    legacy=current is not None and current.offer_id==int(offer_id)
+    canonical=[]
+    if {'legacy_offer_id'}<=_table_columns(connection,'offer_received_events') and _table_columns(connection,'cycle_final_acceptances'):
+        canonical=connection.execute('''SELECT a.application_cycle_id FROM cycle_final_acceptances a
+            JOIN offer_received_events e ON e.id=a.offer_received_event_id
+            WHERE a.acceptance_status='active' AND e.legacy_offer_id=? AND a.student_id=?''',(int(offer_id),str(student_id))).fetchall()
+    if (legacy or canonical) and acknowledge_final is not True:
+        raise OfferAcceptanceError('final_withdrawal_ack_required','请确认同时撤回当前入读选择；CoE原件和付款记录保留，入读依据需重新核对。')
+    if len(canonical)>1:raise OfferAcceptanceError('ambiguous_selection','该Offer关联多个入读选择，请先核对归属。')
+    stamp=occurred_at or _now_iso()
+    connection.execute('SAVEPOINT unified_offer_withdrawal')
+    try:
+        if legacy:withdraw_accepted_offer(connection,str(student_id),actor,reason=reason,occurred_at=stamp)
+        elif canonical:
+            from workflow_offer_events import withdraw_final_acceptance
+            actor_id,actor_name=_authorized_actor(actor)
+            withdraw_final_acceptance(connection,int(canonical[0][0]),occurred_at=stamp,
+                actor_user_id=actor_id,actor_name=actor_name,reason=reason)
+        result=withdraw_offer_document(connection,str(student_id),int(offer_id),actor,reason=reason,occurred_at=stamp)
+        connection.execute('RELEASE SAVEPOINT unified_offer_withdrawal')
+        return result
+    except BaseException:
+        connection.execute('ROLLBACK TO SAVEPOINT unified_offer_withdrawal')
+        connection.execute('RELEASE SAVEPOINT unified_offer_withdrawal')
+        raise

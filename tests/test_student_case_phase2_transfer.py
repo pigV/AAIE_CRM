@@ -464,6 +464,17 @@ def apply_all_test_migrations_with_rebuild_backup(
             required_backup_metadata=rebuild_backup("035-visa"),
             through="20261114_046",
         )
+        if through is None or through >= "20261125_055":
+            migration_runner.apply_migrations(
+                database_path, MIGRATIONS_DIR, applied_by="phase2-transfer-test",
+                source_commit="phase2-transfer-test", formal_database_path=None,
+                required_backup_metadata=rebuild_backup("047-offer"),through="20261125_054",
+            )
+            return migration_runner.apply_migrations(
+                database_path, MIGRATIONS_DIR, applied_by="phase2-transfer-test",
+                source_commit="phase2-transfer-test", formal_database_path=None,
+                required_backup_metadata=rebuild_backup("055-public-language"),through=through,
+            )
         return migration_runner.apply_migrations(
             database_path, MIGRATIONS_DIR, applied_by="phase2-transfer-test",
             source_commit="phase2-transfer-test", formal_database_path=None,
