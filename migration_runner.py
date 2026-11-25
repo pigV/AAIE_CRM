@@ -42,6 +42,7 @@ MIGRATION_MODE_RE = re.compile(
 NORMAL_MIGRATION_MODE = "normal"
 SQLITE_FK_OFF_REBUILD_MODE = "sqlite_fk_off_rebuild"
 SPECIAL_MIGRATION_MODES = {
+    ("20261125_055", "public_language_authority"): SQLITE_FK_OFF_REBUILD_MODE,
     ("20261115_047", "offer_reacceptance"): SQLITE_FK_OFF_REBUILD_MODE,
     ("20260907_035", "visa_management_authorities"): SQLITE_FK_OFF_REBUILD_MODE,
     (
