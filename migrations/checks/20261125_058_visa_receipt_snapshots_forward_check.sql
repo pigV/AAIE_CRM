@@ -1,0 +1,1 @@
+SELECT (SELECT count(*) FROM sqlite_master WHERE type='table' AND name='revenue_visa_receipt_snapshots')=1 AND (SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN ('revenue_visa_receipt_snapshots_validate','revenue_visa_receipt_snapshots_no_update','revenue_visa_receipt_snapshots_no_delete','revenue_contract_receipt_exclusive'))=4;
