@@ -17,8 +17,9 @@ from snapshot_read_cache import memoized_read
 STAGES = (
     ("01_parent_form", "等待家长填写表单", "parent_form"),
     ("02_contract_creation", "等待建立合同", "contracts"),
-    ("contract_preparation", "准备签署", "contracts"),
+    ("contract_preparation", "合同准备中，待发起签署", "contracts"),
     ("03_contract_signature", "等待家长签署", "contracts"),
+    ("contract_link_inactive", "链接失效，待重发", "contracts"),
     ("waiting_school_plan", "等待制作学校方案", "school_plans"),
     ("06_school_application_submission", "准备学校申请", "school_plans"),
     ("07_school_response", "等待学校发 Offer", "school_plans"),
@@ -37,7 +38,7 @@ SCHOOL_APPLICATION_CLOSED = "school_application_closed"
 VISA_GRANTED = "visa_granted"
 OFFER_EXPIRED = "offer_expired"
 WAITING_SCHOOL_RESPONSE = {"submitted", "interview", "test", "waiting_list", "additional_documents"}
-PROFILE_ONLY_STAGES = {SCHOOL_APPLICATION_CLOSED, "contract_link_inactive", OFFER_EXPIRED, VISA_GRANTED}
+PROFILE_ONLY_STAGES = {SCHOOL_APPLICATION_CLOSED, OFFER_EXPIRED, VISA_GRANTED}
 
 
 # The intake stage precedes the Transfer V2 cycle that will consume the contract.

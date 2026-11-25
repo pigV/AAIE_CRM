@@ -13,7 +13,7 @@ class DashboardConfirmedStageTests(unittest.TestCase):
         self.assertEqual(resolve_dashboard_stage(form_submitted=True, contract="draft")[0],"contract_preparation")
         self.assertEqual(resolve_dashboard_stage(contract="ready")[0], "contract_preparation")
         self.assertEqual(resolve_dashboard_stage(contract="live")[0], "03_contract_signature")
-        self.assertIn(resolve_dashboard_stage(form_submitted=True, contract="inactive_link")[0], PROFILE_ONLY_STAGES)
+        self.assertNotIn(resolve_dashboard_stage(form_submitted=True, contract="inactive_link")[0], PROFILE_ONLY_STAGES)
         self.assertEqual(resolve_dashboard_stage(contract="signed", preparing=True)[0], "06_school_application_submission")
 
     def test_valid_form_only_enters_contract_queue_if_contract_is_required(self):
@@ -62,3 +62,15 @@ class DashboardConfirmedStageTests(unittest.TestCase):
         self.assertEqual(resolve_dashboard_stage(visa="lodged")[0], "11_visa_result")
         self.assertIsNone(resolve_dashboard_stage(accepted=True, coe=True, offer_hold=True))
         self.assertIsNone(resolve_dashboard_stage(accepted=True, coe=True, visa="withdrawn"))
+
+    def test_contract_queue_labels_and_order_are_explicit(self):
+        self.assertEqual('合同准备中，待发起签署',STAGE_DETAILS['contract_preparation'][1])
+        self.assertEqual('链接失效，待重发',STAGE_DETAILS['contract_link_inactive'][1])
+        keys=[row[0] for row in STAGES]
+        self.assertLess(keys.index('03_contract_signature'),keys.index('contract_link_inactive'))
+        self.assertLess(keys.index('contract_link_inactive'),keys.index('waiting_school_plan'))
+
+    def test_expired_historical_link_never_overrides_later_business_facts(self):
+        self.assertEqual('07_school_response',resolve_dashboard_stage(contract='inactive_link',submitted=True)[0])
+        self.assertEqual('08_offer_acceptance',resolve_dashboard_stage(contract='inactive_link',offer=True)[0])
+        self.assertEqual('11_visa_result',resolve_dashboard_stage(contract='inactive_link',visa='lodged')[0])
