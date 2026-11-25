@@ -12237,6 +12237,7 @@ body.backup-running .backup-control-card.is-backup-running .backup-control-panel
 .upload-review-page .upload-review-file-card--removed .review-preview-workspace { display:none!important; }
 /* Course school lookup remains local to the course fee form. */
 .course-school-picker { position:relative; min-width:0; display:grid; gap:5px; align-content:start; }
+.course-school-picker[hidden] { display:none!important; }
 .course-school-picker > label { margin:0; }
 .course-school-picker > input { min-width:0; width:100%; }
 .course-school-picker [hidden] { display:none!important; }

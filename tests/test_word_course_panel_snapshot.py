@@ -9,7 +9,9 @@ class CoursePanelSnapshotTests(unittest.TestCase):
         f.setUp()
         self.addCleanup(f.doCleanups)
         with f.db.transaction() as connection:
-            connection.executescript((Path(__file__).resolve().parents[1]/'migrations/20261120_052_school_course_tuition.sql').read_text())
+            # The shared fixture already clones current schema; only legacy fixtures need 052.
+            if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='revenue_school_courses'").fetchone():
+                connection.executescript((Path(__file__).resolve().parents[1]/'migrations/20261120_052_school_course_tuition.sql').read_text())
         f.h._can_correct_student_tuition=lambda:True
         with f.db.request_scope():
             with f.db.read_snapshot():
