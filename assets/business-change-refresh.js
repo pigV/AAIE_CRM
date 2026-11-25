@@ -39,7 +39,8 @@
       if (cached && request.force === false && elapsed >= 0 && elapsed < 30000) {
         const hint = await options.readVersions(request);
         const current = vector(hint.versions), previous = vector(cached.versions);
-        if (current.size === previous.size && Array.from(current).every(([key, value]) => previous.get(key) === value)) {
+        if (hint.authorization_context === cached.authorization_context &&
+            current.size === previous.size && Array.from(current).every(([key, value]) => previous.get(key) === value)) {
           // A revision check is not a fresh business-fact snapshot. Retain its
           // actual as_of rather than reporting cached content as newly read.
           return cached;
@@ -64,7 +65,9 @@
     let channel = options.channel || null, ownChannel = false;
     let disposed = false, started = false, timer = null, running = null, pending = false;
     let generation = 0, buffered = null, etag = null, lastAppliedAsOf = null, failures = 0;
-    let cancelRead = null, queuedReason = 'start', retryBusy = false;
+    let cancelRead = null, queuedReason = 'start', retryBusy = false, fullReadPending = false;
+    const lightweightReason = reason => reason === 'poll' ||
+      (options.lightweightVisibility === true && ['start', 'visible'].includes(reason));
     const random = options.random || Math.random;
     const minimum = new Map(), applied = new Map();
 
@@ -106,7 +109,7 @@
       if (timer !== null) clearTimeout(timer);
       timer = null;
       if (!started || disposed || !visible()) return;
-      const base = retryBusy ? 2000 :
+      const base = retryBusy ? Math.min(30000, 2000 * 2 ** Math.min(Math.max(0, failures - 1), 4)) :
         failures ? Math.min(120000, interval * 2 ** Math.min(failures, 2)) : interval;
       const delay = base * (0.8 + Math.max(0, Math.min(1, random())) * 0.4);
       timer = setTimeout(() => { timer = null; refresh('poll'); }, delay);
@@ -122,10 +125,12 @@
         });
         const canceled = new Promise((_, reject) => { cancelRead = () => { if (abort) abort.abort(); reject(new Error('disposed')); }; });
         const packet = await Promise.race([
-          Promise.resolve().then(() => options.readSnapshot({etag, force: reason !== 'poll', signal: abort ? abort.signal : undefined})), deadline, canceled
+          Promise.resolve().then(() => options.readSnapshot({etag, force: fullReadPending || !lightweightReason(reason), signal: abort ? abort.signal : undefined})), deadline, canceled
         ]);
         if (disposed || captured !== generation) return;
-        await apply(packet); failures = 0; retryBusy = false;
+        await apply(packet);
+        if (captured === generation) fullReadPending = false;
+        failures = 0; retryBusy = false;
       } catch (error) {
         if (!disposed) {
           failures++;
@@ -139,7 +144,9 @@
     }
 
     function refresh(reason = 'manual') {
+      if (!lightweightReason(reason)) fullReadPending = true;
       if (disposed || !visible()) return Promise.resolve();
+      if (running && lightweightReason(reason)) return running;
       if (reason !== 'poll') queuedReason = reason;
       if (running) { pending = true; return running; }
       running = (async () => {
@@ -188,12 +195,12 @@
 
   function bootstrapBrowser(doc, win) {
     const controllers = new Map();
+    const pageChannel = typeof win.BroadcastChannel === 'function' ? new win.BroadcastChannel('aaie-business-changes') : null;
+    const pendingNavigationKey = 'aaie-business-post-navigation';
     const selector = '[data-business-sync-fragment]';
     const find = name => Array.from(doc.querySelectorAll(selector)).find(node => node.dataset.businessSyncFragment === name);
     const hint = () => {
-      if (typeof win.BroadcastChannel !== 'function') return;
-      const channel = new win.BroadcastChannel('aaie-business-changes');
-      channel.postMessage({type: 'changed'}); channel.close();
+      if (pageChannel) pageChannel.postMessage({type: 'changed'});
     };
     const scan = () => { for (const initial of doc.querySelectorAll('[data-business-sync-endpoint][data-business-sync-fragment]')) {
       const name = initial.dataset.businessSyncFragment;
@@ -206,6 +213,8 @@
       const fetchPacket = (url, request) => fetchSnapshotPacket(win.fetch.bind(win), url, request);
       const controller = createRefreshController({
         initialSnapshot,
+        channel:pageChannel,
+        lightweightVisibility:name === 'dashboard-overview',
         intervalMs:5000,
         isVisible: () => {
           const current = find(name), panel = current && current.closest('[data-panel]');
@@ -273,9 +282,21 @@
     } };
     scan();
     doc.addEventListener('aaie:business-fragments-ready', scan);
-    // A normal form POST redirects to a fresh page. That page only publishes a
-    // hint; other tabs reread committed facts, including after an unsuccessful POST.
-    hint();
+    // Ordinary GET navigation is not a business change. A submitted POST marks
+    // only this tab; publish after navigation, when the write has finished.
+    try {
+      if (win.sessionStorage && win.sessionStorage.getItem(pendingNavigationKey)) {
+        win.sessionStorage.removeItem(pendingNavigationKey); hint();
+      }
+    } catch (_) { /* Storage may be disabled; polling/manual refresh still work. */ }
+    const submit = event => {
+      const form = event.target;
+      if (!form || String(form.method || '').toLowerCase() !== 'post') return;
+      const target = new URL(form.action || win.location.href, win.location.href);
+      if (target.origin !== win.location.origin || ['/login', '/logout'].includes(target.pathname)) return;
+      try { if (win.sessionStorage) win.sessionStorage.setItem(pendingNavigationKey, '1'); } catch (_) {}
+    };
+    doc.addEventListener('submit', submit);
     const refreshAll = () => { for (const c of controllers.values()) c.visibilityChanged(); };
     const flushAll = () => { for (const c of controllers.values()) c.flush(); };
     const input = event => {
@@ -327,6 +348,8 @@
     win.addEventListener('aaie:business-change', committed);
     return () => {
       for (const c of controllers.values()) c.dispose();
+      if (pageChannel) pageChannel.close();
+      doc.removeEventListener('submit', submit);
       doc.removeEventListener('aaie:business-fragments-ready', scan);
       doc.removeEventListener('visibilitychange', refreshAll);
       doc.removeEventListener('input', input); doc.removeEventListener('change', input);

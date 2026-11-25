@@ -28,12 +28,85 @@ test('different page poll timers are staggered to avoid simultaneous full reread
  t.mock.timers.tick(4000);await new Promise(setImmediate);assert.equal(a,2);assert.equal(b,1);
 });
 
-test('repeated busy responses keep a short retry interval rather than starving a page',async t=>{
+test('repeated busy responses back off rather than contesting the slot every two seconds',async t=>{
  t.mock.timers.enable({apis:['setTimeout']});let reads=0;
  const c=createRefreshController({intervalMs:5000,random:()=>0,readSnapshot:async()=>{reads++;throw Error('busy');},applySnapshot:()=>{}});
  t.after(()=>c.dispose());await c.start();
- for(let i=0;i<4;i++){t.mock.timers.tick(1600);await new Promise(setImmediate);}
- assert.equal(reads,5);
+ t.mock.timers.tick(1600);await new Promise(setImmediate);assert.equal(reads,2);
+ t.mock.timers.tick(1600);await new Promise(setImmediate);assert.equal(reads,2);
+ t.mock.timers.tick(1600);await new Promise(setImmediate);assert.equal(reads,3);
+ t.mock.timers.tick(6400);await new Promise(setImmediate);assert.equal(reads,4);
+});
+
+test('server-rendered seed avoids a second full render on start and focus while changes and manual refresh still reload',async t=>{
+ let full=0,light=0,version=1;const seed=packet(1);
+ const c=createRefreshController({initialSnapshot:seed,lightweightVisibility:true,
+  readSnapshot:createVersionedReader({initialSnapshot:seed,readVersions:async()=>{light++;return {versions:packet(version).versions};},readSnapshot:async()=>{full++;return packet(version);}}),applySnapshot:()=>{}});
+ t.after(()=>c.dispose());await c.start();await c.visibilityChanged();assert.equal(full,0);assert.equal(light,2);
+ version=2;await c.visibilityChanged();assert.equal(full,1);
+ await c.refresh('manual');assert.equal(full,2);
+ await c.notifyCommitted(packet(3).versions);assert.equal(full,3);
+});
+
+test('pageshow and focus during an in-flight visible read do not enqueue another read',async t=>{
+ const pending=deferred();let reads=0;
+ const c=createRefreshController({lightweightVisibility:true,readSnapshot:async()=>{reads++;return pending.promise;},applySnapshot:()=>{}});t.after(()=>c.dispose());
+ const run=c.start();await Promise.resolve();c.visibilityChanged();c.visibilityChanged();
+ pending.resolve(packet(1));await run;assert.equal(reads,1);
+});
+
+test('non-homepage focus retains forced authorization-checked full reads',async t=>{
+ let full=0;const seed=packet(1);const c=createRefreshController({initialSnapshot:seed,
+  readSnapshot:createVersionedReader({initialSnapshot:seed,readVersions:async()=>({versions:seed.versions}),readSnapshot:async()=>{full++;throw Error('forbidden');}}),applySnapshot:()=>{}});
+ t.after(()=>c.dispose());await c.visibilityChanged();assert.equal(full,1);
+});
+
+test('changed homepage permissions invalidate same-version cached content',async()=>{
+ let full=0;const seed={...packet(1),authorization_context:'allowed'};
+ const read=createVersionedReader({initialSnapshot:seed,readVersions:async()=>({versions:seed.versions,authorization_context:'revoked'}),readSnapshot:async()=>{full++;return {...packet(1),authorization_context:'revoked'};}});
+ await read({force:false});assert.equal(full,1);
+});
+
+test('a hidden change hint forces a full read on return even when versions are unchanged',async t=>{
+ let visible=true,full=0;const seed=packet(1);const c=createRefreshController({initialSnapshot:seed,lightweightVisibility:true,isVisible:()=>visible,
+  readSnapshot:createVersionedReader({initialSnapshot:seed,readVersions:async()=>({versions:seed.versions}),readSnapshot:async()=>{full++;return seed;}}),applySnapshot:()=>{}});
+ t.after(()=>c.dispose());await c.start();visible=false;await c.notifyCommitted();visible=true;await c.visibilityChanged();assert.equal(full,1);
+});
+
+test('a busy forced change read remains forced on retry rather than returning old cached current',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});let full=0;const states=[];const seed=packet(1);
+ const c=createRefreshController({initialSnapshot:seed,lightweightVisibility:true,random:()=>0,
+  readSnapshot:createVersionedReader({initialSnapshot:seed,readVersions:async()=>({versions:seed.versions}),readSnapshot:async()=>{if(++full===1)throw Error('busy');return packet(1,2);}}),applySnapshot:()=>{},onStatus:x=>states.push(x.state)});
+ t.after(()=>c.dispose());await c.start();await c.notifyCommitted();assert.equal(states.at(-1),'busy');
+ t.mock.timers.tick(1600);await new Promise(setImmediate);assert.equal(full,2);assert.equal(states.at(-1),'current');
+});
+
+test('three ordinary page opens with real BroadcastChannel do not cause any full snapshot request',async()=>{
+ const {bootstrapBrowser}=require('../../assets/business-change-refresh.js');const name='perf-'+Math.random();let full=0;
+ class Channel extends BroadcastChannel {constructor(){super(name);}}
+ const disposers=[],originalWindow=global.window;global.window={BroadcastChannel:Channel};
+ for(let i=0;i<3;i++){
+  const node={dataset:{businessSyncFragment:'dashboard-overview',businessSyncEndpoint:'/api/business-changes/snapshot?surface=dashboard_overview',businessSyncInitialSnapshot:JSON.stringify(packet(1))},closest:()=>null,querySelectorAll:()=>[]};
+  const doc={visibilityState:'visible',querySelectorAll:()=>[node],querySelector:()=>null,addEventListener(){},removeEventListener(){}};
+  const win={BroadcastChannel:Channel,location:{href:'http://localhost/',origin:'http://localhost'},addEventListener(){},removeEventListener(){},fetch:async url=>{const light=String(url).includes('/versions?');if(!light)full++;return {ok:true,json:async()=>light?{versions:packet(1).versions}:packet(1)};}};
+  disposers.push(bootstrapBrowser(doc,win));
+ }
+ try {await new Promise(resolve=>setTimeout(resolve,40));assert.equal(full,0);} finally {disposers.forEach(f=>f());if(originalWindow===undefined)delete global.window;else global.window=originalWindow;}
+});
+
+test('a real POST navigation publishes to other pages after navigation, while GET and logout do not',async()=>{
+ const {bootstrapBrowser}=require('../../assets/business-change-refresh.js');const name='post-'+Math.random();
+ class Channel extends BroadcastChannel {constructor(){super(name);}}
+ const observer=new Channel(),messages=[];observer.onmessage=e=>messages.push(e.data);const storage=new Map();
+ const win={BroadcastChannel:Channel,location:{href:'http://localhost/students',origin:'http://localhost'},sessionStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},addEventListener(){},removeEventListener(){}};
+ const makeDoc=()=>{const events={};return {events,querySelectorAll:()=>[],addEventListener:(key,f)=>{events[key]=f;},removeEventListener(){}};};
+ const source=makeDoc();let dispose=bootstrapBrowser(source,win);
+ try {
+  source.events.submit({target:{method:'get',action:'/students'}});source.events.submit({target:{method:'post',action:'/logout'}});assert.equal(storage.size,0);
+  source.events.submit({target:{method:'post',action:'/students/new'}});assert.equal(storage.size,1);assert.equal(messages.length,0);
+  dispose();dispose=bootstrapBrowser(makeDoc(),win);await new Promise(resolve=>setTimeout(resolve,30));
+  assert.deepEqual(messages,[{type:'changed'}]);assert.equal(storage.size,0);
+ } finally {dispose();observer.close();}
 });
 
 test('a valid dashboard read lasting twelve seconds can still apply, with a bounded deadline',async t=>{

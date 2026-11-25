@@ -31884,8 +31884,20 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         signed_institution_structure_html = dashboard_signed_institution_structure_chart_html(signed_institution_structure)
         dashboard_workflow_chart_css = '<link rel="stylesheet" href="/assets/dashboard-workflow-distribution-chart-v1.css?v=12">'
         dashboard_signed_institution_css = '<link rel="stylesheet" href="/assets/dashboard-signed-institution-structure-chart-v1.css?v=5">'
+        initial_snapshot_attribute = ""
+        if not fragment_only:
+            from business_changes.runtime import enabled
+            if enabled(read_context.connection):
+                from business_changes.contracts import Subject
+                from business_changes.snapshots import rendered_snapshot_hint, read_authorization_context
+                initial_snapshot = rendered_snapshot_hint(
+                    read_context.connection, (Subject('dashboard', 'overview'),),
+                    can_read=lambda subject: can_access_module(self.user, 'dashboard'),
+                    authorization_context=read_authorization_context(read_context.connection, self.user),
+                )
+                initial_snapshot_attribute = ' data-business-sync-initial-snapshot="' + esc(json.dumps(initial_snapshot)) + '"'
         body = f"""
-        <div style="display:contents" data-business-sync-fragment="dashboard-overview" data-business-sync-endpoint="/api/business-changes/snapshot?surface=dashboard_overview">
+        <div style="display:contents" data-business-sync-fragment="dashboard-overview" data-business-sync-endpoint="/api/business-changes/snapshot?surface=dashboard_overview"{initial_snapshot_attribute}>
         {dashboard_workflow_chart_css}
         {dashboard_signed_institution_css}
         <section class="dashboard-hero panel">

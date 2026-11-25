@@ -91,12 +91,29 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
 
 
 def pending_transfer_was_withdrawn(connection, contract_id):
+    return str(contract_id) in _withdrawn_contract_ids(connection, (contract_id,))
+
+
+def _withdrawn_contract_ids(connection, contract_ids):
+    ids = tuple(sorted({str(value) for value in contract_ids}))
+    if not ids:
+        return frozenset()
     if not {"action_type", "contract_id"} <= _columns(connection, "audit_logs"):
-        return False
-    return connection.execute(
-        "SELECT 1 FROM audit_logs WHERE action_type=? AND contract_id=? LIMIT 1",
-        (PENDING_TRANSFER_WITHDRAWN, str(contract_id)),
-    ).fetchone() is not None
+        return frozenset()
+    from snapshot_read_cache import memoized_read
+
+    def load():
+        found = set()
+        for offset in range(0, len(ids), 400):
+            group = ids[offset:offset + 400]
+            marks = ','.join('?' for _ in group)
+            found.update(str(row[0]) for row in connection.execute(
+                f"SELECT contract_id FROM audit_logs WHERE action_type=? AND contract_id IN ({marks})",
+                (PENDING_TRANSFER_WITHDRAWN, *group),
+            ))
+        return frozenset(found)
+
+    return memoized_read(connection, ('pending_transfer_withdrawn', ids), load)
 
 
 def _current_contract_rows(
@@ -152,6 +169,10 @@ def _current_contract_rows(
                       contract.id DESC""",
         student_ids,
     ).fetchall()
+    withdrawn = _withdrawn_contract_ids(
+        connection, (row[0] for row in rows
+                     if row[6] is None and row[7] is None and row[2] != "Revoked")
+    )
     result: dict[str, sqlite3.Row | None] = {}
     for row in rows:
         student_id = str(row[1])
@@ -162,7 +183,7 @@ def _current_contract_rows(
         # contract and resurrect a cancelled/completed lifecycle as pending.
         result[student_id] = (
             row if row[6] is None and row[7] is None and row[2] != "Revoked"
-            and not pending_transfer_was_withdrawn(connection, row[0]) else None
+            and str(row[0]) not in withdrawn else None
         )
     return {student_id: row for student_id, row in result.items() if row is not None}
 

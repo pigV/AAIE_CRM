@@ -10,6 +10,38 @@ from .versions import version_of
 class MinimumVersionUnavailable(RuntimeError):pass
 
 
+def read_authorization_context(connection, user):
+    """Opaque identity/permission fence for already-rendered desktop content."""
+    principal=dict(user)
+    modules=[]
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_module_permissions'").fetchone():
+        modules=[tuple(row) for row in connection.execute(
+            'SELECT * FROM user_module_permissions WHERE user_id=? ORDER BY module_key,id',
+            (principal.get('id'),))]
+    return digest({'user':principal.get('id'),'role':principal.get('role_id'),
+                   'permissions':principal.get('permissions_json'),'modules':modules})
+
+
+def rendered_snapshot_hint(connection, subjects, *, can_read, authorization_context=None):
+    """Seed already-rendered HTML without embedding its business payload twice.
+
+    The caller must render and read revisions in this same read transaction.
+    The marker is deliberately distinct from a full snapshot's content ETag.
+    """
+    if not connection.in_transaction or not connection.execute('PRAGMA query_only').fetchone()[0]:
+        raise ValueError('active_readonly_render_required')
+    require_schema(connection)
+    requested=tuple(sorted(set(subjects)))
+    if any(not isinstance(subject,Subject) for subject in requested):
+        raise ValueError('invalid snapshot scope')
+    versions=[{'kind':subject.kind,'id':subject.identifier,'version':version_of(connection,subject)}
+              for subject in requested if can_read(subject)]
+    result={'versions':versions,'etag':'rendered:'+digest(versions),
+            'as_of':datetime.now(timezone.utc).isoformat()}
+    if authorization_context is not None:result['authorization_context']=authorization_context
+    return result
+
+
 @contextmanager
 def read_scope(database):
     """Reuse an explicit read-only request snapshot, or own a new one.

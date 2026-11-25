@@ -579,6 +579,9 @@ class BusinessChangeSyncMixin:
                 row=connection.execute('SELECT student_id FROM visa_cases WHERE id=? AND archived_at IS NULL',(int(scope.identifier),)).fetchone()
                 if row is None or surface=='student_visa_case' and str(row[0] or '')!=str((self.query.get('student_id') or [''])[0]):
                     raise LookupError('case_not_found')
+            if surface=='dashboard_overview':
+                from business_changes.snapshots import read_authorization_context
+                return {'authorization_context':read_authorization_context(connection,self.user)}
             return {}
         try:
             if not self.business_changes_enabled():return self.json_response({'ok':False,'code':'sync_not_enabled'},503)
@@ -587,7 +590,9 @@ class BusinessChangeSyncMixin:
         except LookupError:return self.json_response({'ok':False,'code':'subject_not_found'},404)
         except MinimumVersionUnavailable:return self.json_response({'ok':False,'code':'revision_not_visible'},409)
         except SchemaUnavailable:return self.json_response({'ok':False,'code':'sync_schema_unavailable'},503)
-        return self.json_response({'versions':result['versions'],'as_of':result['as_of']})
+        packet={'versions':result['versions'],'as_of':result['as_of']}
+        if surface=='dashboard_overview':packet['authorization_context']=result['data']['authorization_context']
+        return self.json_response(packet)
 
     @limit_snapshot_reads
     def business_change_snapshot(self,method):
@@ -640,12 +645,17 @@ class BusinessChangeSyncMixin:
                 else:
                     html=g['dashboard_workflow_distribution_chart_html'](rows,canonical=canonical)
                     fragments={'dashboard-workflow':html}
-                return {'total':len(rows),'counts':counts,'fragments':fragments,
+                data={'total':len(rows),'counts':counts,'fragments':fragments,
                     'review_issues':self.business_change_visa_consistency_issues()}
+                if surface=='dashboard_overview':
+                    from business_changes.snapshots import read_authorization_context
+                    data['authorization_context']=read_authorization_context(conn,self.user)
+                return data
             result=read_snapshot(g['db'],(scope,),can_read=lambda subject:subject==scope and g['can_access_module'](self.user,module),
                                  load=load,minimum_versions={scope:minimum})
         except MinimumVersionUnavailable:return self.json_response({'ok':False,'code':'revision_not_visible'},409)
         except SchemaUnavailable:return self.json_response({'ok':False,'code':'sync_schema_unavailable'},503)
+        if surface=='dashboard_overview':result['authorization_context']=result['data']['authorization_context']
         return self.json_response(result)
 
     def business_change_mobile_packet(self,*,minimum=0):
