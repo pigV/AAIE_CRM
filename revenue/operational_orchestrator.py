@@ -17,7 +17,7 @@ from revenue.repository import RevenueRepository, new_uid
 from revenue.services import RevenueService
 
 from revenue.visa_fee_policy import (
-    SignedVisaPackageRequired, fully_executed_contracts, resolve_visa_fee, visa_fee_facts,
+    SignedVisaPackageRequired, fully_executed_contracts, resolve_visa_fee, visa_fee_facts, visa_fee_description,
 )
 
 
@@ -286,8 +286,11 @@ class RevenueOperationalOrchestrator:
         if visa_subclass(dict(visa)) == "500" and blocks_repricing(self.connection, cycle.id, "student_visa", fact.id):
             return {**event, "fee_status":"HISTORICAL_REVIEW", "reason":"historical_collection_review", "visa_fee_cents":None, "fee_items":[]}
         fee_facts = self._client_fee_facts_for_visa(cycle, case, visa)
-        authoritative_contracts = self._active_fully_executed_contracts(
-            fact.application_cycle_id
+        # A separately commissioned Visitor Visa is not part of the child's
+        # school contract; its own case date selects the effective fee rule.
+        authoritative_contracts = (
+            [] if fee_facts.service_kind == "visitor_600" else
+            self._active_fully_executed_contracts(fact.application_cycle_id)
         )
         if len(authoritative_contracts) > 1:
             exception = self.open_exception(
@@ -332,7 +335,7 @@ class RevenueOperationalOrchestrator:
         ) if resolved.net_cents is not None else None
         item = {
             "milestone_code": resolved.milestone_code,
-            "description": "Visa service fee",
+            "description": visa_fee_description(visa),
             "net_cents": resolved.net_cents,
             "gst_cents": 0,
             **resolved.snapshot(),

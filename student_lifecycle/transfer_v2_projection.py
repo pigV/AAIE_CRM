@@ -57,7 +57,7 @@ STAGES = {
     "materials_preparation": (20, "资料准备"),
     "school_plan": (25, "学校方案"),
     "school_application": (30, "学校申请"),
-    "offer_received": (40, "已收到 Offer"),
+    "offer_received": (40, "等待家长接受 Offer"),
     "acceptance_required": (45, "等待选择已接受学校"),
     "payment_required": (55, "等待付款确认"),
     "accepted_and_paid": (50, "已接受并付款"),

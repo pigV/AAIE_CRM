@@ -146,6 +146,45 @@ class ClientPaymentService:
         )
         return self.repository.require_by_uid("revenue_fee_item_contract_links", uid)
 
+    def _payment_authority(self, fee, actor_user_id):
+        """School fees require a signed contract; independent Visa fees an exact case."""
+        from revenue.visa_fee_policy import VISA_FEE_KINDS, visa_subclass
+        snapshot = json.loads(str(fee["rule_snapshot_json"] or "{}"))
+        items = snapshot.get("items", []) if isinstance(snapshot, dict) else []
+        if any(isinstance(item, dict) and item.get("contract_id") is not None for item in items):
+            return self._ensure_fee_item_contract_link(fee, actor_user_id)
+        if len(items) != 1 or not isinstance(items[0], dict):
+            raise ValueError("收费依据缺失，请核对合同或签证案件。")
+        item = items[0]
+        kind = VISA_FEE_KINDS.get(str(fee["milestone_code"]))
+        if (not kind or not item.get("visa_case_id")
+                or item.get("application_cycle_id") != fee["application_cycle_id"]
+                or item.get("milestone_code") != fee["milestone_code"]
+                or item.get("net_cents") != fee["net_cents"]
+                or item.get("gst_cents", 0) != fee["gst_cents"]):
+            # Preserve the established fail-closed contract diagnostic.
+            return self._ensure_fee_item_contract_link(fee, actor_user_id)
+        visa = self.connection.execute("SELECT * FROM visa_cases WHERE id=?", (item["visa_case_id"],)).fetchone()
+        expected = {"guardian_590": "590", "visitor_600": "600", "student_visa": "500"}.get(kind)
+        actual_subclass = visa_subclass(dict(visa)) if visa else None
+        legacy_renewal = bool(visa and actual_subclass is None
+            and fee["milestone_code"] == "student-visa-renewal"
+            and str(dict(visa).get("case_type") or "").casefold() == "renewal")
+        if (not visa or visa["student_id"] != fee["student_id"]
+                or visa["application_cycle_id"] != fee["application_cycle_id"]
+                or ("archived_at" in visa.keys() and visa["archived_at"])
+                or (actual_subclass != expected and not legacy_renewal)):
+            raise ValueError("签证收费与申请人或申请周期不一致，请核对后重试。")
+        prior = self.connection.execute("SELECT * FROM revenue_fee_item_visa_links WHERE fee_item_id=?", (fee["id"],)).fetchone()
+        if prior and (prior["visa_case_id"] != visa["id"] or prior["commercial_case_id"] != fee["commercial_case_id"]):
+            raise ValueError("签证收费依据冲突，请先核对。")
+        if not prior:
+            self.connection.execute(
+                "INSERT INTO revenue_fee_item_visa_links(uid,fee_item_id,visa_case_id,commercial_case_id,created_by,created_at) VALUES(?,?,?,?,?,?)",
+                (new_uid("fee-visa-link"), fee["id"], visa["id"], fee["commercial_case_id"], actor_user_id, self.repository.now()),
+            )
+        return None
+
     def ensure_fee_item_contract_link(
         self, fee_item_uid: str, *, actor_user_id: int, idempotency_key: str
     ) -> dict:
@@ -303,7 +342,7 @@ class ClientPaymentService:
 
         def operation():
             fee = self._fee_context(fee_item_uid)
-            link = self._ensure_fee_item_contract_link(fee, int(actor_user_id))
+            link = self._payment_authority(fee, int(actor_user_id))
             method = self._payment_method(method_code, str(received_date))
             gst = apply_basis_points(base, int(method["gst_rate_basis_points"]))
             gross = base + gst
@@ -432,24 +471,33 @@ class ClientPaymentService:
         return " ".join(parts) or "姓名待关联"
 
     def _receipt_authority(self, payment_uid: str) -> sqlite3.Row:
+        visa_ready = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='revenue_fee_item_visa_links'"
+        ).fetchone() is not None
+        visa_join = "LEFT JOIN revenue_fee_item_visa_links vl ON vl.fee_item_id=f.id" if visa_ready else ""
+        visa_id = "vl.visa_case_id" if visa_ready else "NULL"
         row = self.connection.execute(
-            """SELECT p.*,a.id AS client_allocation_id,a.fee_item_id,
+            f"""SELECT p.*,a.id AS client_allocation_id,a.fee_item_id,
                       a.allocated_base_cents,a.gst_cents,a.gross_charge_aud_cents,
                       a.method_code_snapshot,f.uid AS fee_item_uid,f.description AS fee_type,
-                      f.commercial_case_id,l.contract_id,c.application_cycle_id,c.student_id,
+                      f.commercial_case_id,l.contract_id,{visa_id} AS visa_case_id,c.application_cycle_id,c.student_id,
                       m.display_name AS payment_method_authority_label
                  FROM revenue_payments p
                  JOIN revenue_client_payment_allocations a ON a.payment_id=p.id
                  JOIN revenue_fee_items f ON f.id=a.fee_item_id
-                 JOIN revenue_fee_item_contract_links l ON l.fee_item_id=f.id
+                 LEFT JOIN revenue_fee_item_contract_links l ON l.fee_item_id=f.id
+                 {visa_join}
                  JOIN revenue_commercial_cases c ON c.id=f.commercial_case_id
                  JOIN revenue_payment_methods m ON m.id=p.payment_method_id
                 WHERE p.uid=? AND p.payment_direction='received'
-                  AND p.counterparty_kind='client' AND p.status='confirmed'""",
+                  AND p.counterparty_kind='client' AND p.status='confirmed'
+                  AND p.billing_account_id=f.billing_account_id""",
             (str(payment_uid),),
         ).fetchone()
         if not row:
             raise ValueError("client Payment allocation not found")
+        if (row["contract_id"] is None) == (row["visa_case_id"] is None):
+            raise ValueError("收据必须有唯一且明确的合同或签证案件依据。")
         return row
 
     @staticmethod
@@ -485,13 +533,19 @@ class ClientPaymentService:
         def operation():
             nonlocal created_file
             authority = self._receipt_authority(payment_uid)
+            visa_receipt = authority["contract_id"] is None
+            snapshot_table = "revenue_visa_receipt_snapshots" if visa_receipt else "revenue_receipt_snapshots"
+            if visa_receipt and not self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (snapshot_table,),
+            ).fetchone():
+                raise ValueError("独立签证收据结构尚未升级，操作已停止。")
             prior = self.connection.execute(
                 "SELECT * FROM revenue_receipts WHERE payment_id=?",
                 (authority["id"],),
             ).fetchone()
             if prior:
                 snapshot = self.connection.execute(
-                    "SELECT * FROM revenue_receipt_snapshots WHERE receipt_id=?",
+                    f"SELECT * FROM {snapshot_table} WHERE receipt_id=?",
                     (prior["id"],),
                 ).fetchone()
                 if not snapshot:
@@ -518,12 +572,28 @@ class ClientPaymentService:
                 "SELECT * FROM contracts WHERE id=?",
                 (authority["contract_id"],),
             ).fetchone()
-            if not student or not cycle or not contract:
+            visa = None
+            if visa_receipt:
+                self._payment_authority(self._fee_context(authority["fee_item_uid"]), actor_user_id)
+                self._validate_actual_payment(
+                    authority["method_code_snapshot"], authority["currency_code"],
+                    int(authority["amount_cents"]), int(authority["allocated_base_cents"]),
+                    int(authority["gst_cents"]),
+                )
+                visa = self.connection.execute("SELECT * FROM visa_cases WHERE id=?", (authority["visa_case_id"],)).fetchone()
+                if not visa or not str(visa["applicant_name"] or "").strip():
+                    raise ValueError("请先核实签证案件的实际申请人姓名。")
+                from revenue.visa_fee_policy import visa_subclass
+                if (visa_subclass(dict(visa)) in {"590", "600"}
+                        and str(visa["applicant_name"]).strip().casefold()
+                        == self._student_display_name(student).strip().casefold()):
+                    raise ValueError("家长签证案件仍使用学生姓名，请先核实并更正实际家长申请人后再生成收据。")
+            if not student or not cycle or (not visa_receipt and not contract):
                 raise ValueError("Receipt authoritative Student/Cycle/Contract is missing")
             contract_reference = (
                 str(contract["contract_uid"] or "").strip()
-                if "contract_uid" in contract.keys() else ""
-            ) or f"CONTRACT-{contract['id']}"
+                if contract and "contract_uid" in contract.keys() else ""
+            ) or (f"CONTRACT-{contract['id']}" if contract else None)
             cycle_label = (
                 str(cycle["cycle_uid"] or "").strip()
                 if "cycle_uid" in cycle.keys() else ""
@@ -542,8 +612,6 @@ class ClientPaymentService:
                 "student_number": authority["student_id"],
                 "application_cycle_id": int(authority["application_cycle_id"]),
                 "application_cycle_label": cycle_label,
-                "contract_id": int(authority["contract_id"]),
-                "contract_reference": contract_reference,
                 "fee_item_id": int(authority["fee_item_id"]),
                 "fee_type": authority["fee_type"],
                 "payment_date": authority["received_date"],
@@ -559,6 +627,17 @@ class ClientPaymentService:
                 "issued_at": issued_at,
                 "created_at": issued_at,
             }
+            if visa_receipt:
+                from revenue.visa_fee_policy import visa_subclass, visa_fee_description
+                snapshot_value.update(
+                    visa_case_id=int(visa["id"]),
+                    visa_case_reference=f"VISA-{visa['id']}",
+                    visa_subclass=visa_subclass(dict(visa)) or str(dict(visa).get("visa_type") or dict(visa).get("case_type") or "类别待核实"),
+                    applicant_name=str(visa["applicant_name"]).strip(),
+                    fee_type=visa_fee_description(visa),
+                )
+            else:
+                snapshot_value.update(contract_id=int(authority["contract_id"]), contract_reference=contract_reference)
             snapshot_sha256 = hashlib.sha256(
                 canonical_json(snapshot_value).encode("utf-8")
             ).hexdigest()
@@ -593,33 +672,15 @@ class ClientPaymentService:
             )
             receipt = self.repository.require_by_uid("revenue_receipts", receipt_uid)
             snapshot_uid = new_uid("receipt-snapshot")
+            stored = {"uid": snapshot_uid, "receipt_id": receipt["id"],
+                      **snapshot_value, "snapshot_sha256": snapshot_sha256}
+            columns = ",".join(stored)
+            placeholders = ",".join("?" for _ in stored)
             self.connection.execute(
-                """INSERT INTO revenue_receipt_snapshots(
-                     uid,receipt_id,receipt_number,issuer_name,issuer_abn,student_name,
-                     student_number,application_cycle_id,application_cycle_label,contract_id,
-                     contract_reference,fee_item_id,fee_type,payment_date,payment_method_code,
-                     payment_method_label,actual_currency_code,actual_amount_cents,
-                     allocated_base_cents,gst_cents,gross_charge_aud_cents,
-                     transaction_reference,issued_by,issued_at,snapshot_sha256,created_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    snapshot_uid, receipt["id"], receipt_number,
-                    snapshot_value["issuer_name"], snapshot_value["issuer_abn"],
-                    snapshot_value["student_name"], snapshot_value["student_number"],
-                    snapshot_value["application_cycle_id"], snapshot_value["application_cycle_label"],
-                    snapshot_value["contract_id"], snapshot_value["contract_reference"],
-                    snapshot_value["fee_item_id"], snapshot_value["fee_type"],
-                    snapshot_value["payment_date"], snapshot_value["payment_method_code"],
-                    snapshot_value["payment_method_label"], snapshot_value["actual_currency_code"],
-                    snapshot_value["actual_amount_cents"], snapshot_value["allocated_base_cents"],
-                    snapshot_value["gst_cents"], snapshot_value["gross_charge_aud_cents"],
-                    snapshot_value["transaction_reference"], snapshot_value["issued_by"],
-                    snapshot_value["issued_at"], snapshot_sha256, snapshot_value["created_at"],
-                ),
+                f"INSERT INTO {snapshot_table}({columns}) VALUES({placeholders})",
+                tuple(stored.values()),
             )
-            snapshot = self.repository.require_by_uid(
-                "revenue_receipt_snapshots", snapshot_uid
-            )
+            snapshot = self.repository.require_by_uid(snapshot_table, snapshot_uid)
             return {
                 "uid": receipt_uid,
                 "receipt": receipt,

@@ -271,6 +271,21 @@ def bind_authoritative_offer(
     ).fetchone()
     if event is None:
         raise TransferV2BusinessRecordError("Offer canonical event was not created")
+    # Saving a reviewed Offer is the receipt boundary. Do not revive an Offer
+    # which has subsequently been withdrawn or superseded on a retry.
+    if connection.execute(
+        "SELECT 1 FROM offer_received_event_state_events WHERE offer_received_event_id=?",
+        (int(event[0]),),
+    ).fetchone() is None and str(record["offer_status"] or "").lower() in {
+        "received", "signed", "signed_received", "accepted",
+    }:
+        connection.execute(
+            """INSERT INTO offer_received_event_state_events(
+                 offer_received_event_id,state,occurred_at,actor_user_id,
+                 idempotency_key,created_at) VALUES(?,'ACTIVE',?,?,?,?)""",
+            (int(event[0]), occurred_at, actor_user_id,
+             f"transfer-offer-saved:{int(event[0])}", occurred_at),
+        )
     return TransferV2BusinessRecordBinding(
         int(context["cycle_id"]), int(context["case_id"]), int(branch_id),
         int(context["acceptance_id"]) if context["acceptance_id"] is not None else None,

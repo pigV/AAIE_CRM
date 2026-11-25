@@ -349,12 +349,9 @@ class ControlledOnboardingService:
         if not visa_rows or base_fee["status"] not in {"proposed", "existing"}:
             return [], []
         contracts = self._fully_executed(authority.get("contracts", []))
-        if len(contracts) != 1:
-            return [], []
-        contract = contracts[0]
+        contract = contracts[0] if len(contracts) == 1 else None
         engagement_date = str(
-            contract.get("contract_date")
-            or contract.get("fully_executed_at")
+            (contract.get("contract_date") or contract.get("fully_executed_at") if contract else None)
             or self._cycle_version(cycle)
         )[:10]
         proposals = []
@@ -366,9 +363,17 @@ class ControlledOnboardingService:
                 visa, education_stream=cycle["education_stream"], cycle_type=cycle["cycle_type"],
                 existing_aaie=existing_aaie,
             )
+            visitor = facts.service_kind == "visitor_600"
+            if not visitor and contract is None:
+                continue
+            visa_engagement_date = (
+                str(visa.get("updated_at") or visa.get("created_at") or self._cycle_version(cycle))[:10]
+                if visitor else engagement_date
+            )
             try:
                 resolved = resolve_visa_fee(
-                    self.fee_rules, facts, visa, contracts, cycle["student_id"], engagement_date,
+                    self.fee_rules, facts, visa, [] if visitor else contracts,
+                    cycle["student_id"], visa_engagement_date,
                 )
             except MissingFeeRule as exc:
                 reason = "signed_visa_package_required" if isinstance(exc, SignedVisaPackageRequired) else "missing_fee_rule"
@@ -396,9 +401,9 @@ class ControlledOnboardingService:
                     "reason": reason,
                     "source": "CONTROLLED_ONBOARDING",
                     "visa_case_id": visa["id"],
-                    "contract_id": contract["id"],
-                    "engagement_source": "fully_executed_contract",
-                    "source_engagement_date": engagement_date,
+                    "contract_id": None if visitor else contract["id"],
+                    "engagement_source": "visa_case" if visitor else "fully_executed_contract",
+                    "source_engagement_date": visa_engagement_date,
                     "rule_version_uid": resolved.rule_uid,
                     "policy_code": resolved.policy_code,
                     "milestone_code": resolved.milestone_code,

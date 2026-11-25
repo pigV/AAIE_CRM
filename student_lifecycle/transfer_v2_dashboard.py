@@ -8,7 +8,7 @@ TRANSFER_V2_DASHBOARD_STAGES = (
     ("materials_preparation", "资料准备"),
     ("school_plan", "学校方案"),
     ("school_application", "学校申请"),
-    ("offer_received", "已收到 Offer"),
+    ("offer_received", "等待家长接受 Offer"),
     ("accepted_and_paid", "已接受并付款"),
     ("coe_update", "更新 COE"),
     ("pending_completion", "待结束"),

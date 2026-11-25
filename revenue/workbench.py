@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 from revenue.first_year_tuition import first_year_records, school_components
 from revenue.read_models import RevenueReadModels, exception_code_label
+from revenue.visa_fee_policy import fee_display_description
 
 
 class RevenueWorkbench:
@@ -512,6 +513,7 @@ class RevenueWorkbench:
             (case_id,),
         )
         for row in rows:
+            row["description"] = fee_display_description(self.connection, row["uid"], row["description"])
             final_base = int(row["net_cents"])
             received = int(row["base_received_cents"])
             row.update({

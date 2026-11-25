@@ -279,7 +279,10 @@ def _render_client_receipt(snapshot: dict, output_path: str | Path) -> str:
     rows = [
         ("Student / 学生", f"{snapshot['student_name']} · {snapshot['student_number']}"),
         ("Application Cycle / 申请周期", snapshot["application_cycle_label"]),
-        ("Contract / 合同", snapshot["contract_reference"]),
+        *(([("Applicant / 申请人", snapshot["applicant_name"]),
+             ("Visa Case / 签证案件", f"{snapshot['visa_case_reference']} · {snapshot['visa_subclass']}")])
+          if snapshot.get("visa_case_id") is not None else
+          [("Contract / 合同", snapshot["contract_reference"])]),
         ("Fee Type / 收费类型", snapshot["fee_type"]),
         ("Payment Date / 收款日期", snapshot["payment_date"]),
         ("Payment Method / 支付方式", snapshot["payment_method_label"]),

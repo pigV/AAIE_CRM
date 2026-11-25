@@ -13,7 +13,7 @@ def active_visa_cycles(connection, student_id):
     ).fetchall()
 
 
-def resolve_visa_cycle(connection, student_id, requested="", *, infer_single=True):
+def resolve_visa_cycle(connection, student_id, requested="", *, infer_single=True, family_visa=False):
     cycles = active_visa_cycles(connection, student_id)
     if requested:
         try:
@@ -21,6 +21,13 @@ def resolve_visa_cycle(connection, student_id, requested="", *, infer_single=Tru
         except (TypeError, ValueError):
             raise ValueError("请选择有效的申请周期") from None
         if any(row[0] == selected for row in cycles):
+            return selected
+        # A parent's separate service may follow a completed school cycle.
+        # Selection is explicit and must never reopen the child's cycle.
+        if family_visa and connection.execute(
+            "SELECT 1 FROM application_cycles WHERE id=? AND student_id=? AND status='closed'",
+            (selected, student_id),
+        ).fetchone():
             return selected
         raise ValueError("请选择该学生当前有效的申请周期")
     if not cycles:

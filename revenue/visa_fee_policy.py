@@ -18,6 +18,7 @@ VISA_FEE_KINDS = {
     if any(key == "service_kind" and value != "base" for key, _, value in rule["conditions"])
 }
 VISA_FEE_KINDS[STUDENT_VISA_PACKAGE] = "student_visa"
+VISA_FEE_KINDS["visitor-600"] = "visitor_600"
 
 
 class SignedVisaPackageRequired(MissingFeeRule):
@@ -55,7 +56,7 @@ def signed_student_visa_package(contracts, student_id):
 def visa_subclass(visa):
     for field in ("visa_subclass", "case_type", "visa_type", "visa_case_name"):
         text = str(visa.get(field) or "").strip().casefold()
-        if code := re.search(r"(?<!\d)(500|590)(?!\d)", text):
+        if code := re.search(r"(?<!\d)(500|590|600)(?!\d)", text):
             return code[1]
         if any(term in text for term in ("陪读", "guardian")):
             return "590"
@@ -72,10 +73,34 @@ def visa_fee_facts(visa, *, education_stream, cycle_type, existing_aaie):
     renewal = any(word in text for word in ("renew", "extension", "续签", "延期"))
     independent = renewal or "standalone" in text or "independent" in text or "单独申请" in text
     return ClientFeeRuleFacts(
-        service_kind="guardian_590" if visa_subclass(visa) == "590" else "student_visa",
+        service_kind={"590": "guardian_590", "600": "visitor_600"}.get(visa_subclass(visa), "student_visa"),
         education_stream=education_stream, cycle_type=cycle_type, existing_aaie_k12=existing_aaie,
         application_type="renewal" if renewal else "new", independent_service=independent,
     )
+
+
+def visa_fee_description(visa):
+    visa = dict(visa)
+    name = str(visa.get("applicant_name") or visa.get("main_applicant") or "申请人待核实").strip()
+    code = visa_subclass(visa)
+    label = {"590": "陪读签证", "600": "旅游签证", "500": "学生签证"}.get(code, "签证")
+    return f"{name} · {code or '类别待核实'} {label}服务费 · 案件 #{visa['id']}"
+
+
+def fee_display_description(connection, fee_uid, fallback):
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(visa_cases)")}
+    if not {"student_id", "application_cycle_id", "applicant_name"}.issubset(columns):
+        return fallback
+    rows = connection.execute(
+        """SELECT visa.* FROM revenue_fee_items fee
+             JOIN revenue_rule_snapshots snap ON snap.id=fee.rule_snapshot_id
+             JOIN json_each(snap.canonical_json,'$.items') item
+             JOIN revenue_commercial_cases cc ON cc.id=fee.commercial_case_id
+             JOIN visa_cases visa ON visa.id=json_extract(item.value,'$.visa_case_id')
+              AND visa.student_id=fee.student_id AND visa.application_cycle_id=cc.application_cycle_id
+            WHERE fee.uid=?""", (fee_uid,),
+    ).fetchall()
+    return visa_fee_description(rows[0]) if len(rows) == 1 else fallback
 
 
 def resolve_visa_fee(resolver, facts, visa, contracts, student_id, engagement_date):

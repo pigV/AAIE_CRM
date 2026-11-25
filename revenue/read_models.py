@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from canonical_acceptance import active_acceptance_predicate
 from revenue.client_fee_rules import CLIENT_FEE_RULES_2026
 from revenue.operational_visibility import RevenueOperationalVisibility
-from revenue.visa_fee_policy import VISA_FEE_KINDS, signed_student_visa_package
+from revenue.visa_fee_policy import VISA_FEE_KINDS, signed_student_visa_package, fee_display_description
 from revenue.urls import case_url, cases_url, revenue_home_url
 
 
@@ -27,7 +27,7 @@ _FEE_GROUPS = {
     )
     for rule in CLIENT_FEE_RULES_2026
 }
-_FEE_GROUPS.update({"visa": "visa_service_fee"})
+_FEE_GROUPS.update({"visa": "visa_service_fee", "visitor-600": "visa_service_fee"})
 _FEE_DESCRIPTIONS = {
     "client service fee": "client_service_fee",
     "visa service fee": "visa_service_fee",
@@ -759,7 +759,7 @@ class RevenueReadModels:
                 if outstanding:
                     payment_options.append({
                         "fee_item_uid": str(row["uid"]),
-                        "label": f"{row['student_id']} · {row['description']}",
+                        "label": f"{row['student_id']} · {fee_display_description(self.connection, row['uid'], row['description'])}",
                         "outstanding_base_cents": outstanding,
                         "selected": str(row["uid"]) == str(selected),
                     })
@@ -794,7 +794,7 @@ class RevenueReadModels:
                     "gst_rate_basis_points": int(row["gst_rate_basis_points"]),
                 })
             receipt_options = [dict(row) for row in self.connection.execute(
-                """SELECT p.uid payment_uid,f.student_id,f.description,p.received_date,
+                """SELECT p.uid payment_uid,f.student_id,f.description,f.uid fee_item_uid,p.received_date,
                           p.currency_code,p.amount_cents
                      FROM revenue_payments p
                      JOIN revenue_client_payment_allocations a ON a.payment_id=p.id
@@ -806,7 +806,7 @@ class RevenueReadModels:
                 case_parameters,
             )]
             payment_history = [dict(row) for row in self.connection.execute(
-                """SELECT p.uid payment_uid,f.student_id,f.description,p.received_date,
+                """SELECT p.uid payment_uid,f.student_id,f.description,f.uid fee_item_uid,p.received_date,
                           p.currency_code,p.amount_cents,a.allocated_base_cents,a.gst_cents,
                           a.method_code_snapshot,d.uid evidence_document_uid,
                           r.receipt_number,rd.uid receipt_document_uid
@@ -821,6 +821,8 @@ class RevenueReadModels:
                  ORDER BY p.received_date DESC,p.id DESC LIMIT 100""",
                 case_parameters,
             )]
+            for row in receipt_options + payment_history:
+                row["description"] = fee_display_description(self.connection, row["fee_item_uid"], row["description"])
             if payment_options and not payment_methods:
                 payment_options = []
             if payment_options or receipt_options or payment_history:
@@ -1181,7 +1183,7 @@ class RevenueReadModels:
                 "uid": str(row["uid"]),
                 "student_name": self._student_display_name(str(row["student_id"])),
                 "student_id": str(row["student_id"]),
-                "fee_type": str(row["description"]),
+                "fee_type": fee_display_description(self.connection, row["uid"], str(row["description"])),
                 "standard_base_cents": final_base + int(row["discount_cents"]),
                 "discount_cents": int(row["discount_cents"]),
                 "final_base_cents": final_base,

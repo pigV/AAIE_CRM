@@ -30418,6 +30418,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("无权限执行该操作。", HTTPStatus.FORBIDDEN)
         except ValueError as error:
             detail = str(error)
+            if action_name == "billing/receipt" and any("\u4e00" <= ch <= "\u9fff" for ch in detail):
+                return self.error_page("收据未生成：" + detail, HTTPStatus.BAD_REQUEST)
             if action_name.startswith("historical/"):
                 return self.error_page(detail if any("\u4e00" <= ch <= "\u9fff" for ch in detail) else "核对资料无效或版本已变化，请刷新后重试。", HTTPStatus.BAD_REQUEST)
             if payment_json:
@@ -60809,6 +60811,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             f'<div class="detail-item"><span>办理类型</span><strong>{esc(service_label)}</strong></div>'
             '</div></section>'
         ]
+        if data.get("requires_parent_accompaniment") == "是":
+            section_html.append('<section class="detail-section"><p>有陪读需求：请按实际家长建立签证案件后查看对应收费；意向登记不会自动收费。</p></section>')
         for section_id, title, fields in profile_sections():
             items = []
             for name, label, *_ in fields:
@@ -61892,7 +61896,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return (
             '<label class="transfer-v2-business-branch">Transfer V2 Target Branch'
             f'<select name="transfer_branch_id" required><option value="">请选择</option>{options}</select>'
-            '<small>本记录只绑定所选 current Transfer Cycle + Target Branch。</small></label>'
+            '<small>本记录只绑定当前转学周期的目标学校；如缺少学校，请先 '
+            f'<a href="/students/{quote(str(student_id))}/transfer-cases/{int(branches[0]["case_id"])}">添加转学目标学校</a>，再返回上传。</small></label>'
         )
 
     def transfer_v2_requested_branch_id(
@@ -68831,6 +68836,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return (
             "500 Student Visa",
             "590 Guardian Visa",
+            "600 Visitor Visa",
             "500 + 590 Combined",
             "485",
             "Renewal",
@@ -68878,19 +68884,27 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             for option in options
         )
 
-    def visa_case_cycle_field(self, student_id, selected="", *, explicit=False):
+    def visa_case_cycle_field(self, student_id, selected="", *, explicit=False, include_family_history=False):
         from visa_cycle_assignment import active_visa_cycles
         from business_changes.snapshots import read_scope
 
         with read_scope(db) as connection:
             cycles = active_visa_cycles(connection, student_id)
+            active_ids = {row[0] for row in cycles}
+            if include_family_history:
+                cycles = list(cycles) + list(connection.execute(
+                    "SELECT id,sequence_no,cycle_type,education_stream FROM application_cycles WHERE student_id=? AND status='closed' ORDER BY sequence_no,id",
+                    (student_id,),
+                ))
         if not cycles:
             return ""
-        if len(cycles) == 1 and not explicit:
+        if len(cycles) == 1 and not explicit and cycles[0][0] in active_ids:
             selected = selected or cycles[0][0]
         options = ['<option value="">请选择</option>']
         for cycle_id, sequence, cycle_type, stream in cycles:
             label = f"周期 #{sequence} · {LIFECYCLE_LABELS.get(cycle_type, cycle_type)} · {stream}"
+            if cycle_id not in active_ids:
+                label += " · 已结束，仅可用于家长签证"
             selected_flag = " selected" if str(selected) == str(cycle_id) else ""
             options.append(f'<option value="{cycle_id}"{selected_flag}>{esc(label)}</option>')
         return f'<label>申请周期<select name="application_cycle_id" required>{"".join(options)}</select></label>'
@@ -68907,11 +68921,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <input type="hidden" name="csrf" value="{esc(self.csrf)}">
           <div class="panel-head"><div><h2>创建 Visa Case</h2><p>Phase 1 只记录基础信息；不包含家长链接、材料上传、Evidence、Word/PDF 或 GS/GTE。</p></div></div>
           <div class="dialog-grid visa-case-new-section">
-            {self.visa_case_cycle_field(student_id, values.get("application_cycle_id", ""))}
+            {self.visa_case_cycle_field(student_id, values.get("application_cycle_id", ""), include_family_history=True)}
             <label>Visa Type<select name="visa_type" required><option value="">请选择</option>{self.visa_case_select_options(self.visa_case_type_options(), values.get("visa_type", ""))}</select></label>
             <label>Application Type<input name="application_type" value="{value("application_type", "New Application")}"></label>
             <label>Guardian Applicant<select name="guardian_applicant">{self.visa_case_guardian_applicant_options_html(values.get("guardian_applicant", ""))}</select></label>
-            <label>Main Applicant<input name="main_applicant" value="{value("main_applicant", student_name)}"></label>
+            <label>Main Applicant<input name="main_applicant" required value="{value("main_applicant", student_name)}"><small>590／600 请填写实际家长姓名，每人单独建案；已结束周期仅可明确用于家长签证。</small></label>
             <label>Applicant Count<input type="number" min="1" name="applicant_count" value="{applicant_count}"></label>
             <label>Status<select name="status" required>{self.visa_case_select_options(self.visa_case_status_options(), values.get("status", "Draft"))}</select></label>
             <label>Case Owner<input name="case_owner" value="{value("case_owner", self.user.get("display_name", "") if self.user else "")}"></label>
@@ -69131,7 +69145,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 </div>
                 <a class="secondary button-link" href="/students/{quote(student_id)}/visa-cases">返回 Visa Case 列表</a>
               </section>
-              {self.visa_case_foundation_form_html(student, {'application_cycle_id': (getattr(self, "query", {}).get("application_cycle_id") or [""])[0]})}
+              {self.visa_case_foundation_form_html(student, {'application_cycle_id': (getattr(self, "query", {}).get("application_cycle_id") or [""])[0], **({'visa_type':'590 Guardian Visa','main_applicant':''} if (getattr(self, "query", {}).get("family") or [''])[0]=='590' else {})})}
             </div>
             """
             return self.send_html(page("Create Visa Case", body, self.user, self.csrf, "visa_management", nas.status()))
@@ -69157,6 +69171,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         stamp = now_iso()
         student_name = f'{student["passport_first_name"] or ""} {student["passport_last_name"] or ""}'.strip()
         main_applicant = form_text_value(form, "main_applicant", student_name)
+        family_visa = visa_type in {"590 Guardian Visa", "600 Visitor Visa"}
+        if family_visa and (not main_applicant.strip() or main_applicant.strip().casefold() == student_name.casefold()):
+            return self.flash_redirect(f"/students/{quote(student_id)}/visa-cases/new", "请填写实际家长姓名，每位家长单独建立签证案件。", "error")
         guardian_applicant = form_text_value(form, "guardian_applicant")
         if guardian_applicant and guardian_applicant not in self.visa_case_guardian_applicant_options():
             return self.flash_redirect(
@@ -69171,7 +69188,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
         try:
             with db.transaction() as connection:
-                cycle_id = resolve_visa_cycle(connection, student_id, form_text_value(form, "application_cycle_id"))
+                cycle_id = resolve_visa_cycle(connection, student_id, form_text_value(form, "application_cycle_id"), family_visa=family_visa)
                 case_id = connection.execute(
                     """INSERT INTO visa_cases(
                          student_id,visa_case_name,visa_type,application_type,main_applicant,guardian_applicant,
@@ -69239,6 +69256,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if not student:
             return self.error_page("学生不存在", 404)
         visa_type = self.student_visa_case_quick_type_label(visa_kind)
+        if str(visa_kind) == "590":
+            return self.redirect(f"/students/{quote(student_id)}/visa-cases/new?family=590")
         stamp = now_iso()
         student_name = f'{student["passport_first_name"] or ""} {student["passport_last_name"] or ""}'.strip()
         case_owner = self.user.get("display_name", "") if self.user else ""

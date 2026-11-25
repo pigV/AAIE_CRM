@@ -58,6 +58,12 @@ def validate_transfer_fee_items(connection, case, items, source_rule_uid):
             existing_aaie_k12=authority['source_classification']=='aaie_existing',
             application_type='renewal' if renewal else 'new',
             independent_service=renewal or 'standalone' in normalized or 'independent' in normalized)
+        from dataclasses import asdict
+        from revenue.visa_fee_policy import visa_subclass, visa_fee_facts
+        if visa_subclass(asdict(visa)) == '600':
+            facts = visa_fee_facts(asdict(visa), education_stream='school_education',
+                cycle_type='transfer', existing_aaie=authority['source_classification']=='aaie_existing')
+            date = str(visa.version)[:10]
         rule = DatabaseClientFeeRuleResolver(connection).resolve(facts,date)
     else:
         if item.get('contract_id') != authority['transfer_contract_id']:

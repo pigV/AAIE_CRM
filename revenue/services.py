@@ -660,7 +660,8 @@ class RevenueService:
                             "SELECT * FROM visa_cases WHERE id=?", (visa_fact.id,),
                         ).fetchone()
                         facts = verifier._client_fee_facts_for_visa(cycle_fact, case, visa_row)
-                        active_contracts = verifier._active_fully_executed_contracts(cycle_fact.id)
+                        active_contracts = ([] if facts.service_kind == 'visitor_600' else
+                            verifier._active_fully_executed_contracts(cycle_fact.id))
                         if len(active_contracts) > 1:
                             raise SourceAuthorityError('Ambiguous historical Transfer contracts; HOLD')
                         engagement_date = (str(
