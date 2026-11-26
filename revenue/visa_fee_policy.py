@@ -110,7 +110,9 @@ def fee_visa_case(connection, fee_uid):
 
 def fee_display_description(connection, fee_uid, fallback):
     visa = fee_visa_case(connection, fee_uid)
-    return visa_fee_description(visa, show_unclassified=False) if visa else fallback
+    return visa_fee_description(visa, show_unclassified=False) if visa else (
+        "Client service fee" if fallback == "Controlled onboarding client service fee" else fallback
+    )
 
 
 def resolve_visa_fee(resolver, facts, visa, contracts, student_id, engagement_date):

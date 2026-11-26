@@ -323,7 +323,10 @@ class RevenueWorkbench:
             "final_base_cents": int(item["final_base_cents"]),
             "base_received_cents": int(item["base_received_cents"]),
             "gst_collected_cents": int(item["gst_collected_cents"]),
-            "outstanding_base_cents": int(item["outstanding_base_cents"]),
+            "outstanding_base_cents": (int(item["outstanding_base_cents"])
+                                       if item["outstanding_base_cents"] is not None else None),
+            "allocation_pending": bool(item.get("allocation_pending")),
+            "legacy_receipts": bool(item.get("legacy_receipts")),
             **({
                 "refunded_base_cents": item["refunded_base_cents"],
                 "refunded_gst_cents": item["refunded_gst_cents"],
@@ -531,7 +534,15 @@ class RevenueWorkbench:
             (case_id,),
         )
         refunds = fee_refund_totals(self.connection, (row["id"] for row in rows))
+        from revenue.receipt_display import legacy_fee_receipt_totals
+        case_uid = self.connection.execute("SELECT uid FROM revenue_commercial_cases WHERE id=?", (case_id,)).fetchone()[0]
+        legacy = legacy_fee_receipt_totals(self.connection, case_uid)
         for row in rows:
+            legacy_base, legacy_gst, unverified = legacy.get(row["id"], (0, 0, 0))
+            row["base_received_cents"] += legacy_base
+            row["gst_collected_cents"] += legacy_gst
+            row["allocation_pending"] = bool(unverified)
+            row["legacy_receipts"] = any((legacy_base, legacy_gst, unverified))
             refunded_base, refunded_gst = refunds.get(row["id"], (0, 0))
             row.update(refunded_base_cents=refunded_base, refunded_gst_cents=refunded_gst)
             row["description"] = fee_display_description(self.connection, row["uid"], row["description"])
@@ -540,8 +551,9 @@ class RevenueWorkbench:
             row.update({
                 "standard_base_cents": final_base + int(row["discount_cents"]),
                 "final_base_cents": final_base,
-                "outstanding_base_cents": max(0, final_base - received),
+                "outstanding_base_cents": None if unverified else max(0, final_base - received),
                 "payment_status": (
+                    "已有收款，GST分摊待核对" if unverified else
                     "已收清" if received >= final_base else
                     "部分收款" if received else "待收款"
                 ),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import app
@@ -184,7 +185,7 @@ class RevenueStudentContextReadModelTests(RevenueDatabaseFixture, unittest.TestC
             "/revenue/billing/payment", global_data["action"]["payment_action"]
         )
         global_html = render_revenue_workspace_page(global_data, "csrf", "token")
-        self.assertIn('action="/revenue/billing/payment"', global_html)
+        self.assertNotIn('action="/revenue/billing/payment"', global_html)
 
     def test_unknown_case_scope_fails_closed(self):
         with self.connect() as connection:
@@ -312,7 +313,7 @@ class RevenueStudentContextActionTests(RevenueDatabaseFixture, unittest.TestCase
         class Handler:
             user = {"id": 1, "role_name": "Admin"}
             headers = {"Accept": "application/json", "X-Requested-With": "fetch"}
-            files = []
+            files = [SimpleNamespace(field_name="payment_evidence",filename="synthetic.png",data=b"synthetic")]
             form = {"fee_item_uid": fee_uid}
 
             @staticmethod

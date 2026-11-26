@@ -90,7 +90,7 @@ class RevenueContextualUITests(RevenueDatabaseFixture, unittest.TestCase):
         mobile = render_revenue_case_workbench(data, mobile=True)
         for section in data["sections"]:
             section_id = f'id="revenue-case-{section["key"]}"'
-            if section["key"] == "documents_evidence":
+            if section["key"] in {"documents_evidence", "timeline_audit"}:
                 self.assertNotIn(section_id, desktop)
                 self.assertNotIn(section_id, mobile)
                 continue

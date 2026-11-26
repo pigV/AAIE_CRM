@@ -97,8 +97,8 @@ WORKSPACE_DEFINITIONS = {
         "columns": (
             ("student_name", "学生"), ("student_id", "学生编号"),
             ("fee_type", "收费项目"), ("standard_base_cents", "标准基础费"),
-            ("discount_cents", "折扣"), ("final_base_cents", "最终基础费（未含 GST）"),
-            ("base_received_cents", "已收基础费"), ("gst_collected_cents", "已收 GST"),
+            ("discount_cents", "折扣"), ("actual_receipts", "实收金额"),
+            ("gst_collected_cents", "已收 GST"),
             ("outstanding_base_cents", "未收基础费"), ("status", "收费状态"),
         ),
         "filters": (("all", "全部"), ("outstanding", "待收款"), ("settled", "已收清")),
@@ -767,7 +767,7 @@ class RevenueReadModels:
             case_parameters = (case_uid,) if case_uid else ()
             payment_options = []
             for row in self.connection.execute(
-                """SELECT f.uid,f.student_id,f.description,f.net_cents,
+                """SELECT f.id,f.uid,f.student_id,f.description,f.net_cents,c.uid case_uid,
                           COALESCE((SELECT SUM(a.allocated_base_cents)
                                       FROM revenue_client_payment_allocations a
                                      WHERE a.fee_item_id=f.id),0) base_received_cents
@@ -778,7 +778,11 @@ class RevenueReadModels:
                  ORDER BY f.created_at,f.id""",
                 case_parameters,
             ):
-                outstanding = max(0, int(row["net_cents"]) - int(row["base_received_cents"]))
+                from revenue.receipt_display import legacy_fee_receipt_totals
+                legacy_base, _, unverified = legacy_fee_receipt_totals(self.connection, row["case_uid"]).get(row["id"], (0, 0, 0))
+                if unverified:
+                    continue
+                outstanding = max(0, int(row["net_cents"]) - int(row["base_received_cents"]) - legacy_base)
                 if outstanding:
                     payment_options.append({
                         "fee_item_uid": str(row["uid"]),
@@ -1106,6 +1110,7 @@ class RevenueReadModels:
                        "href": self.cases_href + "?" + urlencode({"student": sid})}
                 if not cases:
                     row["missing_case"] = self._missing_case_info(student["missing_case_reason"])
+            self._complete_student_list_facts(row, sid, cases)
             from revenue.historical_receipts import reviews, summary
             historical = [r for r in reviews(self.connection, student_id=sid) if r["status"] != "cancelled"]
             if historical and not cases:
@@ -1132,6 +1137,51 @@ class RevenueReadModels:
             "total": total, "page": page, "pages": pages, "page_size": page_size,
             "previous": link(page-1) if page > 1 else None,
             "next": link(page+1) if page < pages else None}}
+
+    def _complete_student_list_facts(self, row, student_id, cases):
+        """Read-only facts; a missing finance record never implies a fee or zero debt."""
+        if len(cases) > 1:
+            required = {"existing_aaie_k12", "opened_at", "closed_at"}
+            projections = ([self._case_projection(c) for c in cases]
+                           if required <= self._columns("revenue_commercial_cases") else [])
+            for case, projection in zip(cases, projections):
+                self._complete_student_list_facts(projection, student_id, [case])
+            for key in ("classification", "business_type", "institution", "intake",
+                        "billing_status", "commission_status", "updated_at_display"):
+                row[key] = "；".join(
+                    f"周期 #{c['application_cycle_id']}：{p.get(key) or '待核对'}"
+                    for c, p in zip(cases, projections)
+                ) or "多个申请周期，查看档案核对"
+            return
+        student = self.connection.execute("SELECT * FROM students WHERE student_id=?", (student_id,)).fetchone()
+        facts = dict(student) if student else {}
+        cycle = None
+        if {"student_id", "id"} <= self._columns("application_cycles"):
+            order = "CASE WHEN status='active' THEN 0 ELSE 1 END," if "status" in self._columns("application_cycles") else ""
+            cycle = self.connection.execute(
+                "SELECT * FROM application_cycles WHERE student_id=? ORDER BY " + order + "id DESC LIMIT 1",
+                (student_id,)).fetchone()
+        cycle_facts = dict(cycle) if cycle else {}
+        row.setdefault("classification", "待核对客户分类")
+        row.setdefault("business_type", self._cycle_business_type(cycle) if cycle else "待确认业务类型")
+        scoped_cycle_id = cases[0]["application_cycle_id"] if cases else cycle_facts.get("id")
+        if row.get("institution") in (None, "", "—", "未关联") and scoped_cycle_id:
+            institution, _ = self._recent_case_institution({"id": cases[0]["id"] if cases else None,
+                "application_cycle_id": scoped_cycle_id, "student_id": student_id})
+            row["institution"] = institution if institution != "未关联" else "待确认院校"
+        row.setdefault("institution", "待确认院校")
+        if row.get("intake") in (None, "", "—"):
+            intake = self._cycle_intake(cycle) if not cases else "—"
+            # Current profile intent may only describe the current/selected cycle.
+            if intake == "—" and (not cases or cycle_facts.get("id") == cases[0]["application_cycle_id"]):
+                year, term = str(facts.get("preferred_intake_year") or "").strip(), str(facts.get("preferred_intake_term") or "").strip()
+                intake = f"{year} 年 {int(term)} 月" if year and term.isdecimal() and 1 <= int(term) <= 12 else (year + " 年 · 月份待确认" if year else "待确认入学期")
+            row["intake"] = intake if intake != "—" else "待确认入学期"
+        row.setdefault("billing_status", "待确认收费（未建立收费项目）")
+        row.setdefault("commission_status", "待确认佣金（未建财务档案）")
+        if not row.get("updated_at_display") or row["updated_at_display"] == "—":
+            updated = facts.get("updated_at") or cycle_facts.get("updated_at") or cycle_facts.get("created_at")
+            row["updated_at_display"] = melbourne_datetime_display(updated) if updated else "暂无更新记录"
 
     def _missing_case_predicates(self, student_alias: str) -> dict[str, str]:
         """Mutually exclusive, query-only reasons; shared by rows and filtering."""
@@ -1182,7 +1232,7 @@ class RevenueReadModels:
         )
         case_parameters = (case_uid,) if case_uid else ()
         rows = self.connection.execute(
-            """SELECT f.id,f.uid,f.student_id,f.description,f.net_cents,
+            """SELECT f.id,f.uid,f.student_id,f.description,f.net_cents,c.uid case_uid,
                       COALESCE((SELECT SUM(da.allocated_cents)
                                   FROM revenue_discount_allocations da
                                  WHERE da.fee_item_id=f.id),0) discount_cents,
@@ -1200,14 +1250,20 @@ class RevenueReadModels:
         ).fetchall()
         projected = []
         refunds = fee_refund_totals(self.connection, (row["id"] for row in rows))
+        from revenue.receipt_display import original_currency_receipts, legacy_fee_receipt_totals
+        legacy_totals = {}
+        for uid in {row["case_uid"] for row in rows}:
+            legacy_totals.update(legacy_fee_receipt_totals(self.connection, uid))
+        actual_receipts = original_currency_receipts(self.connection, [row["id"] for row in rows])
         for row in rows:
             final_base = int(row["net_cents"])
-            received = int(row["base_received_cents"])
+            legacy_base, legacy_gst, unverified = legacy_totals.get(row["id"], (0, 0, 0))
+            received = int(row["base_received_cents"]) + legacy_base
             outstanding = max(0, final_base - received)
             refunded_base, refunded_gst = refunds.get(row["id"], (0, 0))
-            if active_filter == "outstanding" and outstanding == 0:
+            if active_filter == "outstanding" and outstanding == 0 and not unverified:
                 continue
-            if active_filter == "settled" and outstanding != 0:
+            if active_filter == "settled" and (outstanding != 0 or unverified):
                 continue
             projected.append({
                 "uid": str(row["uid"]),
@@ -1217,21 +1273,24 @@ class RevenueReadModels:
                 "standard_base_cents": final_base + int(row["discount_cents"]),
                 "discount_cents": int(row["discount_cents"]),
                 "final_base_cents": final_base,
+                "actual_receipts": actual_receipts.get(row["id"], []),
                 "base_received_cents": received,
-                "gst_collected_cents": int(row["gst_collected_cents"]),
+                "gst_collected_cents": None if unverified else int(row["gst_collected_cents"]) + legacy_gst,
+                "allocation_pending": bool(unverified),
                 "refunded_base_cents": refunded_base,
                 "refunded_gst_cents": refunded_gst,
-                "net_base_received_cents": received - refunded_base,
-                "net_gst_cents": int(row["gst_collected_cents"]) - refunded_gst,
-                "outstanding_base_cents": outstanding,
+                "net_base_received_cents": None if unverified else received - refunded_base,
+                "net_gst_cents": None if unverified else int(row["gst_collected_cents"]) + legacy_gst - refunded_gst,
+                "outstanding_base_cents": None if unverified else outstanding,
                 "status": (
+                    "已有收款，GST分摊待核对" if unverified else
                     "已收清" if outstanding == 0 else
                     "部分收款" if received > 0 else "待收款"
                 ),
                 "href": (
                     f"/revenue/cases/{quote(case_uid, safe='')}/billing"
-                    if case_uid else "/revenue/billing"
-                ) + f"?item={quote(str(row['uid']), safe='')}",
+                    if case_uid else f"/revenue/cases/{quote(str(row['case_uid']), safe='')}"
+                ) + (f"?item={quote(str(row['uid']), safe='')}" if case_uid else ""),
             })
         return projected
 
@@ -1826,7 +1885,7 @@ class RevenueReadModels:
              "school_name"),
         )
         for table, label, predicate, name_column in sources:
-            if table == "offers":
+            if table == "offers" and row["id"] is not None and {"higher_education_application_id", "commercial_case_id", "status"} <= self._columns("revenue_enrolment_components") and {"provider_id", "application_cycle_id"} <= self._columns("higher_education_applications"):
                 providers = self.connection.execute(
                     """SELECT DISTINCT h.provider_id FROM revenue_enrolment_components e
                        JOIN higher_education_applications h ON h.id=e.higher_education_application_id
@@ -2423,11 +2482,17 @@ class RevenueReadModels:
             (case_id,),
         ).fetchone()
         fee_count, final_base, received = map(int, totals)
+        from revenue.receipt_display import legacy_fee_receipt_totals
+        case_uid = self.connection.execute("SELECT uid FROM revenue_commercial_cases WHERE id=?", (case_id,)).fetchone()
+        legacy = legacy_fee_receipt_totals(self.connection, case_uid[0]) if case_uid else {}
+        received += sum(value[0] for value in legacy.values())
+        if any(value[2] for value in legacy.values()):
+            return "已有收款，GST分摊待核对"
         from revenue.historical_receipts import reviews, summary
         cycle_id = self.connection.execute("SELECT application_cycle_id FROM revenue_commercial_cases WHERE id=?", (case_id,)).fetchone()
         historical = [r for r in reviews(self.connection, cycle_id[0]) if r["status"] != "cancelled"] if cycle_id else []
         if not fee_count:
-            return " / ".join(dict.fromkeys(summary(r) for r in historical)) or "未建立"
+            return " / ".join(dict.fromkeys(summary(r) for r in historical)) or "待确认收费（未建立收费项目）"
         if received <= 0:
             return "待收款"
         if received < final_base:

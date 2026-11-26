@@ -6,6 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from pypdf import PdfReader
 
@@ -263,7 +264,11 @@ class RevenueClientPaymentV1Tests(RevenueDatabaseFixture, unittest.TestCase):
             method="alipay", actual_currency="CNY", actual_amount=1_135_000,
             base=240_000, key="receipt-payment",
         )["payment"]
-        output = secure_directory(self) / "receipt-documents"
+        private_root = secure_directory(self)
+        mount_guard = patch("revenue.secure_storage._PRODUCTION_REVENUE_ROOT", private_root)
+        mount_guard.start()
+        self.addCleanup(mount_guard.stop)
+        output = private_root / "receipt-documents"
         first = self.service.issue_client_receipt(
             payment_uid=payment["uid"],
             document_root=output,

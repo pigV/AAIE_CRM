@@ -730,7 +730,7 @@ class ControlledOnboardingService:
                     )
                     fee_item = {
                         "milestone_code": fee["milestone_code"],
-                        "description": "Controlled onboarding client service fee",
+                        "description": "Client service fee",
                         "net_cents": fee["net_cents"],
                         "gst_cents": fee["gst_cents"],
                         "source": fee["source"],

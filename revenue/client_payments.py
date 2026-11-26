@@ -262,7 +262,10 @@ class ClientPaymentService:
             (fee["id"],),
         ).fetchone()[0])
         final_base = int(fee["net_cents"])
-        base_received = int(totals["base_received"])
+        from revenue.receipt_display import legacy_fee_receipt_totals
+        case_uid = self.connection.execute("SELECT uid FROM revenue_commercial_cases WHERE id=?", (fee["commercial_case_id"],)).fetchone()[0]
+        legacy_base, legacy_gst, unverified = legacy_fee_receipt_totals(self.connection, case_uid).get(fee["id"], (0, 0, 0))
+        base_received = int(totals["base_received"]) + legacy_base
         outstanding = max(0, final_base - base_received)
         status = (
             "pending" if base_received == 0
@@ -275,9 +278,9 @@ class ClientPaymentService:
             "discount_cents": discount_cents,
             "final_base_cents": final_base,
             "base_received_cents": base_received,
-            "gst_collected_cents": int(totals["gst_collected"]),
-            "outstanding_base_cents": outstanding,
-            "status": status,
+            "gst_collected_cents": None if unverified else int(totals["gst_collected"]) + legacy_gst,
+            "outstanding_base_cents": None if unverified else outstanding,
+            "status": "needs_review" if unverified else status,
         }
 
     def _append_ledger_pair(
@@ -342,6 +345,16 @@ class ClientPaymentService:
 
         def operation():
             fee = self._fee_context(fee_item_uid)
+            from revenue.receipt_display import legacy_fee_receipt_totals
+            case_uid = self.connection.execute("SELECT uid FROM revenue_commercial_cases WHERE id=?", (fee["commercial_case_id"],)).fetchone()[0]
+            legacy_base, _, unverified = legacy_fee_receipt_totals(self.connection, case_uid).get(fee["id"], (0, 0, 0))
+            if unverified:
+                raise ValueError("该收费项目已有历史收款，GST分摊尚未明确，请先核对历史记录。")
+            prior_base = int(self.connection.execute(
+                "SELECT COALESCE(SUM(allocated_base_cents),0) FROM revenue_client_payment_allocations WHERE fee_item_id=?",
+                (fee["id"],)).fetchone()[0]) + legacy_base
+            if legacy_base and prior_base + base > int(fee["net_cents"]):
+                raise ValueError("该项目已有历史收款，本次收款超过未收基础费，不能重复收款。")
             link = self._payment_authority(fee, int(actor_user_id))
             method = self._payment_method(method_code, str(received_date))
             gst = apply_basis_points(base, int(method["gst_rate_basis_points"]))
@@ -349,11 +362,6 @@ class ClientPaymentService:
             currency = self._validate_actual_payment(
                 method_code, actual_currency_code, actual, base, gst
             )
-            prior_base = int(self.connection.execute(
-                """SELECT COALESCE(SUM(allocated_base_cents),0)
-                     FROM revenue_client_payment_allocations WHERE fee_item_id=?""",
-                (fee["id"],),
-            ).fetchone()[0])
             if prior_base + base > int(fee["net_cents"]):
                 raise ValueError("client Payment allocation exceeds Fee Item final base")
             document_id = None

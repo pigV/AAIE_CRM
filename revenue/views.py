@@ -805,12 +805,12 @@ def _student_case_cards(rows, columns, empty_message: str, *, hidden: bool) -> s
         student_id = escape(str(row.get("student_id") or "—"))
         status = _student_case_status_badge(str(row.get("status") or "—"))
         financial = "".join(
-            f'<div><dt>{escape(labels[key])}</dt>'
+            f'<div><dt>{escape(labels.get(key, {"billing_status":"收费状态", "commission_status":"佣金状态"}.get(key, key)))}</dt>'
             f'<dd>{_student_case_status_badge(str(row.get(key) or "—"))}</dd></div>'
             for key in ("billing_status", "commission_status")
         )
         details = "".join(
-            f'<div><dt>{escape(labels[key])}</dt><dd>{escape(str(row.get(key) or "—"))}</dd></div>'
+            f'<div><dt>{escape(labels.get(key, {"billing_status":"收费状态", "commission_status":"佣金状态"}.get(key, key)))}</dt><dd>{escape(str(row.get(key) or "—"))}</dd></div>'
             for key in ("classification", "business_type", "institution", "intake", "updated_at_display")
         )
         body = (
@@ -854,8 +854,10 @@ def render_revenue_workspace_page(
         for index, column in enumerate(columns):
             key = str(column["key"])
             raw = row.get(key)
-            if column.get("kind") == "money":
-                value = "—" if raw is None else _money(int(raw))
+            if key == "actual_receipts":
+                value = " / ".join(_currency_money(item["currency_code"], int(item["amount_cents"])) for item in (raw or [])) or "未收款"
+            elif column.get("kind") == "money":
+                value = ("待核对" if billing and row.get("allocation_pending") else "—") if raw is None else _money(int(raw))
             else:
                 value = "—" if raw in (None, "") else str(raw)
             content = escape(value)
@@ -961,6 +963,8 @@ def render_revenue_workspace_page(
         '<p>合同上传、对账单导入、正式申领与收款确认请在桌面端完成。</p></aside>'
         if mobile else _render_workspace_action(data, csrf, action_token)
     )
+    if billing and not data.get("student_context"):
+        action_content = ""
     if data.get("title") in {"学生收费与佣金档案", "客户收费"}:
         from urllib.parse import urlencode
         selected_sid = (data.get("student_detail") or {}).get("student_id") or (data.get("search_controls") or {}).get("q", "")
@@ -1505,11 +1509,13 @@ def render_revenue_case_workbench(
         cards = []
         for item in data.get("client_billing_summary") or []:
             add_payment = ""
-            if not mobile and int(item.get("outstanding_base_cents") or 0) > 0:
+            if not mobile and not item.get("allocation_pending") and int(item.get("outstanding_base_cents") or 0) > 0:
                 add_payment = (
                     f'<a class="revenue-primary-link" href="{escape(str(item["add_payment_href"]), quote=True)}">'
                     '+ 添加收款记录</a>'
                 )
+            def billing_money(key):
+                return "待核对" if item.get("allocation_pending") else _aud_money(int(item.get(key) or 0))
             status = str(item.get("payment_status") or "待收款")
             refunded_base, refunded_gst = item.get("refunded_base_cents", 0), item.get("refunded_gst_cents", 0)
             net = ""
@@ -1524,9 +1530,9 @@ def render_revenue_case_workbench(
                 f'{_payment_status_badge(status)}</header>'
                 '<dl class="revenue-money-summary">'
                 f'<div><dt>基础服务费</dt><dd>{_aud_money(int(item.get("final_base_cents") or 0))}</dd></div>'
-                f'<div><dt>基础服务费已收</dt><dd>{_aud_money(int(item.get("base_received_cents") or 0))}</dd></div>'
-                f'<div><dt>GST 已收</dt><dd>{_aud_money(int(item.get("gst_collected_cents") or 0))}</dd></div>'
-                f'{net}<div class="is-outstanding"><dt>未收基础服务费</dt><dd>{_aud_money(int(item.get("outstanding_base_cents") or 0))}</dd></div>'
+                f'<div><dt>基础服务费已收</dt><dd>{billing_money("base_received_cents")}</dd></div>'
+                f'<div><dt>GST 已收</dt><dd>{billing_money("gst_collected_cents")}</dd></div>'
+                f'{net}<div class="is-outstanding"><dt>未收基础服务费</dt><dd>{billing_money("outstanding_base_cents")}</dd></div>'
                 f'</dl>{add_payment}</article>'
             )
         return "".join(cards) or '<p class="revenue-empty">暂无客户收费项目。</p>'
