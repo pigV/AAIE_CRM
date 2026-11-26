@@ -4257,8 +4257,6 @@ def submit_parent_reapplication(data, token_row, draft_revision):
             "UPDATE parent_form_tokens SET submitted_at=? WHERE token=?",
             (stamp, token),
         )
-        from revenue.parent_guardian_intake import record_parent_guardian_intake
-        record_parent_guardian_intake(conn, student_id, token, occurred_at=stamp)
         ParentFormRepository(db).delete_draft(conn, token)
         from business_changes.student_records import publish_student_submission
         publish_student_submission(conn, student_id=student_id, parent_form_token=token,
@@ -4401,9 +4399,6 @@ def create_student_from_form(data, token_row=None, consultant_id=None, source_to
                 parent_form_token=token_row["token"] if token_row else None,
                 education_stream=data.get("application_stream") or "school_education",
             )
-            if token_row:
-                from revenue.parent_guardian_intake import record_parent_guardian_intake
-                record_parent_guardian_intake(conn, student_id, token_row["token"], occurred_at=created)
 
         from business_changes.student_records import publish_student_submission
         publish_student_submission(conn, student_id=student_id,
@@ -11950,7 +11945,7 @@ def student_management_application_row_html(student, summary, csrf, can_edit, ca
       <td data-label="申请阶段" aria-label="当前业务 / 申请阶段">{lifecycle_html}<span class="student-stage-badge" data-stage="{esc(stage_tone)}">{esc(stage_label)}</span></td>
       <td data-label="最终确认学校">{esc(summary.final_school_name or '待确认')}</td>
       <td data-label="申请年级">{esc(summary.applying_year_level or '未记录')}</td>
-      <td data-label="建档时间" class="nowrap-cell">{esc(display_datetime(summary.created_at) or '未记录')}</td>
+      <td data-label="申请入学时间" class="nowrap-cell">{esc(summary.planned_intake_display or '未记录')}</td>
       <td data-label="Offer开学时间" class="nowrap-cell">{esc(display_date_value(summary.offer_course_start_date) or '未记录')}</td>
       <td data-label="下签时间" class="nowrap-cell">{esc(display_date_value(summary.visa_grant_date) or '未下签')}</td>
       <td data-label="操作" class="student-actions-cell">{actions or '<span class="muted-line">—</span>'}</td>
@@ -28921,6 +28916,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             model = RevenueReadModels(connection, case_surface=case_surface)
             data = model.workspace(workspace_name, self.query)
             data["can_administer"] = is_revenue_admin(self.user)
+            data["can_record_client_refund"] = can_perform_revenue_action(self.user, "billing/refund")
             if workspace_name=="contracts":
                 setup = school_commission_authority(self.user,"setup")
                 requested_school = self._school_commission_scope_id("school_id")
@@ -28961,6 +28957,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             workbench = RevenueWorkbench(connection)
             data = workbench.load(case_uid)
             data["can_administer"] = is_revenue_admin(self.user)
+            data["can_record_client_refund"] = can_perform_revenue_action(self.user, "billing/refund")
             from revenue.first_year_tuition import COE_KIND, OFFER_KIND
 
             denied_evidence = {
@@ -29548,6 +29545,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     "billing", self.query, case_uid=case_uid
                 ),
                 "can_administer": is_revenue_admin(self.user),
+                "can_record_client_refund": can_perform_revenue_action(self.user, "billing/refund"),
                 "financial_forms_html": "",
             }
         except LookupError:
@@ -55743,7 +55741,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             for row in rows_data
         ) or '<tr><td colspan="10" class="empty">没有符合条件的学生</td></tr>'
         content_html = f"""<div class="table-wrap student-management-table-wrap student-management-table-mobile-fit"><table class="student-management-table">
-              <thead><tr><th><input type="checkbox" aria-label="Select all"></th><th>学生号</th><th>学生名</th><th>申请阶段</th><th>最终确认学校</th><th>申请年级</th><th>建档时间</th><th>Offer开学时间</th><th>下签时间</th><th class="student-actions-heading">操作</th></tr></thead>
+              <thead><tr><th><input type="checkbox" aria-label="Select all"></th><th>学生号</th><th>学生名</th><th>申请阶段</th><th>最终确认学校</th><th>申请年级</th><th>申请入学时间</th><th>Offer开学时间</th><th>下签时间</th><th class="student-actions-heading">操作</th></tr></thead>
               <tbody>{rows_html}</tbody>
             </table></div>"""
         from student_management_filters import render_applied_filters
@@ -56203,12 +56201,17 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if refreshed["student_id"] != old_student_id or refreshed["folder_path"] != old_folder:
             return self.error_page("安全检查失败：Student ID 或学生文件夹路径发生变化。", 500)
         doc_message = ""
+        from revenue.parent_guardian_intake import confirm_guardian_fee_on_profile_save
+        with db.transaction() as connection:
+            doc_message = confirm_guardian_fee_on_profile_save(
+                connection, student_id, self.user['id'], occurred_at=now_iso(),
+            )
         if self.form.get("regenerate_studentinfo") == "yes":
             try:
                 target = regenerate_student_info_version(refreshed, self.user)
-                doc_message = f" 已重新生成：{target.name}"
+                doc_message += f" 已重新生成：{target.name}"
             except Exception as exc:
-                doc_message = f" StudentInfo.docx 未重新生成：{exc}"
+                doc_message += f" StudentInfo.docx 未重新生成：{exc}"
         return self.flash_redirect(f"/students/{student_id}?tab=profile", f"学生资料已更新，共 {len(changes)} 项变化。{doc_message}")
 
     def student_detail_row(self, student_id):

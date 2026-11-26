@@ -133,11 +133,10 @@
   display: inline-block;
   max-width: 100%;
   padding: 3px 8px;
-  border: 1px solid color-mix(in srgb, var(--stage-ink) 25%, #fff);
-  border-inline-start: 3px solid var(--stage-ink);
-  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--stage-ink) 18%, #fff);
+  border-radius: 8px;
   color: var(--stage-ink);
-  background: color-mix(in srgb, var(--stage-ink) 9%, #fff);
+  background: color-mix(in srgb, var(--stage-ink) 15%, #fff);
   font-size: 12px;
   font-weight: 750;
   line-height: 1.35;

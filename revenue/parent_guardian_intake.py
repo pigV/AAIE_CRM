@@ -1,4 +1,4 @@
-"""Create the independent 590 receivable from a submitted, identified parent choice."""
+"""Create the independent 590 receivable after staff confirms an identified parent."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -22,7 +22,7 @@ class _GuardianFeeUnavailable(ValueError):
 
 
 def _key(token):
-    return 'parent-guardian-intake:' + hashlib.sha256(token.encode()).hexdigest()
+    return 'parent-guardian-confirmation:' + hashlib.sha256(token.encode()).hexdigest()
 
 
 def _fee_key(cycle):
@@ -97,22 +97,62 @@ def _eligible(connection, occurred_at):
     )
 
 
-def record_parent_guardian_intake(connection, student_id, token, *, occurred_at):
-    """Run only at the successful form submission boundary, inside its transaction."""
-    if not _eligible(connection, occurred_at):
+def record_parent_guardian_intake(connection, student_id, token, *, occurred_at, actor_user_id=None):
+    """Only a server-authorized staff save may confirm this optional fee."""
+    if actor_user_id is None or not _eligible(connection, occurred_at):
         return
     with _intake_transaction(connection, student_id):
-        return _record_submission(connection, student_id, token, occurred_at)
+        return _record_submission(connection, student_id, token, occurred_at, actor_user_id)
 
 
-def _record_submission(connection, student_id, token, occurred_at):
+def confirm_guardian_fee_on_profile_save(connection, student_id, actor_user_id, *, occurred_at):
+    row = connection.execute('SELECT form_data_json FROM students WHERE student_id=?', (student_id,)).fetchone()
+    form = json.loads(row[0] or '{}') if row else {}
+    if form.get('requires_parent_accompaniment') != '是':
+        return ''
+    if not _eligible(connection, occurred_at):
+        return ' 陪读收费尚未生成，请核对财务模块及申请周期。'
+    cycles = connection.execute("""SELECT id,parent_form_token FROM application_cycles
+        WHERE student_id=? AND status='active'""", (student_id,)).fetchall()
+    if len(cycles) != 1:
+        return ' 陪读收费尚未生成，请先确认唯一的在办申请周期。'
+    cycle_id, token = cycles[0]
+    if not token and connection.execute("SELECT 1 FROM sqlite_master WHERE name='transfer_source_authorities'").fetchone():
+        source = connection.execute("""SELECT parent_form_token FROM transfer_source_authorities
+            WHERE application_cycle_id=? AND student_id=? AND lifecycle_state='consumed'""",
+            (cycle_id, student_id)).fetchone()
+        token = source[0] if source else None
+    if not token:
+        return ' 陪读收费尚未生成，请先核对已提交的信息表与当前周期关联。'
+    if not _intent(connection, student_id, token):
+        return ' 陪读收费尚未生成，请补全并核对陪读家长关系及护照姓名。'
+    result = record_parent_guardian_intake(connection, student_id, token,
+        occurred_at=occurred_at, actor_user_id=actor_user_id)
+    if result and result.get('aggregate_uid', '').startswith('cycle:'):
+        return ' 陪读资料已确认，A$900 收费将在正式转学周期建立后生成。'
+    if result:
+        return ' 陪读家长 A$900 收费已生成或已存在。'
+    return ' 陪读收费尚未生成，请核对财务规则及已有陪读签证记录。'
+
+
+def _record_submission(connection, student_id, token, occurred_at, actor_user_id):
     intent = _intent(connection, student_id, token)
-    if not intent or intent['submitted_at'] != occurred_at:
+    if not intent:
         return
+    actor = connection.execute('SELECT id FROM users WHERE id=?', (actor_user_id,)).fetchone()
+    if not actor:
+        raise ValueError('Confirmed staff is missing')
+    intent['actor'] = int(actor_user_id)
     cycle = connection.execute("""
         SELECT id, cycle_type FROM application_cycles
         WHERE student_id=? AND parent_form_token=? AND status='active'
     """, (student_id, token)).fetchone()
+    if not cycle and connection.execute("SELECT 1 FROM sqlite_master WHERE name='transfer_source_authorities'").fetchone():
+        cycle = connection.execute("""SELECT c.id,c.cycle_type FROM application_cycles c
+            JOIN transfer_source_authorities a ON a.application_cycle_id=c.id
+            WHERE c.student_id=? AND c.status='active' AND c.cycle_type='transfer'
+              AND a.student_id=c.student_id AND a.parent_form_token=? AND a.lifecycle_state='consumed'""",
+            (student_id, token)).fetchone()
     if not cycle:
         return
     if intent['intake_type'] == 'new_student_transfer' and cycle[1] != 'transfer':
@@ -121,9 +161,20 @@ def _record_submission(connection, student_id, token, occurred_at):
         payload = {
             'student_id': student_id, 'initial_cycle_id': cycle[0],
             'relationship': intent['relationship'], 'name_digest': intent['name_digest'],
+            'confirmed_by': int(actor_user_id),
         }
-        repo.command(
-            idempotency_key=_key(token), command_type='parent_guardian_intake_deferred',
+        previous = connection.execute("""SELECT id,result_json FROM revenue_idempotency_receipts
+            WHERE idempotency_key LIKE ? AND command_type='parent_guardian_intake_deferred'
+            ORDER BY id DESC LIMIT 1""", (_key(token) + ':%',)).fetchone()
+        if previous:
+            prior_result = json.loads(previous[1])
+            if all(prior_result.get(field) == value for field, value in payload.items()):
+                return prior_result
+        confirmation_key = _key(token) + ':' + hashlib.sha256(
+            json.dumps([payload, occurred_at, previous[0] if previous else None], sort_keys=True).encode()
+        ).hexdigest()
+        return repo.command(
+            idempotency_key=confirmation_key, command_type='parent_guardian_intake_deferred',
             aggregate_type='application_cycle', payload=payload, actor_user_id=intent['actor'],
             operation=lambda: {'aggregate_uid': f'cycle:{cycle[0]}', **payload},
         )
@@ -141,11 +192,14 @@ def complete_deferred_guardian_fee(connection, student_id, cycle_id, token, *, o
 def _complete_deferred(connection, student_id, cycle_id, token, occurred_at):
     queued = connection.execute("""
         SELECT result_json FROM revenue_idempotency_receipts
-        WHERE idempotency_key=? AND command_type='parent_guardian_intake_deferred'
-    """, (_key(token),)).fetchone()
+        WHERE idempotency_key LIKE ? AND command_type='parent_guardian_intake_deferred'
+        ORDER BY id DESC LIMIT 1
+    """, (_key(token) + ':%',)).fetchone()
     if not queued:
         return
     evidence = json.loads(queued[0])
+    if not evidence.get('confirmed_by'):
+        return
     intent = _intent(connection, student_id, token)
     if (not intent or evidence['student_id'] != student_id
             or intent['intake_type'] != 'new_student_transfer'
@@ -158,6 +212,7 @@ def _complete_deferred(connection, student_id, cycle_id, token, occurred_at):
           AND a.student_id=c.student_id AND a.parent_form_token=? AND a.lifecycle_state='consumed'
     """, (cycle_id, student_id, token)).fetchone()
     if scope:
+        intent['actor'] = int(evidence['confirmed_by'])
         return _ensure_fee(connection, student_id, cycle_id, intent, occurred_at)
 
 

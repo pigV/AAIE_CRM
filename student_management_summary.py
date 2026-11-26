@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import re
 from typing import Iterable
 
 from student_application_stage_distribution import load_application_stage_result_map
@@ -24,6 +26,29 @@ class StudentManagementSummary:
     offer_course_start_date: str = ""
     visa_grant_date: str = ""
     lifecycle_type: str | None = None
+    planned_intake_display: str = ""
+
+
+def planned_intake_display(raw, canonical=None):
+    try:
+        form = json.loads(raw or '{}')
+    except (ValueError, TypeError):
+        form = {}
+    if not isinstance(form, dict):
+        form = {}
+    if canonical is not None:
+        form = canonical
+    year = str(form.get('preferred_intake_year') or '').strip()
+    month = str(form.get('preferred_intake_term') or '').strip()
+    valid_year = bool(re.fullmatch(r'20\d{2}', year))
+    valid_month = month in {'02', '04', '07', '10'}
+    if valid_year and valid_month:
+        return f'{year}年{int(month)}月'
+    if valid_year:
+        return f'{year}年 · 月份待定'
+    if valid_month:
+        return f'年份待定 · {int(month)}月'
+    return ""
 
 
 def _rows(connection, sql, parameters=()):
@@ -171,10 +196,14 @@ def load_student_management_summary_map(
     if not ids:
         return {}
     placeholders = ",".join("?" for _ in ids)
+    student_columns = {row[1] for row in connection.execute('PRAGMA table_info(students)')}
+    form_sql = 'form_data_json' if 'form_data_json' in student_columns else "'{}' AS form_data_json"
+    intake_columns = {'preferred_intake_year', 'preferred_intake_term'} <= student_columns
+    intake_sql = ',preferred_intake_year,preferred_intake_term' if intake_columns else ''
     students = _rows(
         connection,
         f"""SELECT student_id,passport_first_name,passport_last_name,
-                   applying_year_level,created_date
+                   applying_year_level,created_date,{form_sql}{intake_sql}
               FROM students
              WHERE COALESCE(deleted_at,'')='' AND student_id IN ({placeholders})""",
         ids,
@@ -316,6 +345,7 @@ def load_student_management_summary_map(
                 student_id, str(student.get("applying_year_level") or "")
             ),
             created_at=str(student.get("created_date") or ""),
+            planned_intake_display=planned_intake_display(student.get('form_data_json'), student if intake_columns else None),
             offer_course_start_date=str(final_offer.get("course_start_date") or ""),
             visa_grant_date="" if review_current else visa_dates.get(student_id, ""),
             lifecycle_type=lifecycle_type,

@@ -136,9 +136,11 @@ class ClientRefundService:
     def record(
         self, *, payment_uid, actual_amount_cents, refunded_at, reason, evidence_document_uid,
         actor_user_id, actor_role, idempotency_key, melbourne_offset="",
+        actor_has_revenue_access=False,
     ):
-        if actor_role != "Admin":
-            raise PermissionError("Refunds require Revenue Admin authority")
+        from revenue.access_policy import can_operate_revenue
+        if not can_operate_revenue(actor_role, actor_has_revenue_access):
+            raise PermissionError("Revenue module access is required")
         if type(actual_amount_cents) is not int or not 0 < actual_amount_cents <= 2**63 - 1:
             raise ValueError("请输入大于零的有效退款金额。")
         reason = str(reason or "").strip()

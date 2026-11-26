@@ -622,7 +622,8 @@ class RevenueUIActions:
     def record_client_refund(self, form: dict, upload) -> dict:
         from revenue.money import aud_cents
 
-        self._require_admin()
+        if not can_operate_revenue(self.actor_role, self.actor_has_revenue_access):
+            raise PermissionError("Revenue module access is required")
         key = self._required(form, "idempotency_key")
         try:
             amount = aud_cents(self._required(form, "amount"))
@@ -648,6 +649,7 @@ class RevenueUIActions:
                     reason=self._required(form, "reason"),
                     evidence_document_uid=document["uid"],
                     actor_user_id=self.actor_user_id, actor_role=self.actor_role,
+                    actor_has_revenue_access=self.actor_has_revenue_access,
                     idempotency_key=key,
                 )
         except Exception:

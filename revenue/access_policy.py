@@ -44,7 +44,6 @@ REVENUE_ADMIN_ACTIONS = SCHOOL_COMMISSION_CONTRACT_ACTIONS | frozenset({
     "historical/cancel",
     "historical/evidence",
     "financial/refund",
-    "billing/refund",
     "financial/clawback",
 })
 

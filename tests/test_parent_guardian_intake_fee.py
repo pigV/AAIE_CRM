@@ -34,7 +34,7 @@ class ParentGuardianIntakeFeeTests(unittest.TestCase):
                          father_passport_first_name='Parent', father_passport_last_name='Father')
         self.fixture = fixture
 
-    def submit(self, transfer=False, **changes):
+    def submit(self, transfer=False, confirmed=True, **changes):
         from revenue.parent_guardian_intake import record_parent_guardian_intake
 
         data = dict(self.form, **changes)
@@ -51,7 +51,43 @@ class ParentGuardianIntakeFeeTests(unittest.TestCase):
                 "SELECT submitted_at FROM parent_form_tokens WHERE token=?", (token,),
             ).fetchone()[0]
             self.c.execute("UPDATE students SET form_data_json=? WHERE student_id='S2'", (json.dumps(data),))
-            return record_parent_guardian_intake(self.c, 'S2', token, occurred_at=occurred_at)
+            return record_parent_guardian_intake(self.c, 'S2', token, occurred_at=occurred_at,
+                                                actor_user_id=1 if confirmed else None)
+
+    def test_parent_submission_waits_for_staff_confirmation(self):
+        self.submit(confirmed=False)
+        self.assertEqual([], self.fee_rows())
+        self.assertFalse(self.c.execute("SELECT 1 FROM visa_cases WHERE student_id='S2'").fetchone())
+
+    def test_reconfirmed_parent_correction_before_transfer_uses_latest_confirmation(self):
+        self.submit(transfer=True)
+        self.c.execute("UPDATE parents SET passport_first_name='Corrected' WHERE student_id='S2' AND parent_type='father'")
+        self.submit(transfer=True, father_passport_first_name='Corrected')
+        result = self.fixture.attempt()
+        self.assertEqual('completed', result['status'])
+        self.assertEqual([90000, 240000], [amount for _, amount in self.fee_rows()])
+        self.assertEqual('Corrected Father', self.c.execute("SELECT applicant_name FROM visa_cases WHERE student_id='S2'").fetchone()[0])
+
+    def test_same_second_father_mother_father_confirmation_uses_final_choice(self):
+        self.submit(transfer=True)
+        self.submit(transfer=True, accompanying_person_relationship='母亲',
+                    mother_passport_first_name='Parent', mother_passport_last_name='Mother')
+        self.submit(transfer=True)
+        result = self.fixture.attempt()
+        self.assertEqual('completed', result['status'])
+        self.assertEqual([90000, 240000], [amount for _, amount in self.fee_rows()])
+        self.assertEqual('Parent Father', self.c.execute("SELECT applicant_name FROM visa_cases WHERE student_id='S2'").fetchone()[0])
+
+    def test_staff_save_after_submission_creates_fee_and_prompts_for_missing_name(self):
+        from revenue.parent_guardian_intake import confirm_guardian_fee_on_profile_save
+        self.submit(confirmed=False, father_passport_last_name='')
+        message = confirm_guardian_fee_on_profile_save(self.c, 'S2', 1, occurred_at=NOW)
+        self.assertIn('补全', message)
+        self.assertEqual([], self.fee_rows())
+        self.c.execute("UPDATE students SET form_data_json=? WHERE student_id='S2'", (json.dumps(self.form),))
+        message = confirm_guardian_fee_on_profile_save(self.c, 'S2', 1, occurred_at='2026-11-24T11:00:00+11:00')
+        self.assertIn('900', message)
+        self.assertEqual([('guardian-590', 90000)], self.fee_rows())
 
     def fee_rows(self):
         return [tuple(row) for row in self.c.execute("""

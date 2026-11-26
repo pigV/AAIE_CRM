@@ -282,7 +282,7 @@ def _render_workspace_action(data: dict, csrf: str, token: str) -> str:
             f'<td>{escape(str(item["received_date"]))}</td>'
             f'<td>{("<a href=\"/revenue/documents/" + escape(str(item["evidence_document_uid"]), quote=True) + "/view\">查看凭证</a>") if item.get("evidence_document_uid") else "—"}</td>'
             f'<td>{("<a href=\"/revenue/documents/" + escape(str(item["receipt_document_uid"]), quote=True) + "/view\">" + escape(str(item["receipt_number"])) + "</a>") if item.get("receipt_document_uid") else "待生成"}</td>'
-            f'<td>{_client_refund_controls(item, action.get("refund_action") or "/revenue/billing/refund", csrf, token, can_record=can_administer) or "—"}</td>'
+            f'<td>{_client_refund_controls(item, action.get("refund_action") or "/revenue/billing/refund", csrf, token, can_record=bool(data.get("can_record_client_refund", can_administer))) or "—"}</td>'
             "</tr>"
             for item in action.get("payment_history") or []
         )
@@ -1017,6 +1017,11 @@ def render_revenue_workspace_page(
             f'<nav class="revenue-filters" aria-label="筛选">{filters}</nav></div>{contract_search}'
         )
     list_label = ' aria-label="学生档案列表"' if case_list else ""
+    list_panel = (
+        f'<section class="revenue-panel revenue-list-panel"{list_label}>'
+        f'{toolbar}{results}{paging}</section>'
+        if not (not mobile and student_context and data.get("name") == "billing") else ""
+    )
     stylesheet = f"/assets/revenue.css?v={ASSET_VERSION}" if case_list else "/assets/revenue.css"
     return f"""
     <link rel="stylesheet" href="{stylesheet}">
@@ -1032,11 +1037,7 @@ def render_revenue_workspace_page(
       {coverage}
       {student_detail}
       {_client_cash_summary(data.get('cash_summary'), str(student_context.get('billing_href') or '/revenue/billing'), str(data.get('active_filter') or 'all'))}
-      <section class="revenue-panel revenue-list-panel"{list_label}>
-        {toolbar}
-        {results}
-        {paging}
-      </section>
+      {list_panel}
       {action_content}
       <input type="hidden" name="csrf" value="{escape(str(csrf), quote=True)}">
     </main>"""
@@ -1550,7 +1551,7 @@ def render_revenue_case_workbench(
             ]
             refund_controls = _client_refund_controls(
                 item, refund_action, csrf, action_token,
-                can_record=bool(refund_action) and not mobile and bool(data.get("can_administer", True)),
+                can_record=bool(refund_action) and not mobile and bool(data.get("can_record_client_refund", data.get("can_administer", True))),
             )
             payment_cards.append('<div class="revenue-payment-entry">' + definition_list(visa_identity + [
                 ("收款日期", render_value(item.get("date_display"))),
