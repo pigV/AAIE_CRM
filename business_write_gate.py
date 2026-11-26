@@ -187,8 +187,10 @@ class GuardedCursor(sqlite3.Cursor):
 
 
 class GuardedConnection(sqlite3.Connection):
-    def _configure(self,gate,target):
+    def _configure(self,gate,target,read_only_target):
         self._gate=gate;self.write_gate=gate;self._target=target;self._lease=None;self._denied=False;self._state='UNKNOWN';self._kind='business';self._pending=set();self._write_seen=False
+        self._read_only_target = read_only_target
+        self._snapshot_read_only = False
         sqlite3.Connection.set_authorizer(self,self._authorize)
 
     def _authorize(self,action,a,b,db,source):
@@ -221,11 +223,31 @@ class GuardedConnection(sqlite3.Connection):
     def _release_if_idle(self):
         if not self.in_transaction and not self._pending:self._release()
 
+    @contextmanager
+    def read_only_snapshot(self):
+        """Use the read-only authorizer while this snapshot holds its drain lease."""
+        if not (self._read_only_target and self._lease is not None and self.in_transaction):
+            yield
+            return
+        if not self.execute('PRAGMA query_only').fetchone()[0]:
+            raise MaintenanceError('snapshot_query_only_required')
+        previous = self._snapshot_read_only
+        self._snapshot_read_only = True
+        try:
+            yield
+        finally:
+            self._snapshot_read_only = previous
+
     def _statement(self,callback,cursor=None):
         if self._target and self._lease is None and self._gate.directory.exists():
             lease=self._gate._lock();lease.__enter__();self._lease=lease
-        self._state=self._gate.status()['state'] if self._target else 'OPEN'
-        self._kind=self._gate.kind();self._denied=False;self._write_seen=False
+        if self._snapshot_read_only and self._lease is not None and self.in_transaction:
+            # A pinned read-only snapshot never gets the OPEN or auth write permissions.
+            self._state, self._kind = 'UNKNOWN', 'read'
+        else:
+            self._state = self._gate.status()['state'] if self._target else 'OPEN'
+            self._kind = self._gate.kind()
+        self._denied = self._write_seen = False
         try:
             result=callback()
             if cursor is not None:
@@ -285,6 +307,7 @@ def install_sqlite_guard(gate):
         if kwargs.get('check_same_thread',True) is not True or len(args)>3 and args[3] is not True:raise MaintenanceError('cross_thread_connection_not_allowed')
         raw=os.fsdecode(database) if not isinstance(database,str) else database
         path=None
+        read_only_uri = False
         if raw not in (':memory:',''):
             if raw.startswith('file:'):
                 uri=urlsplit(raw)
@@ -296,6 +319,7 @@ def install_sqlite_guard(gate):
                 for key,value in items:
                     if key in options or key not in allowed or value not in allowed[key]:raise MaintenanceError('database_uri_parameters_invalid')
                     options[key]=value
+                read_only_uri = bool(kwargs.get('uri')) and options.get('mode') == 'ro'
                 if options.get('mode')!='memory':
                     try:path=Path(unquote(uri.path,encoding='utf-8',errors='strict')).absolute()
                     except UnicodeError:raise MaintenanceError('database_uri_parameters_invalid') from None
@@ -309,7 +333,7 @@ def install_sqlite_guard(gate):
         def open_connection():
             if target and not path.exists() and gate.status()['state']!='OPEN':raise MaintenanceError('protected_database_missing')
             conn=original(database,*args,**kwargs)
-            conn._configure(gate,target)
+            conn._configure(gate, target, read_only_target=target and read_only_uri)
             return conn
         if target and gate.directory.exists():
             with gate._lock():return open_connection()

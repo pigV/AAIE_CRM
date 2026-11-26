@@ -4,7 +4,7 @@ import re
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from staging_environment import ACTIVE as STAGING
 
@@ -2728,8 +2728,13 @@ class Database:
                 connection.execute("BEGIN")
                 connection.execute("PRAGMA query_only=ON")
                 state["connection"] = connection
+                from business_write_gate import GuardedConnection
                 from snapshot_read_cache import read_cache_scope
-                with read_cache_scope(connection):
+                guard = (
+                    connection.read_only_snapshot()
+                    if isinstance(connection, GuardedConnection) else nullcontext()
+                )
+                with guard, read_cache_scope(connection):
                     yield connection
             finally:
                 state["connection"] = previous

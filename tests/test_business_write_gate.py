@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 try:
     import business_write_gate as module
@@ -76,6 +77,36 @@ class GateTests(unittest.TestCase):
         with sqlite3.connect(self.db) as c:c.execute('UPDATE business SET value="committed"')
         self.gate.enable(timeout=.03);c.close()
         with self.assertRaises(module.MaintenanceError):sqlite3.connect(self.db,factory=sqlite3.Connection)
+    def test_read_snapshot_keeps_drain_without_rechecking_gate_per_query(self):
+        from database import Database
+
+        with patch.object(self.gate, 'status', wraps=self.gate.status) as status:
+            with Database(self.db).read_snapshot() as connection:
+                checks_before_reads = status.call_count
+                for _ in range(25):
+                    self.assertEqual(
+                        connection.execute('SELECT value FROM business').fetchone()[0], 'original',
+                    )
+                self.assertEqual(checks_before_reads, status.call_count)
+                with self.assertRaises(module.GateBusy):
+                    self.gate.enable(timeout=.03)
+        self.assertEqual(self.gate.enable(timeout=.1)['state'], 'CLOSED')
+        with self.gate.operation('read'), Database(self.db).read_snapshot() as connection:
+            self.assertEqual(connection.execute('SELECT value FROM business').fetchone()[0], 'original')
+
+    def test_read_snapshot_denies_changes_even_during_open_gate(self):
+        from database import Database
+
+        for sql in (
+            'PRAGMA query_only=OFF', 'CREATE TEMP TABLE scratch_rows (id INTEGER)',
+            "UPDATE business SET value='changed'",
+        ):
+            with self.subTest(sql=sql), Database(self.db).read_snapshot() as connection:
+                with self.assertRaises(module.MaintenanceError):
+                    connection.execute(sql)
+        with sqlite3.connect(self.db) as connection:
+            self.assertEqual(connection.execute('SELECT value FROM business').fetchone()[0], 'original')
+
     def test_read_and_auth_operations_drain_cross_process(self):
         # Actual separate flock owner, not a mocked lock.
         ctx=multiprocessing.get_context('fork');parent,child=ctx.Pipe()
