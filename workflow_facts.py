@@ -7,6 +7,7 @@ from typing import Iterable
 
 from application_withdrawal import REAPPLICATION_PREDECESSOR
 from dashboard_visa_metrics import is_student_visa_case
+from snapshot_read_cache import dashboard_snapshot_cache
 from workflow_resolver import WorkflowFacts
 from visa_dashboard_retry import load_retries, retry_key
 
@@ -133,6 +134,18 @@ def load_workflow_facts(
     ids = _ids(cycle_ids)
     if not ids:
         return {}
+    snapshot = dashboard_snapshot_cache(conn)
+    if snapshot is None:
+        return _load_workflow_facts(conn, ids)
+    by_cycle = snapshot.setdefault('workflow_facts', {})
+    missing = tuple(cycle_id for cycle_id in ids if cycle_id not in by_cycle)
+    if missing:
+        loaded = _load_workflow_facts(conn, missing)
+        by_cycle.update((cycle_id, loaded.get(cycle_id)) for cycle_id in missing)
+    return {cycle_id: by_cycle[cycle_id] for cycle_id in sorted(ids) if by_cycle[cycle_id] is not None}
+
+
+def _load_workflow_facts(conn: sqlite3.Connection, ids: tuple[int, ...]) -> dict[int, WorkflowFacts]:
     marks = _placeholders(ids)
     cycle_rows = conn.execute(
         f"""

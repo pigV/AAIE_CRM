@@ -25,6 +25,27 @@ class VisaAuthorityTests(unittest.TestCase):
             VALUES(7,'SYNTHETIC-C7','S1','initial',1,'active',?,?,?)""",(self.f.actor['occurred_at'],)*3)
         self.c.execute('UPDATE visa_cases SET application_cycle_id=7 WHERE id=1')
 
+    def test_dashboard_join_columns_do_not_duplicate_visa_authority_reads(self):
+        from dashboard_read_context import DashboardProjectionContext
+        from snapshot_read_cache import read_cache_scope
+        from visa_document_lifecycle import case_projection
+
+        row = self.case()
+        joined = dict(row, effective_result='Granted', source_event_id=99,
+                      review_first_name='Synthetic', review_last_name='Student')
+        self.c.commit()
+        self.c.execute('PRAGMA query_only=ON')
+        self.c.execute('BEGIN')
+        with read_cache_scope(self.c), patch('visa_document_lifecycle.case_projection', wraps=case_projection) as project:
+            DashboardProjectionContext(self.c)
+            expected = resolve_case_state(self.c, row)
+            self.assertEqual(expected, resolve_case_state(self.c, joined))
+            self.assertEqual(1, project.call_count)
+            formally_lodged = dict(joined, actual_lodgement_date='2025-01-20',
+                                  lodgement_recorded_at='2025-01-20T10:00:00', lodged_by_user_id=1)
+            self.assertTrue(resolve_case_state(self.c, formally_lodged)['formally_lodged'])
+            self.assertEqual(2, project.call_count)
+
     def test_status_label_and_date_alone_are_not_formal_lodgement(self):
         self.c.execute("UPDATE visa_cases SET status='Lodged',actual_lodgement_date='2026-11-19' WHERE id=1")
         self.assertFalse(formal_lodgement(self.case()));self.assertIsNone(self.state()['status'])

@@ -32,3 +32,9 @@ def memoized_read(connection,key,load):
     values=active[1]
     if key not in values:values[key]=load()
     return values[key]
+
+
+def dashboard_snapshot_cache(connection, *, enable=False):
+    """Opt-in cache for the dashboard on its owned SQLite read transaction."""
+    scope = memoized_read(connection, ('dashboard_scope',), dict)
+    return scope.setdefault('data', {}) if enable else scope.get('data')

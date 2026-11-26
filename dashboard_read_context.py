@@ -1,6 +1,7 @@
 """Explicit, short-lived owner of the desktop Dashboard business snapshot."""
 import threading
 
+from snapshot_read_cache import dashboard_snapshot_cache
 from workflow_projection import load_current_workflow_projection
 
 
@@ -12,6 +13,7 @@ class DashboardProjectionContext:
         self.connection=connection
         self._projection=None
         self._thread=threading.get_ident()
+        dashboard_snapshot_cache(connection, enable=True)
 
     def workflow(self, connection, *, cycle_ids=None):
         if (connection is not self.connection or self.connection is None
@@ -40,6 +42,7 @@ class DashboardReadContext(DashboardProjectionContext):
         self._used = True
         self.connection = self._scope.__enter__()
         self.connection.execute('PRAGMA query_only=ON')
+        dashboard_snapshot_cache(self.connection, enable=True)
         self._thread = threading.get_ident()
         return self
 

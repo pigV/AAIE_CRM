@@ -156,9 +156,17 @@ def confirmed_legacy_outcome(conn,case):
 
 
 def resolve_case_state(conn,case):
-    from snapshot_read_cache import memoized_read
-    key=('visa_case_authority',tuple(sorted(case.items())))
-    return dict(memoized_read(conn,key,lambda:_resolve_case_state(conn,case)))
+    from snapshot_read_cache import dashboard_snapshot_cache, memoized_read
+    fields = case.items()
+    if dashboard_snapshot_cache(conn) is not None:
+        # Chart and review joins add presentation values. The authority reloads
+        # the current event itself and does not use the joined names or result.
+        fields = (
+            (key, value) for key, value in fields
+            if key not in {'effective_result', 'source_event_id', 'review_first_name', 'review_last_name'}
+        )
+    key = ('visa_case_authority', tuple(sorted(fields)))
+    return dict(memoized_read(conn, key, lambda: _resolve_case_state(conn, case)))
 
 
 def _resolve_case_state(conn,case):

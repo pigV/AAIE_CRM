@@ -24,6 +24,37 @@ class WorkflowFactsTests(unittest.TestCase):
         self.conn.close()
         self.temp_dir.cleanup()
 
+    def test_dashboard_snapshot_reuses_overlapping_exact_cycle_facts(self):
+        from dashboard_read_context import DashboardProjectionContext
+        from snapshot_read_cache import read_cache_scope
+
+        first = create_student_cycle(self.conn, "S1", "initial", NOW, 1)
+        second = create_student_cycle(self.conn, "S2", "initial", NOW, 1)
+        expected = load_workflow_facts(self.conn, [first.id, second.id])
+        self.conn.commit()
+        self.conn.execute("PRAGMA query_only=ON")
+        self.conn.execute("BEGIN")
+        statements = []
+        self.conn.set_trace_callback(statements.append)
+        with read_cache_scope(self.conn):
+            DashboardProjectionContext(self.conn)
+            original = load_workflow_facts(self.conn, [first.id])
+            original.clear()
+            self.assertEqual(expected, load_workflow_facts(self.conn, [second.id, first.id]))
+            queries_after_overlap = len(statements)
+            self.assertEqual({first.id: expected[first.id]}, load_workflow_facts(self.conn, [first.id]))
+            self.assertEqual(queries_after_overlap, len(statements))
+        self.conn.set_trace_callback(None)
+        self.conn.rollback()
+        self.conn.execute("PRAGMA query_only=OFF")
+        self.conn.execute("UPDATE application_cycles SET cycle_uid='new-facts' WHERE id=?", (first.id,))
+        self.conn.commit()
+        self.conn.execute("PRAGMA query_only=ON")
+        self.conn.execute("BEGIN")
+        with read_cache_scope(self.conn):
+            DashboardProjectionContext(self.conn)
+            self.assertEqual("new-facts", load_workflow_facts(self.conn, [first.id])[first.id].cycle_uid)
+
     def test_loads_stage_one_workflow_case_without_student(self):
         cycle = create_parent_form_cycle(
             self.conn,
