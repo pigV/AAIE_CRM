@@ -26879,3 +26879,305 @@
   .ui-premium-v2 [data-school-course-kind] details > .course-detail-grid,
   .ui-premium-v2 [data-course-public-fields] { grid-template-columns:minmax(0,1fr); }
 }
+
+/* Student edit layout B: visual changes only; preserve native DOM and tab order. */
+.ui-premium-v2 .student-edit-page {
+  --edit-label-width: 146px;
+  width: min(100%, 1240px);
+  padding-bottom: 36px;
+}
+.ui-premium-v2 .student-edit-page > .intro-band {
+  padding: 16px 20px;
+  margin-bottom: 12px;
+  border-color: #dce3ed;
+  background: #fff;
+  box-shadow: none;
+}
+.ui-premium-v2 .student-edit-page > .intro-band h1 {
+  color: #172033;
+  font-size: 22px;
+  font-weight: 700;
+}
+.ui-premium-v2 .student-edit-page > .intro-band p {
+  color: #64748b;
+  font-size: 13px;
+}
+.ui-premium-v2 .student-edit-page > .form-section {
+  display: block;
+  position: relative;
+  margin-bottom: 14px;
+  border: 1px solid #dce3ed;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: none;
+}
+.ui-premium-v2 .student-edit-page > .form-section > .section-number {
+  position: absolute;
+  top: 14px;
+  left: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 30px;
+  padding: 0;
+  border-radius: 5px;
+  color: #2563eb;
+  background: #edf3ff;
+  font-size: 15px;
+  font-weight: 700;
+}
+.ui-premium-v2 .student-edit-page > .form-section > .section-content {
+  padding: 14px 20px 18px;
+}
+.ui-premium-v2 .student-edit-page > .form-section > .section-content > h2 {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  margin: 0 0 14px;
+  padding: 0 0 10px 48px;
+  border-bottom: 1px solid #e7ebf1;
+  color: #172033;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.ui-premium-v2 .student-edit-page .form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 28px;
+}
+.ui-premium-v2 .student-edit-page .field {
+  display: grid;
+  grid-template-columns: var(--edit-label-width) minmax(0, 1fr);
+  align-items: start;
+  align-content: start;
+  gap: 0 12px;
+  min-width: 0;
+}
+.ui-premium-v2 .student-edit-page .field > label {
+  display: block;
+  margin: 0;
+  padding-top: 9px;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.55;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.ui-premium-v2 .student-edit-page .field > :is(input, select, textarea, .choices) {
+  grid-column: 2;
+  min-width: 0;
+}
+.ui-premium-v2 .student-edit-page .field > :is(input, select, textarea) {
+  box-sizing: border-box;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  color: #172033;
+  background: #fff;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.ui-premium-v2 .student-edit-page .field > textarea {
+  min-height: 76px;
+}
+.ui-premium-v2 .student-edit-page .field > :is(input, textarea)::placeholder {
+  color: #7b8797;
+}
+.ui-premium-v2 .student-edit-page .field > .field-error {
+  grid-column: 2;
+  margin-top: 5px;
+}
+.ui-premium-v2 .student-edit-page .field.invalid-field > label {
+  color: var(--danger);
+}
+.ui-premium-v2 .student-edit-page .field.invalid-field > :is(input, select, textarea) {
+  border-color: var(--danger);
+}
+.ui-premium-v2 .student-edit-page .field:is([data-kind="checkbox"], [data-kind="textarea"], [data-field="has_sibling_under_6"], [data-field="photo_permission"], [data-field="requires_long_term_medication"], [data-field="has_aeas_or_idat"]) {
+  grid-column: 1 / -1;
+}
+.ui-premium-v2 .student-edit-page .choices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 18px;
+  min-height: 38px;
+}
+.ui-premium-v2 .student-edit-page .choice {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  min-height: 32px;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 0;
+  color: #374151;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.ui-premium-v2 .student-edit-page .choice :is(input[type="radio"], input[type="checkbox"]) {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  margin: 0 6px 0 0;
+  accent-color: #2563eb;
+}
+.ui-premium-v2 .student-edit-page .required {
+  color: #c43232;
+}
+.ui-premium-v2 .student-edit-page > .form-section:not(:has(> .section-number)) > .section-content > label {
+  display: grid;
+  grid-template-columns: var(--edit-label-width) minmax(0, 330px);
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+}
+.ui-premium-v2 .student-edit-page > .form-section:not(:has(> .section-number)) select {
+  min-height: 38px;
+  font-size: 14px;
+  border-color: #cbd5e1;
+}
+.ui-premium-v2 .student-edit-page > .form-submit {
+  position: static;
+  margin-top: 12px;
+  padding: 14px 20px;
+  border-color: #dce3ed;
+  background: #fff;
+  box-shadow: none;
+}
+.ui-premium-v2 .student-edit-page > .form-submit > .primary {
+  color: #fff;
+  background: #2563eb;
+  box-shadow: none;
+}
+@media (max-width: 1100px) and (min-width: 761px) {
+  .ui-premium-v2 .student-edit-page {
+    --edit-label-width: 122px;
+  }
+  .ui-premium-v2 .student-edit-page .form-grid {
+    column-gap: 18px;
+  }
+}
+@media (max-width: 760px) {
+  .ui-premium-v2 .student-edit-page .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 540px) {
+  .ui-premium-v2 .student-edit-page > .intro-band {
+    padding: 14px;
+  }
+  .ui-premium-v2 .student-edit-page > .form-section > .section-number {
+    left: 14px;
+  }
+  .ui-premium-v2 .student-edit-page > .form-section > .section-content {
+    padding: 14px;
+  }
+  .ui-premium-v2 .student-edit-page .field {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 5px;
+  }
+  .ui-premium-v2 .student-edit-page .field > label {
+    padding-top: 0;
+  }
+  .ui-premium-v2 .student-edit-page .field > :is(input, select, textarea, .choices, .field-error) {
+    grid-column: 1;
+  }
+  .ui-premium-v2 .student-edit-page > .form-section:not(:has(> .section-number)) > .section-content > label {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+}
+/* End Student edit layout B */
+
+/* Student edit section colors: color values only; preserve layout and controls. */
+/* 办理类型 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(1) {
+  background-color: #fafbfc;
+  border-color: #e4e8ee;
+  border-left-color: #c9d1dc;
+}
+/* 学生基本信息 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(2) {
+  background-color: #f8fafe;
+  border-color: #e0e7f1;
+  border-left-color: #b7c8df;
+}
+/* 联系方式与地址 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(3) {
+  background-color: #f8fbf9;
+  border-color: #e1ebe5;
+  border-left-color: #bad0c2;
+}
+/* 兄弟姐妹信息 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(4) {
+  background-color: #fcfbf7;
+  border-color: #ece7dc;
+  border-left-color: #d8cbaa;
+}
+/* 父亲信息 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(5) {
+  background-color: #faf9fd;
+  border-color: #e7e3ef;
+  border-left-color: #c8bfdc;
+}
+/* 母亲信息 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(6) {
+  background-color: #fdf9fa;
+  border-color: #efe3e7;
+  border-left-color: #dbbfca;
+}
+/* 陪读与住宿偏好 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(7) {
+  background-color: #f7fbfb;
+  border-color: #dfeaea;
+  border-left-color: #b5cece;
+}
+/* 健康、安全与学校声明 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(8) {
+  background-color: #fafbf7;
+  border-color: #e7ebdf;
+  border-left-color: #c6d0b4;
+}
+/* 签证风险信息 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(9) {
+  background-color: #fcfaf8;
+  border-color: #ede6de;
+  border-left-color: #d6c7b7;
+}
+/* 学习经历与语言测试 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(10) {
+  background-color: #f8f9fd;
+  border-color: #e2e5ef;
+  border-left-color: #bec6df;
+}
+/* 紧急联系人 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(11) {
+  background-color: #f9fcfa;
+  border-color: #e2ece5;
+  border-left-color: #bed3c5;
+}
+/* 备注 */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(12) {
+  background-color: #fbf9fc;
+  border-color: #e9e3ec;
+  border-left-color: #cec0d5;
+}
+/* StudentInfo.docx */
+.ui-premium-v2 .student-edit-page > section.form-section:nth-of-type(13) {
+  background-color: #fafbfc;
+  border-color: #e4e8ee;
+  border-left-color: #c9d1dc;
+}
+/* End student edit section colors */
