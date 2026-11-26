@@ -97,6 +97,10 @@ def prepare():
     c=load()
     for name in ['database','storage','logs','tmp','home','cache','backups']:
         c.check(c.root/name).mkdir(exist_ok=True)
+    private_documents = c.check(c.root/'revenue_documents')
+    private_documents.mkdir(mode=0o700, exist_ok=True)
+    if private_documents.stat().st_mode & 0o777 != 0o700:
+        raise IsolationError('Staging revenue_documents requires exact private 0700 permissions')
     c.check(c.root/'staging.sb').write_text(sandbox_profile(c))
     return c
 
@@ -149,12 +153,13 @@ def require_stopped(c):
     if any(state_path(c,r).exists() for r in ['admin','parent']):raise IsolationError('Resolve saved Staging PID state before reset')
 
 
-def initialize(c):
+def initialize(c, *, schema_source=None):
     require_stopped(c)
     c.check(c.db)
-    result=subprocess.run(command(c,str(ROOT/'app.py'),'--init-only'),cwd=ROOT,env=environment(c),capture_output=True,text=True)
-    c.check(c.root/'logs/init.log').write_text(result.stdout+'\n'+result.stderr)
-    if result.returncode:raise IsolationError('Staging initialization failed; inspect STAGING_DATA/logs/init.log')
+    if schema_source is None:
+        raise IsolationError('Fresh Staging init requires explicit --schema-source; current application schema must not replay historical ALTER migrations')
+    from tools.staging_schema_fixture import create
+    create(schema_source, runtime=c)
     # Only local fixture settings. Never reads or copies Production users/secrets.
     with sqlite3.connect(c.check(c.db)) as db:
         for key,value in {'mode':'staging','test_root':str(c.storage),'production_root':'','auto_backup_enabled':'false','auto_cleanup_enabled':'false','PARENT_FORM_PUBLIC_BASE_URL':f'http://127.0.0.1:{c.parent_port}','CRM_ADMIN_LAN_URL':f'http://127.0.0.1:{c.admin_port}','CRM_PUBLIC_BASE_URL':f'http://127.0.0.1:{c.admin_port}','CRM_ADMIN_BIND_HOST':'127.0.0.1'}.items():
@@ -226,13 +231,13 @@ def reset(c,what):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','init','migrate','start','stop','restart','status','reset-db','reset-storage']);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','init','migrate','start','stop','restart','status','reset-db','reset-storage']);p.add_argument('--schema-source', help='Verified database supplying schema and registry only; required for init');a=p.parse_args()
     c=prepare() if a.action=='prepare' else load()
     if a.action in {'start', 'restart'}:
         # Compile/verify before stopping a healthy service, never in an upload request.
         from tools.build_document_ocr import build
         build()
-    if a.action=='init':initialize(c)
+    if a.action=='init':initialize(c,schema_source=a.schema_source)
     elif a.action=='migrate':migrate(c)
     elif a.action=='start':start(c)
     elif a.action=='stop':stop(c)
