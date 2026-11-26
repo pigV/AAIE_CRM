@@ -1,5 +1,45 @@
 """Escaped, server-rendered controls for case-owned metadata and processing dates."""
 from html import escape
+import re
+from urllib.parse import quote, urlencode
+
+DOCUMENT_ACTIONS = frozenset({'edit-document', 'reclassify', 'archive-document',
+                              'legacy-edit', 'legacy-classify', 'legacy-delete'})
+
+
+def document_return_context(html, tab, anchor, material_filter=''):
+    """Attach the containing material row to document forms, not other controls."""
+    fields = ''.join(f'<input type="hidden" name="{name}" value="{escape(str(value), quote=True)}">'
+                     for name, value in [('return_document_tab', tab), ('return_anchor', anchor),
+                                         ('material_filter', material_filter)])
+    for action in DOCUMENT_ACTIONS:
+        marker = f'<input type="hidden" name="action" value="{action}">'
+        html = html.replace(marker, marker + fields)
+    return html
+
+
+def document_action_return_path(case, form):
+    """Return only to the same case and a known tab; never accept a return URL."""
+    if form.get('action') not in DOCUMENT_ACTIONS:
+        return None
+    tab = form.get('return_document_tab')
+    if tab not in {'material_checklist', 'visa_result'}:
+        return None
+    prefix = 'material-checklist' if tab == 'material_checklist' else 'visa-result'
+    anchor = str(form.get('return_anchor') or '')
+    if not re.fullmatch(re.escape(prefix) + r'-item-[1-9][0-9]*', anchor):
+        anchor = prefix
+    student = case['student_id']
+    base = (f'/students/{quote(str(student), safe="")}/visa-cases/{int(case["id"])}' if student
+            else f'/visa-management/cases/{int(case["id"])}/workspace')
+    query = {'visa_tab': tab}
+    material_filter = form.get('material_filter')
+    if tab == 'material_checklist' and material_filter in {
+            'all', 'unfinished', 'required_unfinished', 'required', 'optional', 'conditional',
+            'missing', 'uploaded', 'reviewed', 'not_applicable'}:
+        query['material_filter'] = material_filter
+    query['kind'] = 'success'
+    return base + '?' + urlencode(query) + '#' + anchor
 
 FIELDS = {'acknowledge_sent_on':'Acknowledge Sent On Date', 'health_exam_date':'Health Exam Date',
           'grant_sent_on':'Grant Sent On Date', 'medical_completed_date':'Medical Completed Date'}

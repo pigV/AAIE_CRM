@@ -2,6 +2,7 @@
 from collections import OrderedDict
 from html import escape
 from urllib.parse import quote, urlencode
+from visa_document_processing_ui import document_return_context
 
 
 def material_upload_target(form, query, available_items):
@@ -73,7 +74,8 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
             owner = h.visa_material_owner_type_label(item['owner_type'])
             purpose = h.visa_material_purpose_label(item['purpose'])
             required = h.visa_material_required_status_label(item['required_status'])
-            files_html = h.visa_material_file_area_html(student_id, case_id, item)
+            files_html = document_return_context(h.visa_material_file_area_html(student_id, case_id, item),
+                                                 'material_checklist', row_id, active_filter)
             file_names = ' '.join(str(f['original_name'] or '') for f in files)
             search_text = ' '.join([name, str(item['material_name']), owner, purpose, file_names])
             status_select = h.visa_material_status_select_html(item, form_id)
@@ -143,7 +145,7 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
                                               ('required','必交'),('conditional','条件材料'),('optional','可选')])
     return f'''
       <link rel="stylesheet" href="/assets/visa-material-workspace.css?v=1">
-      <script src="/assets/visa-material-workspace.js?v=3" defer></script>
+      <script src="/assets/visa-material-workspace.js?v=4" defer></script>
       <section class="panel visa-material-checklist-panel visa-material-workspace" id="{panel}" data-visa-material-workspace data-case-id="{case_id}" data-initial-filter="{escape(active_filter)}">
         <div class="panel-head"><div><h2>{escape(title)}</h2><p>{escape(description)}</p></div><div class="row-actions">{initialize_link}{batch_link}</div></div>
         <div class="visa-material-quick-filters">{''.join(quick_filters)}</div>

@@ -70068,18 +70068,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             suggested_label = suggestion.get("chinese_label") or "Unmatched / 待确认"
             selected_id = suggestion.get("item_id") if suggestion["confidence"] in {"High", "Medium"} else ""
             selected_id = (selected_items or {}).get(doc["id"], target_item or selected_id)
-            rows.append(f'''<article class="upload-review-file-card visa-material-batch-review-row">
-              <section class="review-fields-workspace upload-review-file-meta visa-batch-fields" data-review-fields-pane>
-                <h3>{esc(doc['original_name'])}</h3><input type="hidden" name="document_ids" value="{esc(doc['id'])}">
-                <dl><dt>系统建议材料项</dt><dd>{esc(suggestion.get('item_title') or 'Unmatched')}</dd>
-                <dt>中文名称</dt><dd>{esc(suggested_label)}</dd><dt>置信度</dt><dd>{esc(suggestion['confidence'])}</dd>
-                <dt>匹配原因</dt><dd>{esc(suggestion['matched_reason'])}</dd></dl>
-                <label>Final Item / 最终选择<select name="final_item_{esc(doc['id'])}">{self.visa_material_batch_item_options_html(available_items, selected_id)}</select></label>
+            rows.append(f'''<tr class="visa-material-batch-review-row">
+              <td class="visa-material-batch-review-file"><strong>{esc(doc['original_name'])}</strong><input type="hidden" name="document_ids" value="{esc(doc['id'])}"></td>
+              <td class="visa-material-batch-suggestion">{esc(suggestion.get('item_title') or 'Unmatched')}</td>
+              <td>{esc(suggested_label)}</td>
+              <td><span class="visa-material-batch-confidence visa-material-batch-confidence-{esc(str(suggestion['confidence']).lower())}">{esc(suggestion['confidence'])}</span></td>
+              <td class="visa-material-batch-reason">{esc(suggestion['matched_reason'])}</td>
+              <td class="visa-material-batch-final-choice">
+                <select aria-label="Final Item / 最终选择 · {esc(doc['original_name'])}" name="final_item_{esc(doc['id'])}">{self.visa_material_batch_item_options_html(available_items, selected_id)}</select>
                 <label>Unknown result document type<select name="result_type_{esc(doc['id'])}"><option value="">Use recognized type</option><option value="grant_letter">IMMI Grant Letter</option><option value="refusal_letter">IMMI Refusal Letter</option></select></label>
-                <p>留空跳过：文件仍保留为 pending，不会变成正式材料或结果。</p>
-              </section></article>''')
+              </td><td><span class="visa-material-batch-skip-note">确认或留空跳过</span></td></tr>''')
         return f"""
-        <link rel="stylesheet" href="/assets/visa-material-workspace.css?v=2">
+        <link rel="stylesheet" href="/assets/visa-material-workspace.css?v=3">
         <div class="visa-management-page visa-material-batch-review-page upload-review upload-review-page">
           <section class="panel visa-management-hero visa-material-batch-header">
             <div><span class="eyebrow">Review / 确认页面</span><h2>文件已上传，正在确认材料归类</h2><p>系统建议仅用于辅助判断。请为每个文件确认最终材料项；留空跳过的文件仍会保留为 pending，不会显示到正式 Material Checklist。</p></div>
@@ -70091,7 +70091,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <input type="hidden" name="csrf" value="{esc(self.csrf)}">
               <input type="hidden" name="target_material_item" value="{esc(target_item)}">
               <input type="hidden" name="return_tab" value="{esc(return_tab)}">
-              <div class="upload-review-file-list">{''.join(rows)}</div>
+              <div class="visa-material-batch-review-table" role="region" aria-label="待确认上传材料" tabindex="0"><table>
+                <thead><tr><th scope="col">File Name / 文件名</th><th scope="col">Suggested Item / 系统建议材料项</th><th scope="col">Chinese Label / 中文名称</th><th scope="col">Confidence / 置信度</th><th scope="col">Match Reason / 匹配原因</th><th scope="col">Final Item / 最终选择</th><th scope="col">Action / 操作</th></tr></thead>
+                <tbody>{''.join(rows)}</tbody></table></div>
               <div class="dialog-actions visa-material-batch-review-actions upload-review-actions"><span>留空的文件将保持 pending。</span><button class="primary" type="submit">Confirm Upload / 确认上传</button></div>
             </form>
           </section>

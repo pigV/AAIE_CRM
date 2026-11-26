@@ -54,6 +54,11 @@
     const fields = rows.flatMap(row => Array.from(row.querySelectorAll('select, textarea')).filter(field => field.form === saveForm));
     fields.forEach(field => initial.set(field, field.value));
     const stored = (() => { try { return JSON.parse(sessionStorage.getItem(key) || 'null'); } catch (_) { return null; } })();
+    const documentEditors = all('.visa-document-edit');
+    const editorKey = detail => {
+      const field = detail.querySelector('[name="legacy_student_document_id"], [name="document_id"]');
+      return field ? field.name + ':' + field.value : '';
+    };
     const allowedFilters = new Set(Array.from(filterSelect.options).map(o => o.value));
     if (stored && typeof stored === 'object') {
       lastItem = typeof stored.anchor === 'string' ? stored.anchor : '';
@@ -68,6 +73,9 @@
       if (restorePosition && Array.isArray(stored.collapsed)) all('[data-material-category]').forEach(section => {
         section.open = !stored.collapsed.includes(section.dataset.materialCategory);
       });
+      if (restorePosition && Array.isArray(stored.editOpen)) documentEditors.forEach(detail => {
+        detail.open = stored.editOpen.includes(editorKey(detail));
+      });
     }
     function record(row) {
       return { category: row.dataset.categoryIndex, status: row.querySelector('select').value,
@@ -77,6 +85,7 @@
       const target = rows.find(row => row.id === lastItem);
       const view = { query: input.value.slice(0, 200), filter: filterSelect.value, category,
         open: all('[data-material-details][open]').map(d => d.dataset.materialDetails),
+        editOpen: documentEditors.filter(d => d.open).map(editorKey).filter(Boolean),
         collapsed: all('[data-material-category]').filter(d => !d.open).map(d => d.dataset.materialCategory),
         scroll: window.scrollY, anchor: lastItem, offset: target ? target.getBoundingClientRect().top : null, resume: Boolean(resume) };
       try { sessionStorage.setItem(key, JSON.stringify(view)); } catch (_) { /* Storage may be disabled. */ }
@@ -180,6 +189,7 @@
     });
     all('[data-material-details]').forEach(details => details.addEventListener('toggle', () => remember(false)));
     all('[data-material-category]').forEach(details => details.addEventListener('toggle', () => remember(false)));
+    documentEditors.forEach(details => details.addEventListener('toggle', () => remember(false)));
     panel.addEventListener('submit', event => {
       if (event.defaultPrevented) return;
       if (event.target !== saveForm && dirty.size) {
@@ -191,6 +201,13 @@
         if (submitting) { event.preventDefault(); return; }
         const target = rows.find(row => row.id === lastItem && !row.hidden);
         saveForm.querySelector('[name="return_anchor"]').value = target ? target.id : panel.id;
+      }
+      const documentTab = event.target.elements.namedItem('return_document_tab');
+      if (documentTab) {
+        const row = event.target.closest('[data-material-item]');
+        if (row) lastItem = row.id;
+        const filter = event.target.elements.namedItem('material_filter');
+        if (filter) filter.value = filterSelect.value;
       }
       remember(true); submitting = true;
       if (event.target === saveForm) render();

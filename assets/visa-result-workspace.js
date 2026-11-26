@@ -31,6 +31,12 @@
     let lastAnchor='', submitting=false;
     const feedback=one('[data-result-feedback]');
     const stored=(()=>{try{return JSON.parse(sessionStorage.getItem(key)||'null');}catch(_){return null;}})();
+    const documentEditors=all('.visa-document-edit');
+    const editorKey=detail=>{
+      const field=detail.querySelector('[name="legacy_student_document_id"], [name="document_id"]');
+      const item=detail.closest('[data-result-item]');
+      return field?(item?.id || 'case')+':'+field.name+':'+field.value:'';
+    };
     function findTarget(id){return all('[id]').find(element=>element.id===id);}
     function reveal(id, scroll) {
       const target=findTarget(id);
@@ -43,6 +49,7 @@
     function remember(resume) {
       const anchor=findTarget(lastAnchor);
       const data={stage:panel.dataset.stage,open:all('details[open]').map(detail=>detail.id || detail.closest('[data-result-item]')?.id).filter(Boolean),
+        editOpen:documentEditors.filter(detail=>detail.open).map(editorKey).filter(Boolean),
         anchor:lastAnchor,offset:anchor?anchor.getBoundingClientRect().top:null,scroll:window.scrollY,resume:Boolean(resume)};
       try{sessionStorage.setItem(key,JSON.stringify(data));}catch(_){}
     }
@@ -79,6 +86,9 @@
       if(target.tagName==='DETAILS')target.open=true;
       const details=target.matches('[data-result-item]')?target.querySelector('[data-result-item-details]'):null;if(details)details.open=true;
     });
+    if(restoreGroups && Array.isArray(stored.editOpen))documentEditors.forEach(detail=>{
+      detail.open=stored.editOpen.includes(editorKey(detail));
+    });
     }
     panel.addEventListener('focusin',event=>{
       const target=event.target.closest('[data-result-item], #visa-result-dates, [id="visa-result-lodgement"], #visa-result-case-documents');
@@ -104,6 +114,8 @@
         }
       }
       if(submitting){event.preventDefault();return;}
+      const submittedItem=event.target.closest('[data-result-item]');
+      if(submittedItem)lastAnchor=submittedItem.id;
       const anchor=event.target.querySelector('[name="return_anchor"]');
       if(anchor && lastAnchor.startsWith('visa-result-item-'))anchor.value=lastAnchor;
       remember(true);submitting=true;
@@ -123,14 +135,15 @@
     update();
     if(restorePosition && !panel.closest('[hidden]'))requestAnimationFrame(()=>{
       const hash=location.hash.slice(1);
-      if(hash && findTarget(hash) && hash!=='visa-tab-visa-result'){reveal(hash,true);return;}
-      if(stored?.resume){
+      const hashTarget=hash && findTarget(hash) && hash!=='visa-tab-visa-result';
+      const savedReturn=['success','ok'].includes(new URL(location.href).searchParams.get('kind'));
+      if(stored?.resume && (!hashTarget || (hash===stored.anchor && savedReturn))){
         lastAnchor=stored.anchor||'';reveal(lastAnchor,false);
         const anchor=findTarget(lastAnchor);
         if(anchor && Number.isFinite(stored.offset))window.scrollBy(0,anchor.getBoundingClientRect().top-stored.offset);
         else if(Number.isFinite(stored.scroll))window.scrollTo(0,Math.max(0,stored.scroll));
         remember(false);
-      }
+      }else if(hashTarget)reveal(hash,true);
     });
   });
   }

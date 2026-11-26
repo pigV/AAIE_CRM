@@ -659,6 +659,11 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                     g['advance_workflow_stage_to'](case['student_id'],'签证下签或拒签')
                 if result_action and case['student_id']:
                     g['refresh_workflow_completion_metrics'](case['student_id'],source='visa_result_authority')
+                from visa_document_processing_ui import document_action_return_path
+                document_return = document_action_return_path(case, {
+                    key: value(key) for key in ('action','return_document_tab','return_anchor','material_filter')})
+                if document_return:
+                    return self.redirect(document_return)
                 if value('return_result_ui') == '1':
                     target=(f'/students/{quote(case["student_id"])}/visa-cases/{case_id}' if case['student_id'] else f'/visa-management/cases/{case_id}/workspace')
                     return self.redirect(target+'?visa_tab=visa_result&message='+quote('签证信息已保存。')+'&kind=success#visa-result-dates')
