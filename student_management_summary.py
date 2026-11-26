@@ -147,7 +147,6 @@ def load_student_management_summary_map(
              WHERE COALESCE(deleted_at,'')='' AND student_id IN ({placeholders})""",
         ids,
     )
-    stages = load_application_stage_result_map(connection, ids, read_context=read_context)
     has_cycle_schema = is_workflow_v2_active(connection)
     lifecycle_projection = (
         load_student_workflow_projection_map(connection, ids, read_context=read_context)
@@ -159,6 +158,11 @@ def load_student_management_summary_map(
             for student_id, item in lifecycle_projection.items()
             if getattr(item, "cycle_type", None) == "transfer"
         }
+    stages = load_application_stage_result_map(
+        connection, ids,
+        workflow_projection_map=lifecycle_projection if has_cycle_schema else None,
+        read_context=read_context,
+    )
     offer_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info('offers')")}
     course_start_sql = "o.course_start_date" if "course_start_date" in offer_columns else "NULL AS course_start_date"
     if has_cycle_schema:
@@ -218,11 +222,8 @@ def load_student_management_summary_map(
         )
     for row in visa_date_rows:
         visa_dates.setdefault(str(row["student_id"]), str(row["visa_grant_date"] or ""))
-    from visa_document_lifecycle import student_projection, tables
-    if 'visa_case_documents' in tables(connection):
-        for student_id in ids:
-            projection=student_projection(connection,student_id)
-            if projection is not None:visa_dates[str(student_id)]=projection['grant_date']
+    from visa_document_lifecycle import student_grant_date_map
+    visa_dates.update(student_grant_date_map(connection, ids))
     visa_case_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info('visa_cases')")}
     final_result_sql = "final_result" if "final_result" in visa_case_columns else "NULL AS final_result"
     archived_at_sql = "archived_at" if "archived_at" in visa_case_columns else "NULL AS archived_at"

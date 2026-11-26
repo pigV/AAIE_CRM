@@ -282,7 +282,6 @@ from revenue.views import (
     render_toorak_claim_preview,
     render_revenue_case_workbench,
     render_revenue_initialization_page,
-    render_student_revenue_context,
 )
 from higher_education_admin_views import (
     render_australian_universities_card,
@@ -4258,6 +4257,8 @@ def submit_parent_reapplication(data, token_row, draft_revision):
             "UPDATE parent_form_tokens SET submitted_at=? WHERE token=?",
             (stamp, token),
         )
+        from revenue.parent_guardian_intake import record_parent_guardian_intake
+        record_parent_guardian_intake(conn, student_id, token, occurred_at=stamp)
         ParentFormRepository(db).delete_draft(conn, token)
         from business_changes.student_records import publish_student_submission
         publish_student_submission(conn, student_id=student_id, parent_form_token=token,
@@ -4400,6 +4401,9 @@ def create_student_from_form(data, token_row=None, consultant_id=None, source_to
                 parent_form_token=token_row["token"] if token_row else None,
                 education_stream=data.get("application_stream") or "school_education",
             )
+            if token_row:
+                from revenue.parent_guardian_intake import record_parent_guardian_intake
+                record_parent_guardian_intake(conn, student_id, token_row["token"], occurred_at=created)
 
         from business_changes.student_records import publish_student_submission
         publish_student_submission(conn, student_id=student_id,
@@ -11924,13 +11928,22 @@ def student_management_application_row_html(student, summary, csrf, can_edit, ca
         if lifecycle_label else ""
     )
     stage_label = "No Active Lifecycle" if summary.stage_key == "no_cycle" else summary.stage_label
+    stage_tone = summary.stage_key
+    if stage_tone == "no_counted_stage":
+        stage_tone = {
+            "已暂停": "held_paused",
+            "已取消": "held_cancelled",
+            "已终止": "held_failed",
+            "已归档": "held_archived",
+            "已完成": "held_completed",
+        }.get(stage_label, stage_tone)
     historical_transfer_badge = '<span class="student-transfer-name-badge" title="已确认的历史转学">转学</span>' if historical_transfer else ''
     return f"""
     <tr class="student-management-row" data-student-application-summary-row>
-      <td data-label="选择"><input type="checkbox" name="student_ids" value="{esc(student['student_id'])}"></td>
+      <td data-label="选择"><input type="checkbox" name="student_ids" value="{esc(student['student_id'])}" form="student-workbench-bulk-delete" aria-label="选择 {esc(summary.student_name)}"></td>
       <td data-label="学生号"><code>{esc(student['student_id'])}</code></td>
       <td data-label="学生名"><a class="student-name-link" href="/students/{esc(student['student_id'])}">{esc(summary.student_name)}</a> {student_type_badge_html(student)} {historical_transfer_badge}</td>
-      <td data-label="申请阶段" aria-label="当前业务 / 申请阶段">{lifecycle_html}<span class="status application-stage-{esc(summary.stage_key)}">{esc(stage_label)}</span></td>
+      <td data-label="申请阶段" aria-label="当前业务 / 申请阶段">{lifecycle_html}<span class="student-stage-badge" data-stage="{esc(stage_tone)}">{esc(stage_label)}</span></td>
       <td data-label="最终确认学校">{esc(summary.final_school_name or '待确认')}</td>
       <td data-label="申请年级">{esc(summary.applying_year_level or '未记录')}</td>
       <td data-label="建档时间" class="nowrap-cell">{esc(display_datetime(summary.created_at) or '未记录')}</td>
@@ -33248,7 +33261,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             {
                 "value": student_display_name(row),
                 "student_id": str(row["student_id"] or ""),
-                "search": f"{student_display_name(row)} {row['student_id']}".lower(),
+                "search": " ".join((
+                    student_display_name(row),
+                    f"{row['passport_last_name'] or ''} {row['passport_first_name'] or ''}".strip(),
+                    str(row["student_id"] or ""),
+                )).casefold(),
             }
             for row in rows
         ]
@@ -55430,6 +55447,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if not self.require("students.view"):
             return
         q = (self.query.get("q") or [""])[0].strip()
+        selected_student_id = (self.query.get("selected_student_id") or [""])[0].strip()
+        if selected_student_id != q or not selected_student_id.isdecimal():
+            selected_student_id = ""
         sort = (self.query.get("sort") or ["recent"])[0]
         view = "table"
         stage_filter = (self.query.get("stage") or [""])[0]
@@ -55462,7 +55482,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         where_parts = ["s.deleted_at IS NULL"]
         if alert_filter == "missing_school_plan":
             where_parts.append(missing_school_plan_predicate("s"))
-        if q:
+        if selected_student_id:
+            where_parts.append("s.student_id=?")
+            params.append(selected_student_id)
+        elif q:
             like = f"%{q}%"
             where_parts.append(
                 """(s.student_id LIKE ? OR s.passport_first_name LIKE ? OR s.passport_last_name LIKE ?
@@ -55504,13 +55527,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 ORDER BY s.updated_at DESC""",
             params,
         )
-        summary_connection = db.connect()
-        try:
+        from business_changes.snapshots import read_scope
+        with read_scope(db) as summary_connection:
             summary_map = load_student_management_summary_map(
                 summary_connection, [row["student_id"] for row in rows_data]
             )
-        finally:
-            db._release_connection(summary_connection)
         if stage_filter:
             if stage_filter == "transfer_active":
                 rows_data = [row for row in rows_data if is_active_transfer_stage(
@@ -55670,7 +55691,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         student_name_suggestions = self.student_name_suggestions_html(student_name_suggestions_id)
         can_edit = can_edit_student_profile(self.user)
         can_delete = can_delete_student_record(self.user)
-        from business_changes.snapshots import read_scope
         from reviewed_historical_transfer import load_historical_transfer_ownership
         historical_transfer_map = {}
         historical_transfer_flags = student_case_views.resolve_student_case_feature_flags(setting_reader=db.setting)
@@ -55690,53 +55710,69 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <thead><tr><th><input type="checkbox" aria-label="Select all"></th><th>学生号</th><th>学生名</th><th>申请阶段</th><th>最终确认学校</th><th>申请年级</th><th>建档时间</th><th>Offer开学时间</th><th>下签时间</th><th class="student-actions-heading">操作</th></tr></thead>
               <tbody>{rows_html}</tbody>
             </table></div>"""
+        advanced_open = " open" if any((sort != "recent", lifecycle_type_filter, year_filter,
+                                         alert_filter, contract_filter, created_from, created_to,
+                                         updated_from, updated_to)) else ""
         body = f"""
-        <link rel="stylesheet" href="/assets/student-management-application-summary-v1.css?v=2">
+        <link rel="stylesheet" href="/assets/student-management-application-summary-v1.css?v=3">
         <div data-student-management-application-summary>
-        <section class="panel student-management-hero student-management-mobile-safe">
-          <div class="panel-head"><div><h2>学生管理</h2><p>从这里建档、筛选、跟进、进入材料、合同和付款流程。</p></div><a class="primary button-link" href="/students/new">新建学生</a></div>
-          <div class="student-management-toolbar">
-            <a class="parent-link-action button-link" href="/parent-links">生成家长表单链接</a>
-            <a class="secondary button-link" href="/parent-links">从家长表单建档</a>
-            <a class="secondary button-link" href="/students/template/download">下载 Excel 模板</a>
-            {f'<a class="secondary button-link" href="/students/deleted">已删除学生</a>' if can_delete else ''}
-            <form class="inline-upload" method="post" enctype="multipart/form-data" action="/students/import">
-              <input type="hidden" name="csrf" value="{esc(self.csrf)}">
-              <input type="file" name="template" accept=".xlsx" required>
-              <button class="secondary" type="submit">上传模板并建档</button>
-            </form>
-          </div>
-        </section>
         <section class="panel student-workflow-list-panel student-management-mobile-safe">
-          <div class="panel-head"><div><h2>学生工作台</h2><p>共 {len(rows_data)} 名学生</p></div></div>
-          <form class="workflow-filter-bar student-management-filters" method="get">
+          <div class="student-workbench-header">
+            <h2>学生工作台 <span>{len(rows_data)} 名学生</span></h2>
+            <details class="student-workbench-management">
+              <summary>建档与管理</summary>
+              <div class="student-management-toolbar">
+                <a class="parent-link-action button-link" href="/parent-links">生成家长表单链接</a>
+                <a class="secondary button-link" href="/parent-links">从家长表单建档</a>
+                <a class="secondary button-link" href="/students/template/download">下载 Excel 模板</a>
+                {f'<a class="secondary button-link" href="/students/deleted">已删除学生</a>' if can_delete else ''}
+                <form class="inline-upload" method="post" enctype="multipart/form-data" action="/students/import">
+                  <input type="hidden" name="csrf" value="{esc(self.csrf)}">
+                  <input type="file" name="template" accept=".xlsx" aria-label="选择建档模板" required>
+                  <button class="secondary" type="submit">上传模板并建档</button>
+                </form>
+              </div>
+            </details>
+          </div>
+          <form class="workflow-filter-bar student-management-filters" method="get" action="/students">
             <input type="hidden" name="view" value="table">
-            <div class="filter-search-row">
-              <label class="filter-search-field">搜索学生<input name="q" value="{esc(q)}" placeholder="输入学生姓名，选择后自动查询" autocomplete="off" data-student-name-search data-student-suggestions-id="{student_name_suggestions_id}" aria-autocomplete="list"><div class="student-search-suggestions" data-student-search-suggestions hidden></div>{student_name_suggestions}</label>
-              <label>排序<select name="sort">{sort_select}</select></label>
-              <button class="secondary">应用筛选</button>
-              <a class="ghost button-link" href="/students">清除</a>
+            <input type="hidden" name="selected_student_id" value="{esc(selected_student_id)}">
+            <div class="filter-search-row student-workbench-primary">
+              <div class="filter-search-field">
+                <label for="student-workbench-search">搜索学生</label>
+                <input id="student-workbench-search" name="q" value="{esc(q)}" placeholder="输入姓名或学生号" autocomplete="off" data-student-name-search data-student-suggestions-id="{student_name_suggestions_id}" role="combobox" aria-autocomplete="list" aria-controls="student-workbench-search-results" aria-expanded="false">
+                <div class="student-search-suggestions" id="student-workbench-search-results" role="listbox" aria-label="学生搜索建议" data-student-search-suggestions hidden></div>{student_name_suggestions}
+              </div>
+              <label>当前阶段<select name="stage">{stage_options}</select></label>
+              <label>顾问<select name="consultant_id">{consultant_options}</select></label>
+              <div class="student-workbench-primary-actions">
+                <button class="secondary" type="submit">应用筛选</button>
+                <a class="ghost button-link" href="/students">清除</a>
+                <a class="primary button-link" href="/students/new">新建学生</a>
+              </div>
             </div>
-            <div class="student-filter-groups">
-              <fieldset class="filter-group filter-group-core"><legend>核心筛选</legend>
-                <label>当前阶段<select name="stage">{stage_options}</select></label>
-                <label>Lifecycle<select name="lifecycle_type">{lifecycle_type_options}</select></label>
-                <label>顾问<select name="consultant_id">{consultant_options}</select></label>
-                <label>年级<select name="year_level">{year_options}</select></label>
-              </fieldset>
-              <fieldset class="filter-group filter-group-alerts"><legend>提醒与合同</legend>
-                <label>提醒<select name="alert">{alert_select}</select></label>
-                <label>合同<select name="contract_status">{contract_options}</select></label>
-              </fieldset>
-              <fieldset class="filter-group filter-group-dates date-filter-group"><legend>时间范围</legend>
-                <label>创建从<input type="date" name="created_from" value="{esc(created_from)}"></label>
-                <label>创建到<input type="date" name="created_to" value="{esc(created_to)}"></label>
-                <label>更新从<input type="date" name="updated_from" value="{esc(updated_from)}"></label>
-                <label>更新到<input type="date" name="updated_to" value="{esc(updated_to)}"></label>
-              </fieldset>
-            </div>
+            <details class="student-workbench-advanced"{advanced_open}>
+              <summary>更多筛选</summary>
+              <div class="student-filter-groups">
+                <fieldset class="filter-group filter-group-core"><legend>申请与排序</legend>
+                  <label>排序<select name="sort">{sort_select}</select></label>
+                  <label>Lifecycle<select name="lifecycle_type">{lifecycle_type_options}</select></label>
+                  <label>年级<select name="year_level">{year_options}</select></label>
+                </fieldset>
+                <fieldset class="filter-group filter-group-alerts"><legend>提醒与合同</legend>
+                  <label>提醒<select name="alert">{alert_select}</select></label>
+                  <label>合同<select name="contract_status">{contract_options}</select></label>
+                </fieldset>
+                <fieldset class="filter-group filter-group-dates date-filter-group"><legend>时间范围</legend>
+                  <label>创建从<input type="date" name="created_from" value="{esc(created_from)}"></label>
+                  <label>创建到<input type="date" name="created_to" value="{esc(created_to)}"></label>
+                  <label>更新从<input type="date" name="updated_from" value="{esc(updated_from)}"></label>
+                  <label>更新到<input type="date" name="updated_to" value="{esc(updated_to)}"></label>
+                </fieldset>
+              </div>
+            </details>
           </form>
-          <form class="student-bulk-delete-form" data-business-sync-selection="1" method="post" action="/students/bulk-delete">
+          <form id="student-workbench-bulk-delete" class="student-bulk-delete-form" data-business-sync-selection="1" method="post" action="/students/bulk-delete">
           <input type="hidden" name="csrf" value="{esc(self.csrf)}">
           <div class="bulk-action-bar">
             <span>批量操作</span>
@@ -55747,8 +55783,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             {f'''<button class="danger compact" type="submit" onclick="const n=document.querySelectorAll('input[name=student_ids]:checked').length; if(!n){{alert('请先选择要删除的学生。'); return false;}} return confirm('确认批量删除 '+n+' 个学生？系统会保留记录，可在已删除学生中恢复。');">批量删除</button>''' if can_delete else '<button class="danger compact" disabled>批量删除</button>'}
             <small>Admin / Manager 可批量软删除；删除后可在已删除学生中恢复。</small>
           </div>
-          {content_html}
           </form>
+          {content_html}
         </section></div>"""
         if fragment_only:
             return body
@@ -60812,7 +60848,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             '</div></section>'
         ]
         if data.get("requires_parent_accompaniment") == "是":
-            section_html.append('<section class="detail-section"><p>有陪读需求：请按实际家长建立签证案件后查看对应收费；意向登记不会自动收费。</p></section>')
+            section_html.append('<section class="detail-section"><p>有陪读需求：请在签证案件及收费档案查看对应家长的办理情况。</p></section>')
         for section_id, title, fields in profile_sections():
             items = []
             for name, label, *_ in fields:
@@ -60895,7 +60931,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             ("homestay", "住宿与接机", can_access_module(self.user, "payments")),
             ("history", "历史记录", True),
             ("reminders", "留言与提醒", can_reminder_action(self.user, "view")),
-            ("revenue", "收入与佣金", can_access_revenue(self.user)),
         ]
         if visa_only:
             tabs = [(key, label, visible) for key, label, visible in tabs
@@ -61418,15 +61453,24 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             raise PermissionError('student_tab_forbidden')
         if method != "GET" or not self.require("students.view"):
             return
+        student = self.student_detail_row(student_id)
+        if not student:
+            if fragment_only:raise LookupError('student_not_found')
+            return self.error_page("学生不存在", 404)
+        if tab == "revenue":
+            if not can_access_revenue(self.user):
+                if fragment_only:raise PermissionError('student_tab_forbidden')
+                return self.deny_module_access("students")
+            href = "/revenue/cases?" + urlencode({"student": student_id})
+            content = f'<p>收费与佣金档案已移至财务模块。<a href="{esc(href)}">查看该学生的收费与佣金档案</a></p>'
+            if fragment_only:
+                return content
+            return self.send_html(content, headers=[("Cache-Control", "no-store")])
         student_case_flags = student_case_views.resolve_student_case_feature_flags(
             getattr(self, "student_case_feature_flags", None),
             setting_reader=db.setting,
         )
         student_case_tab = tab in {"transfer_cases", "progression_cases"}
-        student = self.student_detail_row(student_id)
-        if not student:
-            if fragment_only:raise LookupError('student_not_found')
-            return self.error_page("学生不存在", 404)
         transfer_case_access = student_capabilities.can_view_transfer_cases(
             self.user, student, flags=student_case_flags
         )
@@ -61453,7 +61497,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             "contracts": can_access_module(self.user, "student_contracts"),
             "history": True,
             "reminders": can_reminder_action(self.user, "view"),
-            "revenue": can_access_revenue(self.user),
         }
         if not access.get(tab):
             if fragment_only:raise PermissionError('student_tab_forbidden')
@@ -61472,13 +61515,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def student_detail_tab_content(self, student, tab):
         student_id = student["student_id"]
-        if tab == "revenue":
-            connection = db.connect()
-            try:
-                context = RevenueReadModels(connection).student_context(student_id)
-            finally:
-                db._release_connection(connection)
-            return render_student_revenue_context(context)
         if tab == "transfer_cases":
             flags = self.transfer_case_flags()
             return transfer_case_views.render_transfer_case_tab(
@@ -69189,6 +69225,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         try:
             with db.transaction() as connection:
                 cycle_id = resolve_visa_cycle(connection, student_id, form_text_value(form, "application_cycle_id"), family_visa=family_visa)
+                if visa_type == "590 Guardian Visa" and form_text_value(form, "application_type", "New Application") == "New Application":
+                    from revenue.parent_guardian_intake import automatic_guardian_draft
+                    intake_case = automatic_guardian_draft(connection, student_id, cycle_id, main_applicant)
+                    if intake_case is not None:
+                        return self.flash_redirect(
+                            f"/students/{quote(student_id)}/visa-cases/{intake_case}",
+                            "该家长已有表单生成的陪读签证草稿。请在该草稿补填本页资料。",
+                            "warning",
+                        )
                 case_id = connection.execute(
                     """INSERT INTO visa_cases(
                          student_id,visa_case_name,visa_type,application_type,main_applicant,guardian_applicant,
@@ -71187,9 +71232,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             candidate_source = transfer_source_authority.identify_for_submission(
                                 authority_connection, str(student_id), preview_id, form=selected_form)
                             candidate_source.setdefault("created_at", now_iso())
-                            if candidate_source["source_classification"] == "new_transfer":
-                                transfer_intake.parent_school_preview(
-                                    authority_connection, str(student_id), candidate_source["parent_form_token"])
                             candidate["fee_authority"] = transfer_contract_authority.commercials(
                                 authority_connection, str(student_id), preview_id,
                                 payment_method="", source_authority=candidate_source)["base_fee"]
@@ -71197,19 +71239,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             pass  # A candidate with unresolved authority remains HOLD.
                     transfer_source_fields = transfer_v2_views.render_transfer_contract_source_fields(
                         source_options, error=transfer_source_error, authority=saved_transfer_source)
-                    current_fields = ""
-                    for intake in source_options.get("intakes", ()):
-                        try:
-                            current_fields += transfer_intake_views.confirmation_fields(
-                                authority_connection, str(student_id), intake["token"], disabled=True)
-                        except ValueError as error:
-                            current_fields += '<p role="alert">' + esc(str(error)) + '</p>'
-                    transfer_source_fields = transfer_source_fields.replace(
-                        "</section>", current_fields + "</section>")
                 except (sqlite3.Error, ValueError) as error:
                     transfer_source_fields += (
                         '<p data-contract-transfer-source-fields hidden role="alert">'
-                        + esc(str(error)) + '；请先核对家长学校资料。</p>')
+                        + esc(str(error)) + '；请先核对转学来源。</p>')
         finally:
             db._release_connection(authority_connection)
         if published_mode:
@@ -85030,8 +85063,6 @@ sqlite3 database/aaie_crm.db 'PRAGMA quick_check;'"""
                 authority = transfer_source_authority.ensure_for_submission(
                     connection, str(student_id), contract_id, form=self.form,
                     actor_user_id=int(self.user["id"]), occurred_at=stamp)
-                if authority["source_classification"] == "new_transfer":
-                    self._confirm_transfer_parent_school(connection, str(student_id), authority)
                 contract_uid = connection.execute("SELECT contract_uid FROM contracts WHERE id=?", (contract_id,)).fetchone()[0]
                 commercial = transfer_contract_authority.commercials(
                     connection, str(student_id), contract_id,

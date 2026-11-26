@@ -39,27 +39,23 @@ def signed_handoff_panels(conn, student_id, *, csrf, can_manage):
                 WHERE l.contract_id=? AND f.status<>'cancelled' LIMIT 1''',(row['id'],)).fetchone()
             if fee:
                 continue
-        source = conn.execute('SELECT parent_form_token FROM transfer_source_authorities WHERE transfer_contract_id=?',(row['id'],)).fetchone()
         requests = _dicts(conn, '''SELECT request_status,last_error_message FROM external_transfer_case_requests
             WHERE contract_id=? ORDER BY id DESC LIMIT 1''',(row['id'],))
         reason = requests[0]['last_error_message'] if requests else '合同已签妥，转学与收费尚未完成衔接。'
+        if reason in {'合同已签妥，待工作人员确认当前学校及年级。',
+                      '合同已签妥，待确认本次家长资料中的当前学校及年级。'}:
+            reason = '合同已签妥，转学收费尚未建档，请重试建档。'
         cancelled = bool(requests and requests[0]['request_status'] == 'cancelled')
         if cancelled:
             reason = '本次转学请求已取消；已签合同保留，请核对后通过新的业务申请处理。'
         allow_recovery = can_manage and not cancelled
-        fields=''
-        if allow_recovery and row['application_cycle_id'] is None and source and source[0]:
-            try:
-                fields=confirmation_fields(conn,student_id,source[0])
-            except (ValueError,TypeError) as error:
-                reason=str(error)
         base=f'/students/{quote(str(student_id))}/transfer-intake/{row["id"]}'
         controls=''
         if allow_recovery:
-            action='confirm' if fields else 'retry'
+            action='retry'
             controls=f'''<form method="post" action="{base}/{action}" class="stack-form">
-                <input type="hidden" name="csrf" value="{escape(csrf,quote=True)}">{fields}
-                <button type="submit">{'确认学校并完成转学收费建档' if fields else '重试转学及收费建档'}</button></form>'''
+                <input type="hidden" name="csrf" value="{escape(csrf,quote=True)}">
+                <button type="submit">重试转学及收费建档</button></form>'''
         cards.append(f'''<section class="notice warning transfer-intake-handoff" data-transfer-intake-contract="{row['id']}">
             <h3>合同 #{row['id']} 已签妥 · 待完成转学收费建档</h3><p>{escape(reason or '')}</p>
             <p>目标学校可稍后补充；已签署合同保留。</p>{controls}</section>''')

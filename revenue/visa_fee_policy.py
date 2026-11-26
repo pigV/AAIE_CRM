@@ -19,6 +19,7 @@ VISA_FEE_KINDS = {
 }
 VISA_FEE_KINDS[STUDENT_VISA_PACKAGE] = "student_visa"
 VISA_FEE_KINDS["visitor-600"] = "visitor_600"
+VISA_CATEGORY_LABELS = {"590": "陪读签证", "600": "旅游签证", "500": "学生签证"}
 
 
 class SignedVisaPackageRequired(MissingFeeRule):
@@ -79,28 +80,37 @@ def visa_fee_facts(visa, *, education_stream, cycle_type, existing_aaie):
     )
 
 
-def visa_fee_description(visa):
+def visa_fee_description(visa, *, show_unclassified=True):
     visa = dict(visa)
     name = str(visa.get("applicant_name") or visa.get("main_applicant") or "申请人待核实").strip()
     code = visa_subclass(visa)
-    label = {"590": "陪读签证", "600": "旅游签证", "500": "学生签证"}.get(code, "签证")
-    return f"{name} · {code or '类别待核实'} {label}服务费 · 案件 #{visa['id']}"
+    if code:
+        label = f"{code} {VISA_CATEGORY_LABELS[code]}"
+    else:
+        label = "类别待核实 签证" if show_unclassified else "签证"
+    return f"{name} · {label}服务费 · 案件 #{visa['id']}"
 
 
-def fee_display_description(connection, fee_uid, fallback):
+def fee_visa_case(connection, fee_uid):
+    """Resolve a fee's Visa case from its snapshot and exact student/cycle scope."""
     columns = {row[1] for row in connection.execute("PRAGMA table_info(visa_cases)")}
     if not {"student_id", "application_cycle_id", "applicant_name"}.issubset(columns):
-        return fallback
+        return None
     rows = connection.execute(
         """SELECT visa.* FROM revenue_fee_items fee
              JOIN revenue_rule_snapshots snap ON snap.id=fee.rule_snapshot_id
              JOIN json_each(snap.canonical_json,'$.items') item
-             JOIN revenue_commercial_cases cc ON cc.id=fee.commercial_case_id
+             JOIN revenue_commercial_cases cc ON cc.id=fee.commercial_case_id AND cc.student_id=fee.student_id
              JOIN visa_cases visa ON visa.id=json_extract(item.value,'$.visa_case_id')
               AND visa.student_id=fee.student_id AND visa.application_cycle_id=cc.application_cycle_id
             WHERE fee.uid=?""", (fee_uid,),
     ).fetchall()
-    return visa_fee_description(rows[0]) if len(rows) == 1 else fallback
+    return dict(rows[0]) if len(rows) == 1 else None
+
+
+def fee_display_description(connection, fee_uid, fallback):
+    visa = fee_visa_case(connection, fee_uid)
+    return visa_fee_description(visa, show_unclassified=False) if visa else fallback
 
 
 def resolve_visa_fee(resolver, facts, visa, contracts, student_id, engagement_date):

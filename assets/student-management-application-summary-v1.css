@@ -1,3 +1,175 @@
+[data-student-management-application-summary] .student-workbench-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 18px;
+}
+
+[data-student-management-application-summary] .student-workbench-header h2 {
+  margin: 0;
+  font-size: clamp(19px, 2vw, 23px);
+}
+
+[data-student-management-application-summary] .student-workbench-header h2 span {
+  margin-inline-start: 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+[data-student-management-application-summary] :is(.student-workbench-management, .student-workbench-advanced) summary {
+  width: fit-content;
+  padding: 6px 4px;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+[data-student-management-application-summary] .student-workbench-management[open] {
+  flex-basis: 100%;
+}
+
+[data-student-management-application-summary] .student-workbench-management .student-management-toolbar {
+  padding-block: 8px 4px;
+}
+
+[data-student-management-application-summary] .student-workbench-management .inline-upload {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+[data-student-management-application-summary] .student-workbench-management input[type="file"] {
+  max-width: 100%;
+}
+
+[data-student-management-application-summary] .student-workbench-primary {
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, .7fr) minmax(100px, .5fr) auto;
+}
+
+[data-student-management-application-summary] .student-workbench-primary :is(input, select) {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+}
+
+[data-student-management-application-summary] .student-workbench-primary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+[data-student-management-application-summary] .student-workbench-advanced .student-filter-groups {
+  margin-block-start: 6px;
+}
+
+[data-student-management-application-summary] .student-stage-badge {
+  --stage-ink: #475569;
+  display: inline-block;
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--stage-ink) 25%, #fff);
+  border-inline-start: 3px solid var(--stage-ink);
+  border-radius: 6px;
+  color: var(--stage-ink);
+  background: color-mix(in srgb, var(--stage-ink) 9%, #fff);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+/* Color follows the stage key, so search and sorting never reassign it. */
+.student-stage-badge[data-stage="01_parent_form"] { --stage-ink: #2546a6; }
+.student-stage-badge[data-stage="02_contract_creation"] { --stage-ink: #5b3192; }
+.student-stage-badge[data-stage="contract_preparation"] { --stage-ink: #185c83; }
+.student-stage-badge[data-stage="03_contract_signature"] { --stage-ink: #984211; }
+.student-stage-badge[data-stage="contract_link_inactive"] { --stage-ink: #a43b1d; }
+.student-stage-badge[data-stage="04_school_plan_creation"] { --stage-ink: #97375f; }
+.student-stage-badge[data-stage="05_plan_confirmation"] { --stage-ink: #563eb3; }
+.student-stage-badge[data-stage="waiting_school_plan"] { --stage-ink: #a42769; }
+.student-stage-badge[data-stage="06_school_application_submission"] { --stage-ink: #16634a; }
+.student-stage-badge[data-stage="07_school_response"] { --stage-ink: #1c619e; }
+.student-stage-badge[data-stage="08_offer_acceptance"] { --stage-ink: #7b328a; }
+.student-stage-badge[data-stage="offer_acceptance_steps"] { --stage-ink: #096173; }
+.student-stage-badge[data-stage="09_waiting_coe"] { --stage-ink: #855019; }
+.student-stage-badge[data-stage="10_visa_submission"] { --stage-ink: #3c577e; }
+.student-stage-badge[data-stage="11_visa_result"] { --stage-ink: #8c2852; }
+.student-stage-badge[data-stage="visa_result_needs_review"] { --stage-ink: #a63e34; }
+.student-stage-badge[data-stage="visa_case_cycle_unassigned"] { --stage-ink: #795014; }
+.student-stage-badge[data-stage="visa_granted"] { --stage-ink: #146638; }
+.student-stage-badge[data-stage="visa_refused"] { --stage-ink: #9e2444; }
+.student-stage-badge[data-stage="visa_withdrawn"] { --stage-ink: #67415c; }
+.student-stage-badge[data-stage="offer_expired"] { --stage-ink: #94381e; }
+.student-stage-badge[data-stage="school_application_closed"] { --stage-ink: #515c69; }
+.student-stage-badge[data-stage="materials_preparation"] { --stage-ink: #4f641d; }
+.student-stage-badge[data-stage="school_plan"] { --stage-ink: #814073; }
+.student-stage-badge[data-stage="school_application"] { --stage-ink: #11624f; }
+.student-stage-badge[data-stage="offer_received"] { --stage-ink: #493b9e; }
+.student-stage-badge[data-stage="acceptance_required"] { --stage-ink: #663e8f; }
+.student-stage-badge[data-stage="payment_required"] { --stage-ink: #815c19; }
+.student-stage-badge[data-stage="accepted_and_paid"] { --stage-ink: #28633b; }
+.student-stage-badge[data-stage="coe_update"] { --stage-ink: #466328; }
+.student-stage-badge[data-stage="pending_completion"] { --stage-ink: #166859; }
+.student-stage-badge[data-stage="offer_accepted"] { --stage-ink: #3c50a2; }
+.student-stage-badge[data-stage="paid"] { --stage-ink: #285c5b; }
+.student-stage-badge[data-stage="waiting_coe"] { --stage-ink: #8d3c15; }
+.student-stage-badge[data-stage="coe_received"] { --stage-ink: #325d46; }
+.student-stage-badge[data-stage="application_complete"] { --stage-ink: #4d5c31; }
+.student-stage-badge[data-stage="transfer_active"] { --stage-ink: #214f83; }
+.student-stage-badge[data-stage="transfer_contract_pending"] { --stage-ink: #7f4426; }
+.student-stage-badge[data-stage="transfer_contract_ready"] { --stage-ink: #345a7d; }
+.student-stage-badge[data-stage="transfer_projection_error"] { --stage-ink: #98343e; }
+.student-stage-badge[data-stage="transfer_completed"] { --stage-ink: #20634d; }
+.student-stage-badge[data-stage="transfer_closed"] { --stage-ink: #45566e; }
+.student-stage-badge[data-stage="legacy_unconfirmed"] { --stage-ink: #746012; }
+.student-stage-badge[data-stage="cancelled"] { --stage-ink: #75464b; }
+.student-stage-badge[data-stage="closed"] { --stage-ink: #4d5564; }
+.student-stage-badge[data-stage="granted"] { --stage-ink: #3a651b; }
+.student-stage-badge[data-stage="refused"] { --stage-ink: #a22b2b; }
+.student-stage-badge[data-stage="not_started"] { --stage-ink: #59616d; }
+.student-stage-badge[data-stage="no_cycle"] { --stage-ink: #5f5271; }
+.student-stage-badge[data-stage="no_counted_stage"] { --stage-ink: #60584b; }
+.student-stage-badge[data-stage="held_paused"] { --stage-ink: #716020; }
+.student-stage-badge[data-stage="held_cancelled"] { --stage-ink: #723f52; }
+.student-stage-badge[data-stage="held_failed"] { --stage-ink: #90383e; }
+.student-stage-badge[data-stage="held_archived"] { --stage-ink: #4d5269; }
+.student-stage-badge[data-stage="held_completed"] { --stage-ink: #226348; }
+.student-stage-badge[data-stage="no_active_lifecycle"] { --stage-ink: #49535f; }
+.student-stage-badge[data-stage="workflow_error"] { --stage-ink: #921d31; }
+.student-stage-badge[data-stage="waiting_parent_form"] { --stage-ink: #35469c; }
+.student-stage-badge[data-stage="waiting_contract_signature"] { --stage-ink: #843a23; }
+.student-stage-badge[data-stage="waiting_submission"] { --stage-ink: #006051; }
+.student-stage-badge[data-stage="waiting_school_offer"] { --stage-ink: #234f98; }
+.student-stage-badge[data-stage="waiting_final_school"] { --stage-ink: #88387b; }
+.student-stage-badge[data-stage="visa_preparation"] { --stage-ink: #3f4d85; }
+.student-stage-badge[data-stage="waiting_visa_result"] { --stage-ink: #833d62; }
+
+@media (max-width: 1000px) {
+  [data-student-management-application-summary] .student-workbench-primary {
+    grid-template-columns: minmax(160px, 1fr) minmax(130px, .8fr) minmax(100px, .6fr);
+  }
+
+  [data-student-management-application-summary] .student-workbench-primary-actions {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 640px) {
+  [data-student-management-application-summary] .student-workbench-primary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  [data-student-management-application-summary] .student-workbench-primary .filter-search-field,
+  [data-student-management-application-summary] .student-workbench-advanced .student-filter-groups {
+    grid-column: 1 / -1;
+    grid-template-columns: 1fr;
+  }
+}
+
 [data-student-management-application-summary] .student-management-table-wrap {
   width: 100%;
   min-width: 0;

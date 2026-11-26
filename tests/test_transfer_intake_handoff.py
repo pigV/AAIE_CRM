@@ -98,11 +98,15 @@ class TransferIntakeHandoffTests(unittest.TestCase):
         self.c.execute('UPDATE users SET is_active=0 WHERE id=1');self.c.commit()
         with self.assertRaises(ValueError): self.confirm()
 
-    def test_form_drift_requires_reconfirmation(self):
+    def test_school_form_drift_does_not_block_fee_or_overwrite_current(self):
         self.confirm()
         self.form['current_school_year_level']='Year 9'
         self.c.execute("UPDATE students SET form_data_json=? WHERE student_id='S2'",(json.dumps(self.form),));self.c.commit()
-        with self.assertRaises(ValueError): self.svc().handoff_signed_transfer(self.c,102,actor_user_id=1,occurred_at=NOW)
+        with self.c:
+            self.c.execute('BEGIN IMMEDIATE')
+            result=self.svc().handoff_signed_transfer(self.c,102,actor_user_id=1,occurred_at=NOW)
+        self.assertEqual('completed',result['status'])
+        self.assertEqual('Year 7',self.c.execute("SELECT year_level_snapshot FROM student_school_enrolments WHERE student_id='S2'").fetchone()[0])
 
     def test_signed_handoff_creates_empty_target_cycle_and_retries_without_duplicates(self):
         self.confirm()
@@ -122,11 +126,25 @@ class TransferIntakeHandoffTests(unittest.TestCase):
         self.assertFalse(overview.is_legacy)
         self.assertFalse(overview.branches)
 
-    def test_pending_school_confirmation_retains_signed_contract(self):
-        with self.assertRaises(ValueError):
-            with self.c: self.svc().handoff_signed_transfer(self.c,102,actor_user_id=1,occurred_at=NOW)
-        self.assertEqual('FullyExecuted',self.c.execute('SELECT contract_status FROM contracts WHERE id=102').fetchone()[0])
-        self.assertIsNone(self.c.execute('SELECT application_cycle_id FROM contracts WHERE id=102').fetchone()[0])
+    def test_signed_handoff_does_not_require_school_confirmation(self):
+        with self.c:
+            self.c.execute('BEGIN IMMEDIATE')
+            result=self.svc().handoff_signed_transfer(self.c,102,actor_user_id=1,occurred_at=NOW)
+        self.assertEqual('completed',result['status'])
+        self.assertEqual(0,self.c.execute("SELECT count(*) FROM student_school_enrolments WHERE student_id='S2'").fetchone()[0])
+
+    def test_recovery_panel_offers_retry_without_a_school_confirmation_form(self):
+        from student_lifecycle.transfer_intake_views import signed_handoff_panels
+        self.c.executescript("""CREATE TABLE external_transfer_case_requests(
+            contract_id INTEGER,request_status TEXT,last_error_message TEXT,id INTEGER);
+            CREATE TABLE revenue_fee_item_contract_links(contract_id INTEGER,fee_item_id INTEGER);
+            CREATE TABLE revenue_fee_items(id INTEGER,status TEXT);
+            INSERT INTO external_transfer_case_requests VALUES(102,'failed','合同已签妥，待工作人员确认当前学校及年级。',1);""")
+        html=signed_handoff_panels(self.c,'S2',csrf='csrf',can_manage=True)
+        self.assertIn('/transfer-intake/102/retry',html)
+        self.assertNotIn('transfer_current_confirmed',html)
+        self.assertNotIn('/transfer-intake/102/confirm',html)
+        self.assertNotIn('待工作人员确认当前学校及年级',html)
 
     def test_caller_rollback_removes_handoff_but_preserves_prior_signature(self):
         self.confirm()
@@ -152,20 +170,23 @@ class TransferIntakeHandoffTests(unittest.TestCase):
         self.assertFalse(overview.branches)
         self.assertEqual('aaie_existing',overview.source_label)
 
-    def test_failed_handoff_is_visible_and_can_be_retried_after_confirmation(self):
+    def test_failed_handoff_is_visible_and_can_be_retried_after_intake_repair(self):
         self.c.executescript('''CREATE TABLE external_transfer_case_requests(
             id INTEGER PRIMARY KEY,student_id TEXT,contract_id INTEGER,idempotency_key TEXT UNIQUE,
             request_status TEXT,case_id INTEGER,attempt_count INTEGER DEFAULT 0,
             last_error_code TEXT,last_error_message TEXT,next_retry_at TEXT,created_at TEXT,
             updated_at TEXT,completed_at TEXT);''')
+        self.form['preferred_intake_term']='invalid'
+        self.c.execute("UPDATE students SET form_data_json=? WHERE student_id='S2'",(json.dumps(self.form),));self.c.commit()
         with self.c:
             self.c.execute('BEGIN IMMEDIATE')
             result=self.svc().attempt_signed_transfer(self.c,102,actor_user_id=1,occurred_at=NOW)
         self.assertEqual('failed',result['status'])
         row=self.c.execute('SELECT * FROM external_transfer_case_requests').fetchone()
-        self.assertIn('确认',row['last_error_message'])
+        self.assertIn('入学月份',row['last_error_message'])
         self.assertEqual('FullyExecuted',self.c.execute('SELECT contract_status FROM contracts WHERE id=102').fetchone()[0])
-        self.confirm()
+        self.form['preferred_intake_term']='02'
+        self.c.execute("UPDATE students SET form_data_json=? WHERE student_id='S2'",(json.dumps(self.form),));self.c.commit()
         with self.c:
             self.c.execute('BEGIN IMMEDIATE')
             result=self.svc().attempt_signed_transfer(self.c,102,actor_user_id=1,occurred_at=NOW)

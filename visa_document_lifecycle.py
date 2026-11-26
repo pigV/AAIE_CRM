@@ -3,8 +3,9 @@ import hashlib
 import json
 from pathlib import Path
 from visa_documents_candidate import _row, _rows, propose_letter
-from visa_document_metadata import LEGACY, effective_metadata
+from visa_document_metadata import LEGACY
 from visa_processing_dates import parse_processing_dates, processing_summary, _field, _metrics
+from snapshot_read_cache import memoized_read
 
 SINGLE_ACTIVE = {'grant_letter', 'immi_acknowledgment'}
 KIND_CATEGORY = {'bridging_visa':'bridging_visa', 'grant':'grant_letter', 'refusal':'refusal_letter', 'lodgement_receipt':'immi_acknowledgment', 'medical':'health_examination'}
@@ -34,57 +35,106 @@ def material_category(link, source, *, manual_grant=False):
 
 
 def tables(conn):
-    from snapshot_read_cache import memoized_read
-    return memoized_read(conn,('visa_schema_tables',),lambda:frozenset(
+    return memoized_read(conn, ('visa_schema_tables',), lambda: frozenset(
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")))
 
 
+def _columns(conn, table):
+    return memoized_read(conn, ('visa_schema_columns', table), lambda: frozenset(
+        row[1] for row in conn.execute(f'PRAGMA table_info({table})')))
+
+
+def _batches(values):
+    values = tuple(dict.fromkeys(values))
+    for offset in range(0, len(values), 400):
+        batch = values[offset:offset + 400]
+        yield batch, ','.join('?' for _ in batch)
+
+
 def active_documents(conn, case_id):
+    # Workflow status and the student's grant date both read this evidence.
+    # Reuse it only within one read-only snapshot and keep mutable rows private.
+    documents = memoized_read(conn, ('visa_active_documents', case_id),
+                              lambda: _active_documents(conn, case_id))
+    return [dict(document) for document in documents]
+
+
+def _active_documents(conn, case_id):
     case = _row(conn, 'SELECT * FROM visa_cases WHERE id=?', (case_id,))
     if not case or case.get('archived_at'):
         return []
     present = tables(conn)
     from visa_business_state import audited_legacy_manual_grant, legacy_manual_source_matches
-    manual=audited_legacy_manual_grant(conn,case)
+    manual = audited_legacy_manual_grant(conn, case)
     registered = _rows(conn, 'SELECT * FROM visa_case_documents WHERE visa_case_id=?', (case_id,)) if 'visa_case_documents' in present else []
-    owned = {d['student_document_id'] for d in registered if d.get('student_document_id')}
-    candidates = [d for d in registered if not d.get('archived_at')]
+    owned = {doc['student_document_id'] for doc in registered if doc.get('student_document_id')}
+    candidates = [doc for doc in registered if not doc.get('archived_at')]
     links = {}
+    unregistered_sources = []
     if 'visa_case_document_links' in present:
-        cols = {r[1] for r in conn.execute('PRAGMA table_info(visa_case_document_links)')}
+        cols = _columns(conn, 'visa_case_document_links')
         expr = 'COALESCE(student_document_id,document_id)' if {'student_document_id','document_id'} <= cols else 'student_document_id' if 'student_document_id' in cols else 'document_id'
         for link in _rows(conn, f'SELECT *, {expr} AS sid FROM visa_case_document_links WHERE visa_case_id=?', (case_id,)):
-            links.setdefault(link['sid'], []).append(link)
-            if (str(link.get('status') or 'Linked').lower() != 'linked'
-                    or link.get('used_in_this_case', 1) != 1):
-                continue
-            if link['sid'] in owned:
-                continue
-            source = _row(conn, 'SELECT * FROM student_documents WHERE id=? AND student_id=?', (link['sid'],case.get('student_id')))
-            if source:
-                candidates.append(dict(source, id=None, student_document_id=source['id'], visa_case_id=case_id))
-                owned.add(source['id'])
+            source_id = link['sid']
+            links.setdefault(source_id, []).append(link)
+            if (source_id is not None and source_id not in owned
+                    and str(link.get('status') or 'Linked').lower() == 'linked'
+                    and link.get('used_in_this_case', 1) == 1):
+                unregistered_sources.append(source_id)
+
+    source_ids = [doc['student_document_id'] for doc in candidates if doc.get('student_document_id')]
+    sources = {}
+    for batch, marks in _batches(source_ids + unregistered_sources):
+        sources.update((row['id'], row) for row in _rows(
+            conn, f'SELECT * FROM student_documents WHERE id IN ({marks}) AND student_id IS ?',
+            (*batch, case.get('student_id'))))
+    legacy_sources = dict.fromkeys(unregistered_sources) if case.get('student_id') is not None else {}
+    for source_id in legacy_sources:
+        if source := sources.get(source_id):
+            candidates.append(dict(source, id=None, student_document_id=source['id'], visa_case_id=case_id))
+
+    metadata = {}
+    selections = {}
+    if candidates and registered:
+        if 'visa_document_metadata' in present:
+            metadata = {row['document_id']: row for row in _rows(conn, """
+                SELECT meta.document_id,meta.manual_category,meta.auto_category
+                FROM visa_case_documents doc JOIN visa_document_metadata meta ON meta.document_id=doc.id
+                WHERE doc.visa_case_id=? AND COALESCE(doc.archived_at,'')=''
+            """, (case_id,))}
+        if 'visa_document_audit' in present:
+            selections = {row['document_id']: row for row in _rows(conn, """
+                SELECT audit.document_id,audit.after_json
+                FROM visa_document_audit audit
+                JOIN (
+                    SELECT MAX(id) id FROM visa_document_audit
+                    WHERE visa_case_id=? AND action='document_category_selected' AND document_id IS NOT NULL
+                    GROUP BY document_id
+                ) latest ON latest.id=audit.id
+            """, (case_id,))}
+
     result = []
     for doc in candidates:
         sid = doc.get('student_document_id')
-        source = _row(conn, 'SELECT * FROM student_documents WHERE id=?', (sid,)) if sid else None
-        if sid and (not source or source['student_id'] != case.get('student_id') or not source.get('is_active') or source.get('voided_at') or str(source.get('document_status') or 'active').lower() in INACTIVE):
+        source = sources.get(sid)
+        if sid and (not source or source['student_id'] != case.get('student_id')
+                    or not source.get('is_active') or source.get('voided_at')
+                    or str(source.get('document_status') or 'active').lower() in INACTIVE):
             continue
-        category = LEGACY.get(source.get('document_type'),'other') if source else 'other'
+        category = LEGACY.get(source.get('document_type'), 'other') if source else 'other'
         linked = links.get(sid, [])
-        manual_grant=bool(manual and legacy_manual_source_matches(conn,case,sid,manual=manual))
+        manual_grant = bool(manual and legacy_manual_source_matches(conn, case, sid, manual=manual))
         confirmed = {material_category(link, source or {}, manual_grant=manual_grant) for link in linked} - {None}
         authority_category = next(iter(confirmed)) if len(confirmed) == 1 else None
-        selected_category = None
-        manual_category=False
-        if doc.get('id') and 'visa_document_metadata' in present:
-            metadata=effective_metadata(conn, case_id, doc['id'])
-            category=metadata['effective_category'];manual_category=metadata['manual_override']
-        if doc.get('id'):
-            selected = _row(conn, "SELECT after_json FROM visa_document_audit WHERE visa_case_id=? AND document_id=? AND action='document_category_selected' ORDER BY id DESC LIMIT 1", (case_id,doc['id'])) if 'visa_document_audit' in present else None
-            if selected and not manual_category:
-                category = json.loads(selected['after_json'])['category']
-            selected_category = category if manual_category or (selected and json.loads(selected['after_json']).get('confirmed') is True) else None
+        meta = metadata.get(doc.get('id'), {})
+        manual_category = meta.get('manual_category') is not None
+        category = meta.get('manual_category') or meta.get('auto_category') or category
+        selected_row = selections.get(doc.get('id'))
+        selected = None
+        if selected_row and not manual_category:
+            selected = json.loads(selected_row['after_json'])
+            category = selected['category']
+        selected_category = category if manual_category or (selected and selected.get('confirmed') is True) else None
         if selected_category is not None:
             # Dedicated case workspace classification is a staff confirmation.
             # For checklist-backed files it cannot turn Draft/Other/history into
@@ -274,18 +324,49 @@ def case_projection(conn, case_id, *, read_text=None):
             **({'auto_detected_result':auto_detected_result,'recorded_grant_date':recorded_grant_date} if unified else {})}
 
 
+def _student_case_ids(conn, student_ids):
+    """Choose the same current case(s) for the detail and list projections."""
+    if not student_ids:
+        return {}
+    present = tables(conn)
+    if 'visa_case_documents' not in present:
+        return {}
+    cols = _columns(conn, 'visa_cases')
+    subclass = "AND COALESCE(visa.visa_subclass,'500') <> '590'" if 'visa_subclass' in cols else ''
+    order = 'visa.created_at DESC,' if 'created_at' in cols else ''
+    cycle = """(
+        SELECT id FROM application_cycles
+        WHERE student_id=requested.student_id
+        ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END,opened_at DESC,id DESC LIMIT 1
+    )""" if 'application_cycles' in present else 'NULL'
+    cycle_scope = ('AND (scoped.cycle_id IS NULL OR visa.application_cycle_id=scoped.cycle_id)'
+                   if 'application_cycles' in present else '')
+    selected = {}
+    for ids, _ in _batches(student_ids):
+        values = ','.join('(?)' for _ in ids)
+        for student_id, case_id in conn.execute(f"""
+            WITH requested(student_id) AS (VALUES {values}), scoped AS (
+                SELECT student_id,{cycle} AS cycle_id FROM requested
+            )
+            SELECT scoped.student_id,(
+                SELECT visa.id FROM visa_cases visa
+                WHERE visa.student_id=scoped.student_id AND visa.archived_at IS NULL
+                {cycle_scope} {subclass}
+                ORDER BY {order}visa.id DESC LIMIT 1
+            )
+            FROM scoped
+        """, ids):
+            if case_id is not None:
+                selected[student_id] = case_id
+    return selected
+
+
+def student_grant_date_map(conn, student_ids):
+    """Omit students without a current Case, retain authoritative empty dates."""
+    return {student_id: case_projection(conn, case_id)['grant_date']
+            for student_id, case_id in _student_case_ids(conn, student_ids).items()}
+
+
 def student_projection(conn, student_id):
-    if 'visa_case_documents' not in tables(conn):
-        return None
-    # An explicit active cycle constrains the current Case. Closed latest cycle is
-    # used only when there is no active cycle; historical grants cannot leak in.
-    cycle = _row(conn,"SELECT id FROM application_cycles WHERE student_id=? ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END,opened_at DESC,id DESC LIMIT 1",(student_id,)) if 'application_cycles' in tables(conn) else None
-    sql = 'SELECT * FROM visa_cases WHERE student_id=? AND archived_at IS NULL'
-    args = [student_id]
-    if cycle:
-        sql += ' AND application_cycle_id=?';args.append(cycle['id'])
-    cols = {r[1] for r in conn.execute('PRAGMA table_info(visa_cases)')}
-    if 'visa_subclass' in cols:sql += " AND COALESCE(visa_subclass,'500') <> '590'"
-    sql += ' ORDER BY '+('created_at DESC,' if 'created_at' in cols else '')+'id DESC'
-    cases = _rows(conn,sql,args)
-    return case_projection(conn,cases[0]['id']) if cases else None
+    case_id = _student_case_ids(conn, (student_id,)).get(student_id)
+    return case_projection(conn, case_id) if case_id is not None else None

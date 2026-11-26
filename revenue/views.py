@@ -1460,7 +1460,12 @@ def render_revenue_case_workbench(
                 f'<a href="{escape(str(item["receipt_view_url"]), quote=True)}">{escape(str(item.get("receipt_number") or "查看收据"))}</a>'
                 if item.get("receipt_view_url") else "待生成"
             )
-            payment_cards.append(definition_list([
+            visa_identity = [
+                (label, render_value(item[key]))
+                for label, key in (("申请人", "visa_applicant_name"), ("签证类别", "visa_category"))
+                if item.get(key)
+            ]
+            payment_cards.append(definition_list(visa_identity + [
                 ("收款日期", render_value(item.get("date_display"))),
                 ("付款方式", render_value(item.get("method_label"))),
                 ("实际到账", _currency_money(str(item.get("currency_code") or "AUD"), int(item.get("actual_amount_cents") or 0))),

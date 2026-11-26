@@ -36,7 +36,7 @@ def _transaction(conn):
         raise ValueError('转学衔接必须在调用方事务内执行。')
 
 
-def parent_school_preview(conn, student_id, parent_form_token):
+def parent_school_preview(conn, student_id, parent_form_token, *, require_school=True):
     """Return an exact, read-only parent-school candidate; ambiguity stays visible."""
     links = _dicts(conn, """SELECT student_id,intake_type,submitted_at,invalidated_at
         FROM parent_form_tokens WHERE token=?""", (parent_form_token,))
@@ -60,7 +60,7 @@ def parent_school_preview(conn, student_id, parent_form_token):
     form = json.loads(students[0]['form_data_json'] or '{}')
     name = str(form.get('current_school_name') or '').strip()
     year = str(form.get('current_school_year_level') or form.get('current_year_level') or '').strip()
-    if not name or year not in {f'Year {n}' for n in range(1, 13)}:
+    if require_school and (not name or year not in {f'Year {n}' for n in range(1, 13)}):
         raise ValueError('家长资料缺少有效的当前学校或年级，请先核对。')
     matches = [row for row in _dicts(conn, """SELECT id,school_name,state,region,school_type,sector_key
         FROM schools WHERE COALESCE(deleted_at,'')=''""")
@@ -189,8 +189,8 @@ def handoff_signed_transfer(conn, contract_id, *, actor_user_id, occurred_at):
     """Atomically attach a signed contract, one Transfer cycle and its service fee."""
     from student_lifecycle.transfer_v2_service import TransferV2Service
     from student_lifecycle.transfer_v2_models import TransferV2CreateInput
-    from student_lifecycle.case_enrolment import bind_case_current_enrolment
     from revenue.operational_integration import process_revenue_contract_completion
+    from revenue.parent_guardian_intake import complete_deferred_guardian_fee
     _transaction(conn)
     authority._audit(conn, actor_user_id, occurred_at)
     contracts = _dicts(conn, 'SELECT * FROM contracts WHERE id=?', (contract_id,))
@@ -213,9 +213,17 @@ def handoff_signed_transfer(conn, contract_id, *, actor_user_id, occurred_at):
             raise ValueError('已关联的合同与转学轮次归属不一致。')
         process_revenue_contract_completion(conn, contract_id, actor_user_id, occurred_at)
         _require_completed_fee(conn, contract_id, cid)
+        complete_deferred_guardian_fee(conn, sid, cid, source['parent_form_token'], occurred_at=occurred_at)
         return {'cycle_id': cid, 'case_id': rows[0]['source_student_case_id'], 'status': 'completed'}
     source = authority.resolve_for_creation(conn, sid, contract_id)
-    current, preview = _confirmed_current(conn, sid, source)
+    defer_current_school = source['source_classification'] == 'new_transfer'
+    if defer_current_school:
+        preview = parent_school_preview(conn, sid, source['parent_form_token'], require_school=False)
+        current = {'school_id': preview['suggested_school_id'],
+                   'school_name_snapshot': preview['parent_school_name'],
+                   'year_level_snapshot': preview['year_level'] if preview['year_level'] in {f'Year {n}' for n in range(1, 13)} else ''}
+    else:
+        current, preview = _confirmed_current(conn, sid, source)
     form = preview['form'] if preview else json.loads(_dicts(conn, 'SELECT form_data_json FROM students WHERE student_id=?', (sid,))[0]['form_data_json'] or '{}')
     term = INTAKE_TERMS.get(str(form.get('preferred_intake_term') or ''))
     if term is None:
@@ -234,9 +242,10 @@ def handoff_signed_transfer(conn, contract_id, *, actor_user_id, occurred_at):
         transfer_year=int(form.get('preferred_intake_year') or 0), transfer_term=term, targets=())
     service = TransferV2Service(':memory:', clock=lambda: occurred_at)
     overview = service.create_cycle(request, actor_user_id=actor_user_id,
-        idempotency_key=f'signed-transfer-handoff:{int(contract_id)}', connection=conn)
-    bind_case_current_enrolment(conn, case_id=overview.case_id, lifecycle_type='transfer')
+        idempotency_key=f'signed-transfer-handoff:{int(contract_id)}', connection=conn,
+        defer_current_school=defer_current_school)
     _require_completed_fee(conn, contract_id, overview.cycle_id)
+    complete_deferred_guardian_fee(conn, sid, overview.cycle_id, source['parent_form_token'], occurred_at=occurred_at)
     return {'cycle_id': overview.cycle_id, 'case_id': overview.case_id, 'status': 'completed'}
 
 

@@ -17,7 +17,7 @@ from business_changes.read_admission import limit_snapshot_reads
 
 
 class BusinessChangeSyncMixin:
-    BUSINESS_SYNC_STUDENT_TABS=frozenset({'applications','contracts','school_plans','offer','payments','coe','visa','homestay','history','reminders','revenue','transfer_cases','progression_cases'})
+    BUSINESS_SYNC_STUDENT_TABS=frozenset({'applications','contracts','school_plans','offer','payments','coe','visa','homestay','history','reminders','transfer_cases','progression_cases'})
 
     def business_change_runtime(self):
         raise NotImplementedError('the owning app must supply its runtime explicitly')

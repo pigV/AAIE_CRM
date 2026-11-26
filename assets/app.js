@@ -537,6 +537,7 @@
     const field = input.closest(".filter-search-field") || input.parentElement;
     const suggestionsRoot = field ? q("[data-student-search-suggestions]", field) : null;
     if (!form || !source || !suggestionsRoot) return;
+    const selection = form.elements?.namedItem("selected_student_id");
     input.dataset.studentSearchBound = "1";
     let suggestions = [];
     try {
@@ -544,23 +545,24 @@
     } catch (_) {
       suggestions = [];
     }
-    let lastSubmittedValue = "";
     let activeIndex = -1;
     let visibleSuggestions = [];
     let renderTimer = 0;
 
     const closeSuggestions = () => {
+      window.clearTimeout(renderTimer);
       suggestionsRoot.hidden = true;
       suggestionsRoot.innerHTML = "";
       input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
       activeIndex = -1;
       visibleSuggestions = [];
     };
 
     const submitSelectedStudent = (student) => {
-      if (!student || student.value === lastSubmittedValue) return;
-      input.value = student.value || "";
-      lastSubmittedValue = input.value;
+      if (!student?.student_id) return;
+      input.value = student.student_id;
+      if (selection) selection.value = student.student_id;
       closeSuggestions();
       if (typeof form.requestSubmit === "function") {
         form.requestSubmit();
@@ -572,8 +574,12 @@
     const setActive = (index) => {
       activeIndex = index;
       qa("button", suggestionsRoot).forEach((button, buttonIndex) => {
-        button.classList.toggle("active", buttonIndex === activeIndex);
+        const active = buttonIndex === activeIndex;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+        if (active) input.setAttribute("aria-activedescendant", button.id);
       });
+      if (index < 0) input.removeAttribute("aria-activedescendant");
     };
 
     const renderSuggestions = () => {
@@ -593,6 +599,9 @@
       visibleSuggestions.forEach((item, index) => {
         const button = document.createElement("button");
         button.type = "button";
+        button.id = `${sourceId}-option-${index}`;
+        button.tabIndex = -1;
+        button.setAttribute("role", "option");
         button.dataset.studentSuggestionIndex = String(index);
         button.innerHTML = `<strong>${escapeHtml(item.value || "")}</strong><span>${escapeHtml(item.student_id || "")}</span>`;
         suggestionsRoot.appendChild(button);
@@ -607,11 +616,16 @@
       renderTimer = window.setTimeout(renderSuggestions, 120);
     };
 
-    input.addEventListener("input", scheduleRender);
+    input.addEventListener("input", () => {
+      if (selection) selection.value = "";
+      closeSuggestions();
+      scheduleRender();
+    });
     input.addEventListener("focus", () => {
       if (input.value.trim().length >= 1) scheduleRender();
     });
     input.addEventListener("keydown", (event) => {
+      if (event.isComposing) return;
       if (suggestionsRoot.hidden || !visibleSuggestions.length) {
         if (event.key === "Escape") closeSuggestions();
         return;
@@ -631,8 +645,11 @@
     });
     suggestionsRoot.addEventListener("mousedown", (event) => {
       const button = event.target.closest("button[data-student-suggestion-index]");
+      if (button) event.preventDefault();
+    });
+    suggestionsRoot.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-student-suggestion-index]");
       if (!button) return;
-      event.preventDefault();
       submitSelectedStudent(visibleSuggestions[Number(button.dataset.studentSuggestionIndex)]);
     });
     field.addEventListener("focusout", (event) => {

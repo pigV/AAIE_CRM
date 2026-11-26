@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from revenue.first_year_tuition import first_year_records, school_components
 from revenue.read_models import RevenueReadModels, exception_code_label
-from revenue.visa_fee_policy import fee_display_description
+from revenue.visa_fee_policy import VISA_CATEGORY_LABELS, fee_display_description, fee_visa_case, visa_subclass
 
 
 class RevenueWorkbench:
@@ -326,8 +326,7 @@ class RevenueWorkbench:
             "add_payment_href": f"{billing_url}?item={quote(uid, safe='')}#revenue-action",
         }
 
-    @classmethod
-    def _payment_summary(cls, item):
+    def _payment_summary(self, item):
         method_labels = {
             "alipay": "支付宝",
             "wechat": "微信",
@@ -335,8 +334,14 @@ class RevenueWorkbench:
             "au_company_account": "澳洲公司账号",
         }
         method_code = str(item.get("client_payment_method") or "")
+        fee_uid = item.get("client_fee_uid")
+        visa = fee_visa_case(self.connection, fee_uid) if fee_uid else None
+        applicant = str(visa.get("applicant_name") or visa.get("main_applicant") or "").strip() if visa else ""
+        subclass = visa_subclass(visa) if visa else None
         return {
-            "date_display": cls._melbourne_date(item.get("received_date")),
+            "date_display": self._melbourne_date(item.get("received_date")),
+            "visa_applicant_name": applicant or None,
+            "visa_category": f"{subclass} {VISA_CATEGORY_LABELS[subclass]}" if subclass else None,
             "method_label": method_labels.get(method_code, method_code or "其他方式"),
             "currency_code": str(item.get("currency_code") or "AUD"),
             "actual_amount_cents": int(item.get("amount_cents") or 0),
@@ -469,6 +474,7 @@ class RevenueWorkbench:
     def _case_payments(self, case_id):
         return self._rows(
             """SELECT DISTINCT p.*,
+                      CASE WHEN cf.commercial_case_id=? THEN cf.uid END AS client_fee_uid,
                       ca.allocated_base_cents AS client_base_received_cents,
                       ca.gst_cents AS client_gst_cents,
                       ca.method_code_snapshot AS client_payment_method,
@@ -493,7 +499,7 @@ class RevenueWorkbench:
                   AND COALESCE(ed.document_kind,'') NOT IN ('toorak_school_remittance_evidence',
                                                          'school_commission_remittance_evidence')
                 ORDER BY p.id""",
-            (case_id, case_id, case_id),
+            (case_id, case_id, case_id, case_id),
         )
 
     def _client_fee_items(self, case_id):

@@ -789,7 +789,7 @@ class BusinessChangeHTTPTests(unittest.TestCase):
 
     def test_student_lazy_tabs_have_authoritative_permission_checked_snapshots(self):
         before=self.app.db.one('SELECT count(*) FROM business_change_events')[0]
-        for tab in ('applications','contracts','school_plans','offer','payments','coe','visa','homestay','history','reminders','revenue'):
+        for tab in ('applications','contracts','school_plans','offer','payments','coe','visa','homestay','history','reminders'):
             with self.subTest(tab=tab):
                 path='/api/business-changes/snapshot?'+urlencode({'surface':'student_tab','student_id':self.sid,'tab':tab})
                 status,_,body=self.request_static(path)
@@ -799,6 +799,13 @@ class BusinessChangeHTTPTests(unittest.TestCase):
         self.assertEqual(before,self.app.db.one('SELECT count(*) FROM business_change_events')[0])
         status,_,body=self.request_static(f'/students/{self.sid}/tab/applications')
         self.assertEqual(200,status,body[:500]);self.assertIn(b'student-tab-applications',body)
+        status,_,body=self.request_static(f'/students/{self.sid}/tab/revenue')
+        self.assertEqual(200,status,body[:500])
+        self.assertIn(f'/revenue/cases?student={self.sid}'.encode(),body)
+        self.assertNotIn(b'data-business-sync-endpoint',body)
+        status,_,body=self.request_static('/api/business-changes/snapshot?surface=student_tab&student_id='+self.sid+'&tab=revenue')
+        self.assertEqual(400,status)
+        self.assertEqual('unknown_student_tab',json.loads(body)['code'])
         status,_,_=self.request_static('/api/business-changes/snapshot?surface=student_tab&student_id='+self.sid+'&tab=applications',token=None)
         self.assertEqual(401,status)
 

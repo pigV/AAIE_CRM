@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import unittest
+from unittest.mock import patch
 
 import app
 
@@ -35,13 +36,23 @@ class RevenueContextualUITests(RevenueDatabaseFixture, unittest.TestCase):
         self.assertIn(f'/revenue/cases/{case["uid"]}', html)
         self.assertIn("申请周期 #100", html)
 
-    def test_student_revenue_tab_uses_central_access_policy(self):
-        dispatch = inspect.getsource(app.CRMHandler.dispatch)
-        self.assertIn("history|reminders|revenue", dispatch)
-        detail = inspect.getsource(app.CRMHandler.student_detail)
-        self.assertIn('(\"revenue\", \"收入与佣金\", can_access_revenue(self.user))', detail)
-        tab = inspect.getsource(app.CRMHandler.student_detail_tab)
-        self.assertIn('\"revenue\": can_access_revenue(self.user)', tab)
+    def test_student_revenue_tab_is_removed_and_old_panel_offers_finance_link(self):
+        detail = inspect.getsource(app.CRMLegacyHandler.student_detail)
+        self.assertNotIn('("revenue", "收入与佣金"', detail)
+        self.assertNotIn("revenue", app.CRMHandler.BUSINESS_SYNC_STUDENT_TABS)
+        handler = app.CRMHandler.__new__(app.CRMHandler)
+        handler.user = {}
+        handler.require = lambda _permission: True
+        handler.student_detail_row = lambda student_id: {"student_id": student_id}
+        handler.send_html = lambda content, **_kwargs: content
+        handler.deny_module_access = lambda _module: "denied"
+        with patch.object(app, "can_access_revenue", return_value=True):
+            html = app.CRMHandler.student_detail_tab(handler, "GET", "20260069", "revenue")
+        self.assertIn('href="/revenue/cases?student=20260069"', html)
+        self.assertNotIn("申请周期", html)
+        with patch.object(app, "can_access_revenue", return_value=False):
+            self.assertEqual("denied", app.CRMHandler.student_detail_tab(handler, "GET", "20260069", "revenue"))
+
     def test_context_resolver_supports_all_authoritative_entry_types(self):
         with self.connect() as connection:
             service = RevenueService(RevenueRepository(connection))

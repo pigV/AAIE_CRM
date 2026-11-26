@@ -137,7 +137,7 @@ class TransferV2Service:
                 return None
 
     def _validate_request(
-        self, connection: sqlite3.Connection, request: TransferV2CreateInput
+        self, connection: sqlite3.Connection, request: TransferV2CreateInput, *, school_details_optional=False
     ) -> dict[str, object]:
         student_id = self._required_text(request.student_id, "student")
         if connection.execute(
@@ -183,7 +183,8 @@ class TransferV2Service:
                     "school_type": str(target.school_type or "").strip() or None,
                     "sector": None,
                 })
-        current_name = self._required_text(request.current_school_name, "current school")
+        current_name = (str(request.current_school_name or "").strip() if school_details_optional
+                        else self._required_text(request.current_school_name, "current school"))
         current_snapshot = None
         if request.current_school_id is not None:
             current_snapshot = repository.school_snapshot(
@@ -196,10 +197,9 @@ class TransferV2Service:
                     "school name and identifier do not match"
                 )
             current_name = str(current_snapshot["school_name"])
-        current_year_level = self._required_text(
-            request.current_year_level, "current year level"
-        )
-        if current_year_level not in TRANSFER_YEAR_LEVELS:
+        current_year_level = (str(request.current_year_level or "").strip() if school_details_optional
+                              else self._required_text(request.current_year_level, "current year level"))
+        if current_year_level not in TRANSFER_YEAR_LEVELS and not (school_details_optional and not current_year_level):
             raise TransferV2ValidationError("invalid current year level")
         application_year_level = self._required_text(
             request.application_year_level, "application year level"
@@ -250,6 +250,7 @@ class TransferV2Service:
         actor_user_id: int,
         idempotency_key: str,
         connection=None,
+        defer_current_school: bool = False,
     ) -> TransferV2Overview:
         owns_connection = connection is None
         if not owns_connection and not connection.in_transaction:
@@ -258,6 +259,8 @@ class TransferV2Service:
         student_id = self._required_text(request.student_id, "student")
         operation = "create_transfer_v2"
         request_payload = asdict(request)
+        if defer_current_school:
+            request_payload["defer_current_school"] = True
         legacy_request_hash = lifecycle_repository.payload_hash(request_payload)
         request_payload.pop("source_label", None)
         request_hash = lifecycle_repository.payload_hash(request_payload)
@@ -292,7 +295,7 @@ class TransferV2Service:
                 if owns_connection:
                     connection.commit()
                 return self.load_overview(cycle_id, connection=connection)
-            values = self._validate_request(connection, request)
+            values = self._validate_request(connection, request, school_details_optional=defer_current_school)
             creation = evaluate_transfer_creation_state(
                 connection, str(values["student_id"])
             )
@@ -326,14 +329,17 @@ class TransferV2Service:
             except source_authority.SourceAuthorityError as exc:
                 raise TransferV2ValidationError(str(exc)) from exc
             values["source_label"] = authority["source_classification"]
+            if defer_current_school and authority['source_classification'] != 'new_transfer':
+                raise TransferV2ValidationError('Only new-student Transfer can defer school details')
             from student_lifecycle.transfer_intake import confirm_staff_current, _require_completed_fee
-            try:
-                current_enrolment_id = confirm_staff_current(
-                    connection, student_id=str(values["student_id"]),
-                    school_id=values["current_school_id"], school_name=values["current_school_name"],
-                    year_level=values["current_year_level"], actor_user_id=int(actor_user_id), occurred_at=timestamp)
-            except ValueError as exc:
-                raise TransferV2ValidationError(str(exc)) from exc
+            if not defer_current_school:
+                try:
+                    confirm_staff_current(
+                        connection, student_id=str(values["student_id"]),
+                        school_id=values["current_school_id"], school_name=values["current_school_name"],
+                        year_level=values["current_year_level"], actor_user_id=int(actor_user_id), occurred_at=timestamp)
+                except ValueError as exc:
+                    raise TransferV2ValidationError(str(exc)) from exc
             if takeover_cycle_id is not None:
                 supersede_safe_initial_for_transfer(
                     connection,
@@ -393,14 +399,26 @@ class TransferV2Service:
                     values["current_school_name"], values["current_school_id"],
                     values["current_sector"], "pending_confirmation",
                     "pending_confirmation", "pending_confirmation", timestamp, timestamp,
-                    values["source_label"], values["current_year_level"],
+                    values["source_label"], values["current_year_level"] or None,
                     values["application_year_level"], values["transfer_year"],
                     values["transfer_term"], values["current_state"],
                     values["current_region"], values["current_school_type"],
                 ),
             )
             from student_lifecycle.case_enrolment import bind_case_current_enrolment
-            bind_case_current_enrolment(connection, case_id=case_id, lifecycle_type="transfer")
+            if not defer_current_school:
+                bind_case_current_enrolment(connection, case_id=case_id, lifecycle_type="transfer")
+            else:
+                # Reuse only an already confirmed matching school; do not turn
+                # parent text into an employee confirmation or overwrite conflicts.
+                current = connection.execute("""SELECT * FROM student_school_enrolments
+                    WHERE student_id=? AND enrolment_role='current' AND status='active'""",
+                    (values["student_id"],)).fetchall()
+                from student_lifecycle.transfer_intake import _normalized
+                if (len(current) == 1 and current[0]['confirmed_by'] and current[0]['confirmed_at']
+                        and _normalized(current[0]['school_name_snapshot']) == _normalized(values['current_school_name'])
+                        and current[0]['year_level_snapshot'] == values['current_year_level']):
+                    bind_case_current_enrolment(connection, case_id=case_id, lifecycle_type="transfer")
             for index, target in enumerate(values["targets"], start=1):
                 branch_uid = self.uid_factory(f"transfer-v2-branch-{cycle_id}-{index}")
                 branch_id = int(connection.execute(
