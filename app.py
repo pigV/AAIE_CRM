@@ -55710,11 +55710,30 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <thead><tr><th><input type="checkbox" aria-label="Select all"></th><th>学生号</th><th>学生名</th><th>申请阶段</th><th>最终确认学校</th><th>申请年级</th><th>建档时间</th><th>Offer开学时间</th><th>下签时间</th><th class="student-actions-heading">操作</th></tr></thead>
               <tbody>{rows_html}</tbody>
             </table></div>"""
-        advanced_open = " open" if any((sort != "recent", lifecycle_type_filter, year_filter,
-                                         alert_filter, contract_filter, created_from, created_to,
-                                         updated_from, updated_to)) else ""
+        from student_management_filters import render_applied_filters
+
+        stage_label = dict(management_stages).get(stage_filter, stage_filter)
+        consultant_name = next(
+            (user["display_name"] for user in consultants if str(user["id"]) == consultant_filter),
+            f"#{consultant_filter}",
+        )
+        lifecycle_label = {"initial": "首次申请", "transfer": "转学", "progression": "升学"}
+        applied_filters = render_applied_filters((
+            ("q", q, f"搜索：{q}"),
+            ("stage", stage_filter, f"阶段：{stage_label}"),
+            ("consultant_id", consultant_filter, f"顾问：{consultant_name}"),
+            ("lifecycle_type", lifecycle_type_filter, f"申请类型：{lifecycle_label.get(lifecycle_type_filter, '')}"),
+            ("year_level", year_filter, f"年级：{year_filter}"),
+            ("alert", alert_filter, f"提醒：{dict(alert_options).get(alert_filter, alert_filter)}"),
+            ("contract_status", contract_filter, f"合同：{CONTRACT_STATUS_LABELS.get(contract_filter, contract_filter)}"),
+            ("created_from", created_from, f"创建从：{created_from}"),
+            ("created_to", created_to, f"创建到：{created_to}"),
+            ("updated_from", updated_from, f"更新从：{updated_from}"),
+            ("updated_to", updated_to, f"更新到：{updated_to}"),
+            ("sort", sort if sort != "recent" else "", f"排序：{sort_options[sort]}"),
+        ), selected_student_id=selected_student_id)
         body = f"""
-        <link rel="stylesheet" href="/assets/student-management-application-summary-v1.css?v=3">
+        <link rel="stylesheet" href="/assets/student-management-application-summary-v1.css?v=5">
         <div data-student-management-application-summary>
         <section class="panel student-workflow-list-panel student-management-mobile-safe">
           <div class="student-workbench-header">
@@ -55751,7 +55770,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 <a class="primary button-link" href="/students/new">新建学生</a>
               </div>
             </div>
-            <details class="student-workbench-advanced"{advanced_open}>
+            {applied_filters}
+            <details class="student-workbench-advanced" data-business-sync-key="student-workbench-advanced">
               <summary>更多筛选</summary>
               <div class="student-filter-groups">
                 <fieldset class="filter-group filter-group-core"><legend>申请与排序</legend>

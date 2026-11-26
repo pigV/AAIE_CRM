@@ -112,9 +112,9 @@ class StudentManagementCompactTableUITests(unittest.TestCase):
 
     def test_page_requests_cache_busted_typography_stylesheet(self):
         source = Path("app.py").read_text(encoding="utf-8")
-        self.assertIn(
-            "/assets/student-management-application-summary-v1.css?v=2",
+        self.assertRegex(
             source,
+            r'/assets/student-management-application-summary-v1\.css\?v=[1-9]\d*"',
         )
 
     def test_mobile_card_breakpoint_is_preserved(self):

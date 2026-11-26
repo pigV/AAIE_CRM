@@ -56,3 +56,12 @@ class StudentListSnapshotTests(unittest.TestCase):
         with patch.object(__import__('app'),'allowed',return_value=False):
             self.assertEqual(403,self.read()[0]);self.assertEqual(403,self.h.business_change_versions('GET')[0])
         self.assertEqual(before,self.db.one('SELECT count(*) FROM business_change_events')[0])
+
+    def test_snapshot_refresh_preserves_exact_student_search(self):
+        student_id = '20269991'
+        status, packet = self.read(q=student_id, selected_student_id=student_id, stage='granted')
+        self.assertEqual(200, status, packet)
+        html = packet['data']['fragments']['student-list']
+        self.assertIn(f'selected_student_id={student_id}', html)
+        self.assertIn(f'name="selected_student_id" value="{student_id}"', html)
+        self.assertIn('data-business-sync-key="student-workbench-advanced">', html)

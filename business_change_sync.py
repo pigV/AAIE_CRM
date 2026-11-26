@@ -22,7 +22,7 @@ class BusinessChangeSyncMixin:
     def business_change_runtime(self):
         raise NotImplementedError('the owning app must supply its runtime explicitly')
 
-    BUSINESS_SYNC_STUDENT_LIST_FILTERS=frozenset({'q','sort','stage','lifecycle_type','consultant_id',
+    BUSINESS_SYNC_STUDENT_LIST_FILTERS=frozenset({'q','selected_student_id','sort','stage','lifecycle_type','consultant_id',
         'year_level','alert','contract_status','created_from','created_to','updated_from','updated_to'})
 
     def business_change_student_list_packet(self,*,minimum=0):

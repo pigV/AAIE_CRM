@@ -62,8 +62,70 @@
   gap: 8px;
 }
 
+[data-student-management-application-summary] .student-workflow-list-panel:not(:has(.student-management-table input[form="student-workbench-bulk-delete"]:checked)) > .student-bulk-delete-form {
+  display: none;
+}
+
 [data-student-management-application-summary] .student-workbench-advanced .student-filter-groups {
   margin-block-start: 6px;
+}
+
+[data-student-management-application-summary] .student-applied-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-block-start: 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+[data-student-management-application-summary] .student-applied-filters ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+[data-student-management-application-summary] .student-applied-filters li {
+  min-width: 0;
+  max-width: 100%;
+}
+
+[data-student-management-application-summary] a.student-applied-filter {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  gap: 8px;
+  min-height: 30px;
+  max-width: 100%;
+  padding: 3px 9px;
+  border: 1px solid #cbdaf2;
+  border-radius: 999px;
+  background: #edf4ff;
+  color: #25477a;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+[data-student-management-application-summary] a.student-applied-filter:hover {
+  border-color: #8da9d4;
+  background: #dfeaff;
+}
+
+[data-student-management-application-summary] a.student-applied-filter:focus-visible {
+  outline: 2px solid #25477a;
+  outline-offset: 2px;
+}
+
+[data-student-management-application-summary] .student-applied-filter [aria-hidden] {
+  font-size: 16px;
+  line-height: 1;
 }
 
 [data-student-management-application-summary] .student-stage-badge {
@@ -149,21 +211,39 @@
 .student-stage-badge[data-stage="waiting_visa_result"] { --stage-ink: #833d62; }
 
 @media (max-width: 1000px) {
-  [data-student-management-application-summary] .student-workbench-primary {
-    grid-template-columns: minmax(160px, 1fr) minmax(130px, .8fr) minmax(100px, .6fr);
+  [data-student-management-application-summary] .filter-search-row.student-workbench-primary {
+    /* Override the shared narrow layout that forces filter rows to one column. */
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   }
 
+  [data-student-management-application-summary] .student-workbench-primary .filter-search-field,
   [data-student-management-application-summary] .student-workbench-primary-actions {
     grid-column: 1 / -1;
+  }
+
+  [data-student-management-application-summary] .student-workbench-primary > label {
+    min-width: 0;
+  }
+
+  [data-student-management-application-summary] .student-bulk-delete-form .bulk-action-bar {
+    display: flex;
+  }
+
+  [data-student-management-application-summary] .student-bulk-delete-form .bulk-action-bar > * {
+    width: auto;
+  }
+
+  [data-student-management-application-summary] .student-bulk-delete-form .bulk-action-bar small {
+    flex-basis: 100%;
+    margin-inline-start: 0;
   }
 }
 
 @media (max-width: 640px) {
-  [data-student-management-application-summary] .student-workbench-primary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  [data-student-management-application-summary] a.student-applied-filter {
+    min-height: 36px;
   }
 
-  [data-student-management-application-summary] .student-workbench-primary .filter-search-field,
   [data-student-management-application-summary] .student-workbench-advanced .student-filter-groups {
     grid-column: 1 / -1;
     grid-template-columns: 1fr;
