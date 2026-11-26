@@ -11,6 +11,10 @@ def legacy_higher_education_coe_schools(conn, cycle_ids):
     required = ('offers', 'coe_oshc', 'student_documents', 'cycle_final_acceptances')
     if not cycle_ids or not all(_exists(conn, table) for table in required):
         return {}
+    from current_coe_evidence import durable_replacements_available, read_course_evidence
+
+    current = read_course_evidence(conn, cycle_ids=cycle_ids).current if durable_replacements_available(conn) else None
+    coe_id = "coe.id" if current is not None else "NULL"
     marks = ','.join('?' for _ in cycle_ids)
     scope = ''
     from reviewed_tertiary_course import ACTION as course_action, load_course_links
@@ -40,7 +44,7 @@ def legacy_higher_education_coe_schools(conn, cycle_ids):
                   ORDER BY state.occurred_at DESC,state.id DESC LIMIT 1),'active'))<>'active'
         )'''
     cursor = conn.execute(f'''
-        SELECT cycle.id AS cycle_id,offer.school_name AS school_name_snapshot,
+        SELECT cycle.id AS cycle_id,{coe_id} AS coe_id,offer.school_name AS school_name_snapshot,
                offer.offer_expiry_date,{signed_date} AS signed_uploaded_at,
                NULL AS sector_key,NULL AS state,coe.coe_provider,coe.school_name,coe.coe_course,
                coe.coe_start_date,coe.coe_end_date,coe.file_path,document.id AS document_id
@@ -72,7 +76,7 @@ def legacy_higher_education_coe_schools(conn, cycle_ids):
         row = dict(zip(keys, values))
         # A course-specific review must never fall back to another CoE from
         # the same institution when its own signature/course evidence fails.
-        if int(row['cycle_id']) in reviewed_cycles:
+        if int(row['cycle_id']) in reviewed_cycles or (current is not None and row['coe_id'] not in current):
             continue
         # An active formal selection always wins. A withdrawn selection only
         # blocks its own institution; unrelated old school history must not
@@ -157,6 +161,10 @@ def confirmed_higher_education_coe_cycles(conn, cycle_ids):
     if not cycle_ids or not all(_exists(conn, table) for table in required):
         return frozenset()
     from canonical_acceptance import active_acceptance_predicate
+    from current_coe_evidence import durable_replacements_available, read_course_evidence
+
+    current = read_course_evidence(conn, cycle_ids=cycle_ids).current if durable_replacements_available(conn) else None
+    coe_id = "coe.id" if current is not None else "NULL"
     marks = ','.join('?' for _ in cycle_ids)
     application_scope = ''
     if _exists(conn, 'higher_education_coe_links'):
@@ -170,7 +178,7 @@ def confirmed_higher_education_coe_cycles(conn, cycle_ids):
             )
         )'''
     cursor = conn.execute(f'''
-        SELECT cycle.id AS cycle_id,acceptance.school_name_snapshot,
+        SELECT cycle.id AS cycle_id,{coe_id} AS coe_id,acceptance.school_name_snapshot,
                NULL AS sector_key,NULL AS state,coe.coe_provider,coe.school_name,coe.coe_course,
                coe.coe_start_date,coe.coe_end_date,coe.file_path,document.id AS document_id
           FROM application_cycles cycle
@@ -190,7 +198,7 @@ def confirmed_higher_education_coe_cycles(conn, cycle_ids):
     found = set()
     for values in cursor:
         row = dict(zip(keys, values))
-        if not _higher_education_coe_reason(row):
+        if (current is None or row["coe_id"] in current) and not _higher_education_coe_reason(row):
             found.add(int(row['cycle_id']))
     return frozenset(found)
 

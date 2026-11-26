@@ -1,4 +1,4 @@
-"""Staff confirmation of CoE evidence for an exact final school acceptance."""
+"""Current and historical CoE evidence for an exact final school acceptance."""
 
 from datetime import date, datetime
 import json
@@ -47,6 +47,17 @@ def school_coe_rows(conn, cycle_ids):
     return [dict(zip(keys, row)) for row in cursor]
 
 
+
+def current_school_coe_rows(conn, cycle_ids, *, include_ended=False):
+    """Return the saved main-course uploads eligible for their final acceptance."""
+    from current_coe_evidence import read_course_evidence
+
+    current = read_course_evidence(conn, cycle_ids=cycle_ids).current
+    if not current:
+        return []
+    return [row for row in school_coe_rows(conn, cycle_ids)
+            if row["coe_id"] in current and not eligibility_reason(row, include_ended=include_ended)]
+
 def evidence_snapshot(row):
     return json.dumps([row[key] for key in (
         "school_name_snapshot", "sector_key", "state", "coe_provider", "school_name", "coe_course",
@@ -54,7 +65,7 @@ def evidence_snapshot(row):
     )], ensure_ascii=False)
 
 
-def eligibility_reason(row, today=None):
+def eligibility_reason(row, today=None, *, include_ended=False):
     today = today or datetime.now(ZoneInfo("Australia/Melbourne")).date()
     if not row["document_id"] or not row["file_path"]:
         return "缺少有效 CoE 附件"
@@ -63,7 +74,7 @@ def eligibility_reason(row, today=None):
         end = date.fromisoformat(row["coe_end_date"] or "")
     except ValueError:
         return "CoE 课程日期待核对"
-    if end < today or end < start:
+    if end < start or (not include_ended and end < today):
         return "CoE 课程已结束或日期有误"
     course = row["coe_course"] or ""
     if not course.strip() or not (row["coe_provider"] or row["school_name"] or "").strip():

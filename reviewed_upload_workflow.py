@@ -48,9 +48,10 @@ def confirm_matching_school_coe(connection,student_id,coe_id,identity,actor,stam
     """A unique signed Offer plus matching reviewed CoE establishes enrolment only.
 
     Existing withdrawals/selections and ambiguous evidence are never replaced.
-    Unknown/scanned identity stays available for explicit staff review.
+    Unreadable identity cannot independently establish a new final acceptance.
     """
-    from final_school_coe import eligibility_reason,school_coe_rows,confirm_school_coe
+    from current_coe_evidence import read_course_evidence
+    from final_school_coe import eligibility_reason,current_school_coe_rows,confirm_school_coe
     from offer_acceptance import ensure_canonical_offer_event
     from workflow_offer_events import select_final_acceptance
     def row(sql,args):
@@ -65,10 +66,11 @@ def confirm_matching_school_coe(connection,student_id,coe_id,identity,actor,stam
     cycle=row('SELECT * FROM application_cycles WHERE id=? AND student_id=?',(coe['application_cycle_id'],student_id))
     if not cycle or (cycle['status'],cycle['cycle_type'],cycle['education_stream'])!=('active','initial','school_education'):return False
     documents=connection.execute("SELECT id FROM student_documents WHERE student_id=? AND file_path=? AND document_type IN ('COE','COE_CAAW') AND is_active=1 AND document_status='active' AND voided_at IS NULL",(student_id,coe['file_path'])).fetchall()
-    if len(documents)!=1:return False
+    if len(documents)!=1 or coe_id not in read_course_evidence(connection, student_id=student_id).current:
+        return False
     existing=connection.execute('SELECT id,acceptance_status FROM cycle_final_acceptances WHERE application_cycle_id=?',(cycle['id'],)).fetchall()
     if existing:
-        candidates=[r for r in school_coe_rows(connection,(cycle['id'],)) if r['coe_id']==coe_id and not eligibility_reason(r)]
+        candidates=[r for r in current_school_coe_rows(connection,(cycle['id'],)) if r['coe_id']==coe_id]
         if len(existing)!=1 or existing[0][1]!='active' or len(candidates)!=1:return False
         confirm_school_coe(connection,student_id,existing[0][0],coe_id,actor['id'],stamp)
         return True

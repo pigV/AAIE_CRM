@@ -477,7 +477,7 @@ def load_workflow_facts(
     for row in conn.execute(
         f"""
         SELECT application_cycle_id,count(*) FROM coe_oshc
-        WHERE application_cycle_id IN ({marks}) AND upper(document_kind)='COE'
+        WHERE application_cycle_id IN ({marks}) AND upper(document_kind) IN ('COE','COE_CAAW')
         GROUP BY application_cycle_id
         """,
         ids,
@@ -488,7 +488,7 @@ def load_workflow_facts(
     if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE name='final_school_coe_confirmations' AND type='table'"
     ).fetchone():
-        from final_school_coe import eligibility_reason, evidence_snapshot, school_coe_rows
+        from final_school_coe import current_school_coe_rows
 
         school_cycles = tuple(
             int(row[0]) for row in conn.execute(
@@ -504,11 +504,10 @@ def load_workflow_facts(
                     "请核对 CoE 与当前最终学校" if values["final_acceptance_selected"]
                     else "已有 CoE，待确认最终学校"
                 )
-        for record in school_coe_rows(conn, school_cycles):
+        for record in current_school_coe_rows(conn, school_cycles):
             values = state[record["application_cycle_id"]]
-            if not eligibility_reason(record) and record["evidence_snapshot"] == evidence_snapshot(record):
-                values["final_school_coe_confirmed"] = True
-                values["final_school_coe_issue"] = None
+            values["final_school_coe_confirmed"] = True
+            values["final_school_coe_issue"] = None
 
     _load_higher_education_facts(conn, ids, state)
     _load_student_visa_facts(conn, ids, state)

@@ -20,6 +20,7 @@ from revenue.ai import (
     UnavailableContractSuggestionProvider,
 )
 from revenue.client_payments import ClientPaymentService
+from revenue.client_refunds import ClientRefundService, EVIDENCE_KIND
 from revenue.repository import RevenueRepository
 from revenue.operational_orchestrator import RevenueOperationalOrchestrator
 from revenue.services import RevenueService
@@ -617,6 +618,41 @@ class RevenueUIActions:
                 discard_unregistered_upload(staged)
             raise
         return {**result, "evidence_document": document}
+
+    def record_client_refund(self, form: dict, upload) -> dict:
+        from revenue.money import aud_cents
+
+        self._require_admin()
+        key = self._required(form, "idempotency_key")
+        try:
+            amount = aud_cents(self._required(form, "amount"))
+        except ValueError as exc:
+            raise ValueError("退款金额须大于零，最多两位小数。") from exc
+        if upload is None:
+            raise ValueError("请上传退款凭证。")
+        staged = stage_revenue_upload(
+            self.document_root / "client-refunds", upload, {".png", ".jpg", ".jpeg", ".pdf"},
+            max_bytes=20 * 1024 * 1024,
+        )
+        try:
+            with self.repository.fee_write_transaction():
+                document = self.service.register_document(
+                    EVIDENCE_KIND, str(staged.path), staged.sha256, staged.mime_type,
+                    staged.size_bytes, "upload", self.actor_user_id, f"{key}:evidence",
+                )
+                return ClientRefundService(self.repository).record(
+                    payment_uid=self._required(form, "payment_uid"),
+                    actual_amount_cents=amount,
+                    refunded_at=self._required(form, "refunded_at"),
+                    melbourne_offset=self._optional(form, "melbourne_offset") or "",
+                    reason=self._required(form, "reason"),
+                    evidence_document_uid=document["uid"],
+                    actor_user_id=self.actor_user_id, actor_role=self.actor_role,
+                    idempotency_key=key,
+                )
+        except Exception:
+            discard_unregistered_upload(staged)
+            raise
 
     def issue_client_receipt(
         self, form: dict, *, issuer_name: str, issuer_abn: str

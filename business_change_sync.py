@@ -532,7 +532,7 @@ class BusinessChangeSyncMixin:
         if (getattr(self,'user',None) and owned_shell and '</body>' in content
                 and not re.search(r'''<script\b[^>]*\bsrc=["']/assets/business-change-refresh\.js(?:\?[^"']*)?["']''',content)
                 and self.business_changes_enabled()):
-            content=content.replace('</body>','<script defer src="/assets/business-change-refresh.js?v=8"></script></body>',1)
+            content=content.replace('</body>','<script defer src="/assets/business-change-refresh.js?v=9"></script></body>',1)
         return super().send_html(content,status,headers,**kwargs)
 
     def business_change_versions(self,method):
@@ -619,6 +619,7 @@ class BusinessChangeSyncMixin:
             return self.json_response({'ok':False,'code':'forbidden'},403)
         if surface not in {'dashboard_workflow','dashboard_overview','visa_overview'}:
             return self.json_response({'ok':False,'code':'unknown_surface'},400)
+        chart_only = surface == 'dashboard_workflow' and (self.query.get('view') or [''])[0] == 'chart'
         try:
             minimum=int((self.query.get('minimum_version') or ['0'])[0])
             if minimum<0:raise ValueError('invalid_revision')
@@ -645,8 +646,9 @@ class BusinessChangeSyncMixin:
                 else:
                     html=g['dashboard_workflow_distribution_chart_html'](rows,canonical=canonical)
                     fragments={'dashboard-workflow':html}
-                data={'total':len(rows),'counts':counts,'fragments':fragments,
-                    'review_issues':self.business_change_visa_consistency_issues()}
+                data={'total':len(rows),'counts':counts,'fragments':fragments}
+                if not chart_only:
+                    data['review_issues']=self.business_change_visa_consistency_issues()
                 if surface=='dashboard_overview':
                     from business_changes.snapshots import read_authorization_context
                     data['authorization_context']=read_authorization_context(conn,self.user)

@@ -6,7 +6,7 @@ from html import escape
 from urllib.parse import quote, urlencode
 import sqlite3
 
-from revenue.read_models import RevenueReadModels, exception_code_label
+from revenue.read_models import RevenueReadModels, exception_code_label, melbourne_datetime_display
 from revenue.urls import cases_url, revenue_home_url
 from ui import ASSET_VERSION
 
@@ -165,6 +165,78 @@ def _render_client_payment_form(
       </form></section>"""
 
 
+def _client_refund_controls(item, action, csrf, token, *, can_record):
+    history = []
+    for refund in item.get("refunds") or []:
+        document_uid = escape(str(refund["evidence_document_uid"]), quote=True)
+        history.append(
+            f'<li><strong>{_currency_money(refund["currency_code"], refund["amount_cents"])}</strong>'
+            f' <span>{escape(melbourne_datetime_display(refund["refunded_at"]))}</span>'
+            f'<p>{escape(refund["reason"])}</p>'
+            f'<p>登记人 {escape(refund["operator"] or str(refund["recorded_by"]))} · '
+            f'{escape(melbourne_datetime_display(refund["created_at"]))} · '
+            f'<a href="/revenue/documents/{document_uid}/download">下载退款凭证</a></p></li>'
+        )
+    refund_history = (
+        '<details class="revenue-refund-history" open><summary>退款记录</summary>'
+        f'<ul>{"".join(history)}</ul></details>' if history else ""
+    )
+    if item.get("refund_requires_review"):
+        return refund_history + '<p>历史实退明细待核对</p>'
+    remaining = int(item.get("refund_remaining_cents") or 0)
+    if not can_record or remaining <= 0:
+        return refund_history
+    payment_uid = escape(str(item["payment_uid"]), quote=True)
+    currency = escape(str(item["currency_code"]))
+    maximum = f"{remaining // 100}.{remaining % 100:02d}"
+    return refund_history + f"""
+    <details class="revenue-refund-action">
+      <summary>登记退款</summary>
+      <form method="post" action="{escape(action, quote=True)}" enctype="multipart/form-data" class="revenue-action-form" data-client-refund-form>
+        {_hidden_security(csrf, token, 'client-refund-' + str(item['payment_uid']))}
+        <input type="hidden" name="payment_uid" value="{payment_uid}">
+        <p class="revenue-action-form__wide">仅登记已完成的退款。可退余额 {_currency_money(item['currency_code'], remaining)}</p>
+        <label>退款金额（{currency}）<input name="amount" type="number" min="0.01" max="{maximum}" step="0.01" required></label>
+        <label>实际退款时间（墨尔本）<input name="refunded_at" type="datetime-local" min="{escape(str(item['received_date']), quote=True)}T00:00" required></label>
+        <label>夏令时偏移（仅在重复时段选择）<select name="melbourne_offset"><option value="">自动</option><option value="+11:00">AEDT · UTC+11</option><option value="+10:00">AEST · UTC+10</option></select></label>
+        <label class="revenue-action-form__wide">退款原因<textarea name="reason" maxlength="1000" required></textarea></label>
+        <label class="revenue-action-form__wide">退款凭证（PNG、JPG 或 PDF）<input name="refund_evidence" type="file" accept=".png,.jpg,.jpeg,.pdf" required></label>
+        <button type="submit" class="primary">确认登记退款</button>
+      </form>
+    </details>"""
+
+
+def _client_cash_summary(summary, action, active_filter):
+    if not summary:
+        return ""
+    rows = "".join(
+        f'<tr><th scope="row">{escape(row["currency_code"])}</th>'
+        f'<td>{_currency_money(row["currency_code"], row["received_actual_cents"])}</td>'
+        f'<td>{_currency_money(row["currency_code"], row["refunded_actual_cents"])}</td>'
+        f'<td>{_currency_money(row["currency_code"], row["net_actual_cents"])}</td>'
+        f'<td>{_aud_money(row["net_base_cents"])}</td>'
+        f'<td>{_aud_money(row["net_gst_cents"])}</td></tr>'
+        for row in summary["rows"]
+    )
+    if not rows:
+        message = summary["error"] or "该时段暂无普通客户收款或退款。"
+        rows = f'<tr><td colspan="6" class="revenue-empty">{escape(message)}</td></tr>'
+    return f"""
+    <section class="revenue-panel" aria-labelledby="client-cash-summary">
+      <div class="revenue-panel-heading"><h2 id="client-cash-summary">客户净收款</h2></div>
+      <form method="get" action="{escape(action, quote=True)}" class="revenue-search-form revenue-cash-filters" aria-label="按墨尔本日期筛选净收款">
+        <input type="hidden" name="filter" value="{escape(active_filter, quote=True)}">
+        <label>开始日期<input name="cash_start" type="date" value="{escape(summary['start'], quote=True)}"></label>
+        <label>结束日期<input name="cash_end" type="date" value="{escape(summary['end'], quote=True)}"></label>
+        <button type="submit" class="secondary">查询净收款</button>
+      </form>
+      <div class="revenue-table-scroll"><table class="revenue-table">
+        <thead><tr><th scope="col">原收款币种</th><th scope="col">到账</th><th scope="col">实退</th><th scope="col">净到账</th><th scope="col">净基础费（AUD）</th><th scope="col">净 GST（AUD）</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table></div>
+    </section>"""
+
+
 def _render_workspace_action(data: dict, csrf: str, token: str) -> str:
     action = data.get("action")
     can_administer = bool(data.get("can_administer", True))
@@ -200,7 +272,7 @@ def _render_workspace_action(data: dict, csrf: str, token: str) -> str:
             "au_personal_account": "澳洲私人账号", "au_company_account": "澳洲公司账号",
         }
         history_rows = "".join(
-            "<tr>"
+            f'<tr id="payment-{escape(str(item["payment_uid"]), quote=True)}">'
             f'<td>{escape(str(item["student_id"]))}</td>'
             f'<td>{escape(str(item["description"]))}</td>'
             f'<td>{escape(method_labels.get(str(item["method_code_snapshot"]), str(item["method_code_snapshot"])))}</td>'
@@ -210,12 +282,13 @@ def _render_workspace_action(data: dict, csrf: str, token: str) -> str:
             f'<td>{escape(str(item["received_date"]))}</td>'
             f'<td>{("<a href=\"/revenue/documents/" + escape(str(item["evidence_document_uid"]), quote=True) + "/view\">查看凭证</a>") if item.get("evidence_document_uid") else "—"}</td>'
             f'<td>{("<a href=\"/revenue/documents/" + escape(str(item["receipt_document_uid"]), quote=True) + "/view\">" + escape(str(item["receipt_number"])) + "</a>") if item.get("receipt_document_uid") else "待生成"}</td>'
+            f'<td>{_client_refund_controls(item, action.get("refund_action") or "/revenue/billing/refund", csrf, token, can_record=can_administer) or "—"}</td>'
             "</tr>"
             for item in action.get("payment_history") or []
         )
         history_html = (
             '<section class="revenue-panel"><div class="revenue-panel-heading"><div><span class="revenue-eyebrow">不可变历史</span><h2>客户收款与收据</h2></div></div>'
-            '<div class="revenue-table-wrap"><table class="revenue-table"><thead><tr><th>学生</th><th>收费项目</th><th>付款方式</th><th>实际到账</th><th>AUD 基础费</th><th>GST</th><th>收款日期</th><th>付款凭证</th><th>收据</th></tr></thead>'
+            '<div class="revenue-table-wrap"><table class="revenue-table"><thead><tr><th>学生</th><th>收费项目</th><th>付款方式</th><th>实际到账</th><th>AUD 基础费</th><th>GST</th><th>收款日期</th><th>付款凭证</th><th>收据</th><th>退款</th></tr></thead>'
             f'<tbody>{history_rows}</tbody></table></div></section>'
             if history_rows else ""
         )
@@ -958,6 +1031,7 @@ def render_revenue_workspace_page(
       {school_list}
       {coverage}
       {student_detail}
+      {_client_cash_summary(data.get('cash_summary'), str(student_context.get('billing_href') or '/revenue/billing'), str(data.get('active_filter') or 'all'))}
       <section class="revenue-panel revenue-list-panel"{list_label}>
         {toolbar}
         {results}
@@ -1436,6 +1510,13 @@ def render_revenue_case_workbench(
                     '+ 添加收款记录</a>'
                 )
             status = str(item.get("payment_status") or "待收款")
+            refunded_base, refunded_gst = item.get("refunded_base_cents", 0), item.get("refunded_gst_cents", 0)
+            net = ""
+            if refunded_base or refunded_gst:
+                net = (
+                    f'<div><dt>净收基础费</dt><dd>{_aud_money(item["base_received_cents"] - refunded_base)}</dd></div>'
+                    f'<div><dt>净收 GST</dt><dd>{_aud_money(item["gst_collected_cents"] - refunded_gst)}</dd></div>'
+                )
             cards.append(
                 '<article class="revenue-billing-card">'
                 f'<header><div><span class="revenue-eyebrow">基础服务费</span><h3>{escape(str(item.get("description") or "基础服务费"))}</h3></div>'
@@ -1444,13 +1525,15 @@ def render_revenue_case_workbench(
                 f'<div><dt>基础服务费</dt><dd>{_aud_money(int(item.get("final_base_cents") or 0))}</dd></div>'
                 f'<div><dt>基础服务费已收</dt><dd>{_aud_money(int(item.get("base_received_cents") or 0))}</dd></div>'
                 f'<div><dt>GST 已收</dt><dd>{_aud_money(int(item.get("gst_collected_cents") or 0))}</dd></div>'
-                f'<div class="is-outstanding"><dt>未收基础服务费</dt><dd>{_aud_money(int(item.get("outstanding_base_cents") or 0))}</dd></div>'
+                f'{net}<div class="is-outstanding"><dt>未收基础服务费</dt><dd>{_aud_money(int(item.get("outstanding_base_cents") or 0))}</dd></div>'
                 f'</dl>{add_payment}</article>'
             )
         return "".join(cards) or '<p class="revenue-empty">暂无客户收费项目。</p>'
 
     def payment_receipt_content() -> str:
         payment_cards = []
+        case_uid = (data.get("case") or {}).get("uid")
+        refund_action = f"/revenue/cases/{quote(str(case_uid), safe='')}/billing/refund" if case_uid else ""
         for item in data.get("payment_history") or []:
             evidence = (
                 f'<a href="{escape(str(item["evidence_view_url"]), quote=True)}">查看付款凭证</a>'
@@ -1465,7 +1548,11 @@ def render_revenue_case_workbench(
                 for label, key in (("申请人", "visa_applicant_name"), ("签证类别", "visa_category"))
                 if item.get(key)
             ]
-            payment_cards.append(definition_list(visa_identity + [
+            refund_controls = _client_refund_controls(
+                item, refund_action, csrf, action_token,
+                can_record=bool(refund_action) and not mobile and bool(data.get("can_administer", True)),
+            )
+            payment_cards.append('<div class="revenue-payment-entry">' + definition_list(visa_identity + [
                 ("收款日期", render_value(item.get("date_display"))),
                 ("付款方式", render_value(item.get("method_label"))),
                 ("实际到账", _currency_money(str(item.get("currency_code") or "AUD"), int(item.get("actual_amount_cents") or 0))),
@@ -1473,7 +1560,7 @@ def render_revenue_case_workbench(
                 ("GST 已收", _aud_money(int(item.get("gst_cents") or 0))),
                 ("付款凭证", evidence),
                 ("收据", receipt),
-            ]))
+            ]) + refund_controls + "</div>")
         empty_message = "暂无收款记录"
         if any(r["status"] != "cancelled" for r in data.get("historical_collections") or []):
             empty_message = "暂无普通收费收款记录；历史收款及凭证见上方核对。"
@@ -1740,6 +1827,12 @@ def render_revenue_workspace(
 
     def fee_with_warning(fee):
         value = fee_text(fee)
+        if fee and (fee.get("refunded_base_cents") or fee.get("refunded_gst_cents")):
+            base = fee["received_cents"] - fee.get("refunded_base_cents", 0)
+            gst = fee.get("gst_received_cents", 0) - fee.get("refunded_gst_cents", 0)
+            value += f" · 净收基础费 {aud(base)}"
+            if fee.get("gst_received_cents"):
+                value += f" · 净收 GST {aud(gst)}"
         if fee and fee.get("historical_note"):
             value += "；历史核对：" + escape(fee["historical_note"])
         if fee and fee.get("possible_duplicate"):

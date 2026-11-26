@@ -20,7 +20,6 @@ from school_plan_lifecycle import activate_created_report,normalize_parent_decis
 from workflow_application_service import create_private_application,submit_private_application
 from workflow_offer_events import select_final_acceptance,record_final_school_submission
 from student_application_stage_distribution import load_application_stage_result_map
-from final_school_coe import confirm_school_coe
 
 
 class SchoolMaterialChainTests(unittest.TestCase):
@@ -128,10 +127,12 @@ class SchoolMaterialChainTests(unittest.TestCase):
         coe_doc=self.review('COE + OSHC','COE',{'school_name':self.school},
             {'intake_defer_0':'1','extract_coe_provider_0':self.school,'extract_school_name_0':self.school,'extract_coe_course_0':'Secondary Year 10',
              'extract_coe_start_date_0':'2027-01-25','extract_coe_end_date_0':'2035-12-31'})
-        coe=self.db.one('SELECT id FROM coe_oshc WHERE student_id=? AND file_path=?',(self.sid,coe_doc['file_path']))[0]
-        with self.db.transaction() as conn:confirm_school_coe(conn,self.sid,accepted.id,coe,1,self.stamp)
         self.assertEqual('10_visa_submission',self.stage())
-        # Revoke only the test's source evidence, leaving historical confirmation.
+        self.assertEqual(0, self.db.one('SELECT count(*) FROM final_school_coe_confirmations')[0])
+        html = self.h.coe_panel(self.sid, self.db.all("SELECT * FROM coe_oshc WHERE student_id=?", (self.sid,)))
+        self.assertNotIn("confirm-final-school", html)
+        self.assertIn("当前 CoE", html)
+        # Removing the currently valid source must also remove readiness.
         self.db.execute("UPDATE student_documents SET is_active=0,document_status='voided',voided_at=? WHERE id=?",(self.stamp,coe_doc['id']))
         self.assertEqual('09_waiting_coe',self.stage())
         self.db.execute("UPDATE student_documents SET is_active=1,document_status='active',voided_at=NULL WHERE id=?",(coe_doc['id'],))

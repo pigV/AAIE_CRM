@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 from canonical_acceptance import active_acceptance_predicate
 from revenue.client_fee_rules import CLIENT_FEE_RULES_2026
+from revenue.client_refunds import client_cash_totals, fee_refund_totals, payment_refund_details, refunds_available
 from revenue.operational_visibility import RevenueOperationalVisibility
 from revenue.visa_fee_policy import VISA_FEE_KINDS, signed_student_visa_package, fee_display_description
 from revenue.urls import case_url, cases_url, revenue_home_url
@@ -509,6 +510,28 @@ class RevenueReadModels:
             "cases_href": self.cases_href,
             "revenue_home_href": self.revenue_home_href,
         }
+        if name == "billing" and refunds_available(self.connection):
+            start = self._student_parameter(parameters, "cash_start")
+            end = self._student_parameter(parameters, "cash_end")
+            error = ""
+            try:
+                for raw in (start, end):
+                    if raw and date.fromisoformat(raw).isoformat() != raw:
+                        raise ValueError("noncanonical date")
+                if start and end and start > end:
+                    error = "开始日期须早于或等于结束日期。"
+            except ValueError:
+                error = "请输入有效的日期。"
+            result["cash_summary"] = {
+                "start": start, "end": end, "error": error,
+                "rows": [] if error else client_cash_totals(
+                    self.connection, start=start or None, end=end or None, case_uid=case_uid,
+                    case_predicate="1" if case_uid else self.visibility.case_predicate("c"),
+                ),
+            }
+            if any(row["refunded_base_cents"] or row["refunded_gst_cents"] for row in rows):
+                result["columns"].insert(-2, {"key": "net_base_received_cents", "label": "净收基础费", "kind": "money"})
+                result["columns"].insert(-2, {"key": "net_gst_cents", "label": "净收 GST", "kind": "money"})
         if case_scope:
             result["student_context"] = case_scope
             result["title"] = "当前学生客户收费"
@@ -532,7 +555,7 @@ class RevenueReadModels:
                 ("待收收费项目", "SELECT COUNT(*) FROM revenue_fee_items f JOIN revenue_commercial_cases c ON c.id=f.commercial_case_id WHERE f.status!='cancelled' AND f.net_cents>COALESCE((SELECT SUM(a.allocated_base_cents) FROM revenue_client_payment_allocations a WHERE a.fee_item_id=f.id),0) AND " + visible_case, "/revenue/billing?filter=outstanding"),
                 ("客户收款", "SELECT COUNT(*) FROM revenue_client_payment_allocations a JOIN revenue_fee_items f ON f.id=a.fee_item_id JOIN revenue_commercial_cases c ON c.id=f.commercial_case_id WHERE " + visible_case, None),
                 ("收据", "SELECT COUNT(*) FROM revenue_receipts", None),
-                ("退款", "SELECT COUNT(*) FROM revenue_refunds", None),
+                ("退款", "SELECT COUNT(*) FROM revenue_refunds WHERE status='paid'", None),
                 ("收费规则", "SELECT COUNT(*) FROM revenue_fee_rule_versions", None),
             ),
             "direct-commission": (
@@ -808,7 +831,7 @@ class RevenueReadModels:
             payment_history = [dict(row) for row in self.connection.execute(
                 """SELECT p.uid payment_uid,f.student_id,f.description,f.uid fee_item_uid,p.received_date,
                           p.currency_code,p.amount_cents,a.allocated_base_cents,a.gst_cents,
-                          a.method_code_snapshot,d.uid evidence_document_uid,
+                          a.method_code_snapshot,d.uid evidence_document_uid,p.status payment_status,
                           r.receipt_number,rd.uid receipt_document_uid
                      FROM revenue_payments p
                      JOIN revenue_client_payment_allocations a ON a.payment_id=p.id
@@ -821,6 +844,7 @@ class RevenueReadModels:
                  ORDER BY p.received_date DESC,p.id DESC LIMIT 100""",
                 case_parameters,
             )]
+            payment_refund_details(self.connection, [row for row in payment_history if row["payment_status"] == "confirmed"])
             for row in receipt_options + payment_history:
                 row["description"] = fee_display_description(self.connection, row["fee_item_uid"], row["description"])
             if payment_options and not payment_methods:
@@ -838,6 +862,10 @@ class RevenueReadModels:
                     ),
                     "payment_options": payment_options,
                     "payment_methods": payment_methods,
+                    "refund_action": (
+                        f"/revenue/cases/{quote(case_uid, safe='')}/billing/refund"
+                        if case_uid else "/revenue/billing/refund"
+                    ),
                     "receipt_options": receipt_options,
                     "payment_history": payment_history,
                 }
@@ -1171,10 +1199,12 @@ class RevenueReadModels:
             case_parameters,
         ).fetchall()
         projected = []
+        refunds = fee_refund_totals(self.connection, (row["id"] for row in rows))
         for row in rows:
             final_base = int(row["net_cents"])
             received = int(row["base_received_cents"])
             outstanding = max(0, final_base - received)
+            refunded_base, refunded_gst = refunds.get(row["id"], (0, 0))
             if active_filter == "outstanding" and outstanding == 0:
                 continue
             if active_filter == "settled" and outstanding != 0:
@@ -1189,6 +1219,10 @@ class RevenueReadModels:
                 "final_base_cents": final_base,
                 "base_received_cents": received,
                 "gst_collected_cents": int(row["gst_collected_cents"]),
+                "refunded_base_cents": refunded_base,
+                "refunded_gst_cents": refunded_gst,
+                "net_base_received_cents": received - refunded_base,
+                "net_gst_cents": int(row["gst_collected_cents"]) - refunded_gst,
                 "outstanding_base_cents": outstanding,
                 "status": (
                     "已收清" if outstanding == 0 else
@@ -1654,6 +1688,14 @@ class RevenueReadModels:
 
     def _recent_cases(self) -> list[dict[str, Any]]:
         rcti_activity = ""
+        refund_activity = """
+            UNION ALL
+            SELECT f.commercial_case_id,r.refunded_at
+              FROM revenue_refunds r
+              JOIN revenue_client_payment_allocations a ON a.id=r.client_payment_allocation_id
+              JOIN revenue_fee_items f ON f.id=a.fee_item_id
+             WHERE r.status='paid'
+        """ if refunds_available(self.connection) else ""
         if self._table_exists("revenue_vic_rcti_student"):
             rcti_activity = """
                 UNION ALL
@@ -1735,7 +1777,7 @@ class RevenueReadModels:
                      JOIN revenue_payment_allocations a ON a.invoice_line_id=il.id
                      JOIN revenue_payments p ON p.id=a.payment_id AND p.status='confirmed'
                        AND p.payment_direction='received' AND p.counterparty_kind='institution'
-               """ + rcti_activity + """), latest AS (
+               """ + rcti_activity + refund_activity + """), latest AS (
                    SELECT case_id,occurred_at,julianday(occurred_at) activity_time,
                           ROW_NUMBER() OVER (
                               PARTITION BY case_id ORDER BY julianday(occurred_at) DESC, occurred_at DESC
@@ -1845,7 +1887,8 @@ class RevenueReadModels:
                 WHERE f.commercial_case_id=? AND f.status<>'cancelled'
                 GROUP BY f.id""",
             (case_id,),
-        )
+        ).fetchall()
+        refunds = fee_refund_totals(self.connection, (row["id"] for row in rows))
         legacy_payments = {}
         for entry in self.connection.execute(
             """SELECT f.id,il.net_cents,il.gross_cents,SUM(a.allocated_cents) AS received
@@ -1871,6 +1914,7 @@ class RevenueReadModels:
                 other_count += 1
                 continue
             unverified_gst = 0
+            refunded_base, refunded_gst = refunds.get(fee_id, (0, 0))
             for entry in legacy_payments.get(fee_id, ()):
                 if entry["net_cents"] == entry["gross_cents"]:
                     received += entry["received"]
@@ -1896,6 +1940,9 @@ class RevenueReadModels:
                 totals = result.get(group) or {"received_cents": 0, "outstanding_cents": 0}
                 totals["received_cents"] += received
                 totals["outstanding_cents"] += max(0, net - received)
+                if refunded_base or refunded_gst:
+                    totals["refunded_base_cents"] = totals.get("refunded_base_cents", 0) + refunded_base
+                    totals["refunded_gst_cents"] = totals.get("refunded_gst_cents", 0) + refunded_gst
                 if gst:
                     totals["gst_received_cents"] = totals.get("gst_received_cents", 0) + gst
                 if unverified_gst:

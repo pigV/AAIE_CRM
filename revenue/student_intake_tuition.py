@@ -171,19 +171,17 @@ def coe_first_year_reason(connection, context, coe_id, values=None):
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='final_school_coe_confirmations'",
     ).fetchone():
-        from final_school_coe import eligibility_reason, evidence_snapshot, school_coe_rows
+        from final_school_coe import current_school_coe_rows
 
-        confirmed = [
-            row for row in school_coe_rows(connection, (context["application_cycle_id"],))
+        eligible = [
+            row for row in current_school_coe_rows(connection, (context["application_cycle_id"],), include_ended=True)
             if row["acceptance_id"] == context["acceptance_id"]
-            and not eligibility_reason(row)
-            and row["evidence_snapshot"] == evidence_snapshot(row)
         ]
-        first_start = min((row["coe_start_date"] for row in confirmed), default=None)
-        if confirmed and str(coe_id) not in {
-            str(row["coe_id"]) for row in confirmed if row["coe_start_date"] == first_start
+        first_start = min((row["coe_start_date"] for row in eligible), default=None)
+        if eligible and str(coe_id) not in {
+            str(row["coe_id"]) for row in eligible if row["coe_start_date"] == first_start
         }:
-            return "该 CoE 属于其他课程，首年学费须按已确认的首个主课 CoE 核对。"
+            return "首年学费须使用当前的首个主课 CoE。"
     rows = first_year_records(connection, context["component_id"])
     years = [values["year"]] if values is not None else []
     columns = {row[1] for row in connection.execute("PRAGMA table_info(coe_oshc)")}

@@ -529,6 +529,24 @@ class RevenueOperationalOrchestrator:
                 WHERE commercial_case_id=? AND status='active' ORDER BY id""",
             (case["id"],),
         ).fetchall() if case else []
+        from current_coe_evidence import durable_replacements_available
+        cycle = self.connection.execute(
+            "SELECT cycle_type,education_stream FROM application_cycles WHERE id=?",
+            (fact.application_cycle_id,),
+        ).fetchone() if durable_replacements_available(self.connection) else None
+        kind = self.connection.execute(
+            "SELECT document_kind FROM coe_oshc WHERE id=?", (fact.id,),
+        ).fetchone() if cycle is not None else None
+        if cycle is not None and tuple(cycle) == ("initial", "school_education") and kind[0] in {"COE", "COE_CAAW"}:
+            from final_school_coe import current_school_coe_rows
+
+            rows = current_school_coe_rows(self.connection, (fact.application_cycle_id,), include_ended=True)
+            first = min(rows, key=lambda row: (row["coe_start_date"], row["coe_id"]), default=None)
+            if first is None or first["coe_id"] != fact.id:
+                return {**event, "coe_status": "needs_component_selection"}
+            components = [component for component in components
+                          if component["final_acceptance_id"] == first["acceptance_id"]
+                          and component["source_kind"] == "final_acceptance"]
         if fact.language_course_name and fact.main_course_name and case:
             acceptance = self.connection.execute(
                 """SELECT * FROM cycle_final_acceptances
@@ -569,6 +587,8 @@ class RevenueOperationalOrchestrator:
             return {**event, "coe_status": "needs_component_selection"}
         component = components[0]
         key = f"revenue-coe-link:{fact.id}:{component['id']}"
+        if cycle is not None and kind is not None and kind[0] in {"COE", "COE_CAAW"}:
+            key += f":{fact.version}"
 
         def operation():
             self.connection.execute(

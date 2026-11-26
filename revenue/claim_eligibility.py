@@ -12,7 +12,7 @@ from revenue.rules import CommissionRuleEvaluator
 
 
 DOCUMENT_TYPE_ALIASES = {
-    "coe": {"coe", "confirmationofenrolment", "confirmationofenrollment"},
+    "coe": {"coe", "coecaaw", "confirmationofenrolment", "confirmationofenrollment"},
     "student_id": {
         "studentid", "studentidentity", "identity", "passport", "id"
     },
@@ -79,7 +79,8 @@ class ClaimEligibilityResolver:
 
     def evaluate(self, commission_line_uid: str, claim_date: str) -> ClaimEligibilityDecision:
         line = self.connection.execute(
-            """SELECT l.*,c.student_id,ec.coe_oshc_id
+            """SELECT l.*,c.student_id,c.application_cycle_id,ec.coe_oshc_id,
+                      ec.final_acceptance_id,ec.source_kind AS component_source_kind
                  FROM revenue_commission_lines l
                  JOIN revenue_commercial_cases c ON c.id=l.commercial_case_id
                  JOIN revenue_enrolment_components ec ON ec.id=l.enrolment_component_id
@@ -95,11 +96,12 @@ class ClaimEligibilityResolver:
             (line["enrolment_component_id"],),
         ).fetchone()
         commencement_date = commencement["actual_commencement_date"] if commencement else None
+        scoped_coe, coe_path = self._current_coe_path(line)
         facts = {
             "commenced": commencement is not None,
             "actual_commencement_date": commencement_date,
             "days_since_commencement": self._elapsed_days(commencement_date, claim_date),
-            "coe_issued": self._coe_exists(line["coe_oshc_id"]),
+            "coe_issued": bool(coe_path) if scoped_coe else self._coe_exists(line["coe_oshc_id"]),
             "tuition_recorded": self.connection.execute(
                 """SELECT 1 FROM revenue_tuition_facts
                     WHERE enrolment_component_id=? AND status='active' LIMIT 1""",
@@ -144,9 +146,13 @@ class ClaimEligibilityResolver:
             (line["commission_rule_version_id"],),
         ).fetchall()
         for requirement in requirements:
-            resolved = self._resolve_student_document(
-                line["student_id"], requirement["document_kind"], requirement["id"]
-            )
+            kind = requirement["document_kind"]
+            if scoped_coe and _normalise_document_type(kind) in DOCUMENT_TYPE_ALIASES["coe"]:
+                resolved = self._resolve_student_document(
+                    line["student_id"], kind, requirement["id"], file_path=coe_path,
+                ) if coe_path else None
+            else:
+                resolved = self._resolve_student_document(line["student_id"], kind, requirement["id"])
             if resolved:
                 evidence.append(resolved)
             else:
@@ -174,18 +180,44 @@ class ClaimEligibilityResolver:
             "SELECT 1 FROM coe_oshc WHERE id=?", (coe_oshc_id,)
         ).fetchone() is not None
 
-    def _resolve_student_document(
-        self, student_id: str, document_kind: str, requirement_id: int
-    ) -> ClaimEvidence | None:
-        aliases = DOCUMENT_TYPE_ALIASES.get(
-            document_kind, {_normalise_document_type(document_kind)}
+    def _current_coe_path(self, line):
+        from current_coe_evidence import (
+            current_replacement_id, durable_replacements_available, read_course_evidence,
         )
+
+        if not durable_replacements_available(self.connection):
+            return False, None
+        cycle_id = line["application_cycle_id"]
+        cycle = self.connection.execute(
+            """SELECT cycle_type,education_stream,status FROM application_cycles
+               WHERE id=? AND student_id=?""", (cycle_id, line["student_id"]),
+        ).fetchone()
+        if cycle is None or tuple(cycle[:2]) != ("initial", "school_education"):
+            return False, None
+        if cycle[2] == "active" and line["component_source_kind"] == "final_acceptance":
+            from final_school_coe import current_school_coe_rows
+
+            rows = [row for row in current_school_coe_rows(self.connection, (cycle_id,), include_ended=True)
+                    if row["acceptance_id"] == line["final_acceptance_id"]]
+            first = min(rows, key=lambda row: (row["coe_start_date"], row["coe_id"]), default=None)
+            return True, first["file_path"] if first else None
+        evidence = read_course_evidence(self.connection, student_id=line["student_id"], cycle_ids=(cycle_id,))
+        coe_id = current_replacement_id(evidence, line["coe_oshc_id"])
+        coe = self.connection.execute("SELECT file_path FROM coe_oshc WHERE id=?", (coe_id,)).fetchone()
+        return True, coe[0] if coe else None
+
+    def _resolve_student_document(
+        self, student_id: str, document_kind: str, requirement_id: int, *, file_path=None
+    ) -> ClaimEvidence | None:
+        normalised_kind = _normalise_document_type(document_kind)
+        aliases = (DOCUMENT_TYPE_ALIASES["coe"] if normalised_kind in DOCUMENT_TYPE_ALIASES["coe"]
+                   else DOCUMENT_TYPE_ALIASES.get(document_kind, {normalised_kind}))
         rows = self.connection.execute(
             """SELECT id,document_type,file_path,file_size,original_name,uploaded_at
                  FROM student_documents
-                WHERE student_id=? AND is_active=1
+                WHERE student_id=? AND is_active=1 AND (? IS NULL OR file_path=?)
                 ORDER BY version DESC,uploaded_at DESC,id DESC""",
-            (student_id,),
+            (student_id, file_path, file_path),
         ).fetchall()
         for row in rows:
             if _normalise_document_type(row["document_type"]) not in aliases:

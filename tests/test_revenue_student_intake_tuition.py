@@ -100,9 +100,7 @@ class StudentIntakeTuitionTests(unittest.TestCase):
         self.assertEqual(later, source_record(self.db, "coe", 282, student))
         self.assertEqual(result, sync_tuition(self.db, ctx, later, 1, coe_id=282))
 
-    def test_confirmed_first_main_coe_excludes_other_courses_even_in_same_year(self):
-        from final_school_coe import confirm_school_coe
-
+    def test_current_first_main_coe_excludes_other_courses_even_in_same_year(self):
         self.db.executescript("""
             ALTER TABLE cycle_final_acceptances ADD COLUMN school_name_snapshot TEXT;
             ALTER TABLE offer_received_events ADD COLUMN school_name_snapshot TEXT;
@@ -126,18 +124,20 @@ class StudentIntakeTuitionTests(unittest.TestCase):
         """)
         student = "TEST-PENINSULA-SCHEDULE"
         ctx = accepted_offer_context(self.db, student)
-        for coeid, start in ((281, "2027-02-03"), (282, "2027-07-20")):
+        for coeid, course, start in (
+            (281, "Secondary (7-10)", "2027-02-03"),
+            (282, "Secondary (11-12)", "2027-07-20"),
+        ):
             path = f"/isolated/coe-{coeid}.pdf"
             self.db.execute(
-                """INSERT INTO coe_oshc VALUES(?,125,?,'COE',?,?,'Secondary',?,'2032-12-31',?)""",
-                (coeid, student, ctx["school_name"], ctx["school_name"], start, path),
+                """INSERT INTO coe_oshc VALUES(?,125,?,'COE',?,?,?,?,'2032-12-31',?)""",
+                (coeid, student, ctx["school_name"], ctx["school_name"], course, start, path),
             )
             self.db.execute(
                 """INSERT INTO student_documents(student_id,document_type,original_name,stored_name,
                     file_path,uploaded_at) VALUES(?,'COE','coe.pdf','coe.pdf',?,'2026-11-19')""",
                 (student, path),
             )
-            confirm_school_coe(self.db, student, 125, coeid, 1, "2026-11-19")
         values = read_review_fields(self.fields(2027, "Year 9", "21000"), 0)
         later = save_source(self.db, "coe", 282, student, 16, values, self.proof("coe", 282), 1)
         self.assertTrue(sync_tuition(self.db, ctx, later, 1, coe_id=282).get("preserved"))
@@ -149,8 +149,9 @@ class StudentIntakeTuitionTests(unittest.TestCase):
         self.assertEqual(1850000, student_tuition_details(self.db, student)["record"]["tuition_cents"])
         from revenue.student_intake_tuition import coe_first_year_reason
 
-        self.db.execute("UPDATE coe_oshc SET coe_course='Changed after confirmation'")
-        self.assertEqual("", coe_first_year_reason(self.db, ctx, 283, values))
+        self.db.execute("UPDATE coe_oshc SET coe_course='Junior Secondary School' WHERE id=281")
+        self.assertEqual("", coe_first_year_reason(self.db, ctx, 281, values))
+        self.assertTrue(coe_first_year_reason(self.db, ctx, 282, values))
 
     def test_coe_start_year_is_checked_when_offer_is_retained_or_tuition_is_blank(self):
         from revenue.student_intake_tuition import coe_first_year_reason

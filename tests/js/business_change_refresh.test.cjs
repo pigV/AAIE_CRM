@@ -94,6 +94,71 @@ test('three ordinary page opens with real BroadcastChannel do not cause any full
  try {await new Promise(resolve=>setTimeout(resolve,40));assert.equal(full,0);} finally {disposers.forEach(f=>f());if(originalWindow===undefined)delete global.window;else global.window=originalWindow;}
 });
 
+test('nested chart refresh uses its own endpoint, deduplicates clicks, and displays the outcome', async t => {
+ const {bootstrapBrowser} = require('../../assets/business-change-refresh.js');
+ const fragmentSelector = '[data-business-sync-fragment]';
+ const endpointSelector = '[data-business-sync-endpoint][data-business-sync-fragment]';
+ const seed = packet(1);
+ const events = {}, requests = [];
+ const dashboard = makeFragment('dashboard-overview', 'dashboard_overview');
+ const chart = makeFragment('dashboard-workflow', 'dashboard_workflow');
+ chart.dataset.businessSyncLocalRefresh = '';
+ const controls = {};
+ const status = {};
+ const button = {textContent: '刷新', closest: selector => ({
+  '[data-business-sync-refresh]': button, [fragmentSelector]: chart, [endpointSelector]: chart
+ })[selector] || null};
+ controls.closest = status.closest = button.closest;
+ const children = new Map([
+  ['[data-business-sync-controls]', [controls]], ['[data-business-sync-status]', [status]],
+  ['[data-business-sync-refresh]', [button]]
+ ]);
+ dashboard.querySelectorAll = chart.querySelectorAll = selector => children.get(selector) || [];
+ function makeFragment(fragment, surface) {
+  return {dataset: {businessSyncFragment: fragment, businessSyncEndpoint: `/api/business-changes/snapshot?surface=${surface}`,
+    businessSyncInitialSnapshot: JSON.stringify(seed)}, closest: () => null, querySelector: () => null};
+ }
+ const doc = {visibilityState:'visible', querySelectorAll: () => [dashboard, chart], querySelector: () => null,
+  addEventListener: (name, listener) => { events[name] = listener; }, removeEventListener() {}};
+ let response = deferred();
+ const win = {location:{href:'http://localhost/',origin:'http://localhost'}, addEventListener() {}, removeEventListener() {},
+  fetch: async url => {
+   const {pathname, searchParams} = new URL(url);
+   if (pathname.endsWith('/versions')) return {ok: true, json: async () => ({versions: seed.versions})};
+   requests.push(searchParams.get('surface'));
+   return response.promise;
+  }};
+ const dispose = bootstrapBrowser(doc, win);
+ t.after(dispose);
+ const settled = () => new Promise(setImmediate);
+ await settled();
+ assert.deepEqual(requests, []);
+ const initiallySynced = status.textContent;
+ events.click({target: button});
+ assert.equal(button.textContent, '刷新中…');
+ assert.equal(button.disabled, true);
+ events.click({target: button});
+ await settled();
+ assert.deepEqual(requests, ['dashboard_workflow']);
+ const asOf = '2026-11-19T05:00:05Z';
+ response.resolve({ok: true, json: async () => ({...seed, as_of: asOf})});
+ await settled();
+ assert.equal(button.textContent, '刷新');
+ assert.equal(button.disabled, false);
+ assert.notEqual(status.textContent, initiallySynced);
+ assert.match(status.textContent, /已同步.*上次同步.*:05/);
+ assert.deepEqual(requests, ['dashboard_workflow']);
+
+ response = deferred();
+ events.click({target: button});
+ await settled();
+ response.reject(new Error('simulated offline'));
+ await settled();
+ assert.equal(button.disabled, false);
+ assert.match(status.textContent, /更新未完成，点击刷新重试.*上次同步.*:05/);
+ assert.deepEqual(requests, ['dashboard_workflow', 'dashboard_workflow']);
+});
+
 test('a real POST navigation publishes to other pages after navigation, while GET and logout do not',async()=>{
  const {bootstrapBrowser}=require('../../assets/business-change-refresh.js');const name='post-'+Math.random();
  class Channel extends BroadcastChannel {constructor(){super(name);}}

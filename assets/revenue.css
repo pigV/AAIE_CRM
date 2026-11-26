@@ -1577,3 +1577,36 @@ a.revenue-student-card:hover { border-color: #cbd6ff; }
     color: #204e89;
   }
 }
+
+.revenue-refund-action > summary, .revenue-refund-history > summary {
+  color: var(--revenue-blue, #2354c7);
+  cursor: pointer;
+  font-weight: 700;
+}
+.revenue-refund-action[open] { width: min(27rem, 76vw); }
+.revenue-refund-action .revenue-action-form {
+  background: #f8faff;
+  border: 1px solid var(--revenue-line);
+  border-radius: 10px;
+  margin-top: 8px;
+  padding: 12px;
+}
+.revenue-refund-action .revenue-action-form p { margin: 0; white-space: normal; }
+.revenue-refund-action textarea {
+  border: 1px solid #dce4f3;
+  border-radius: 9px;
+  color: var(--revenue-text);
+  font: inherit;
+  min-height: 70px;
+  padding: 8px 10px;
+  resize: vertical;
+  width: 100%;
+}
+.revenue-refund-history { max-width: 27rem; }
+.revenue-refund-history ul { margin: 6px 0 12px; padding-left: 22px; white-space: normal; }
+.revenue-refund-history li + li { margin-top: 7px; }
+.revenue-refund-history p { margin: 3px 0; overflow-wrap: anywhere; }
+.revenue-cash-filters { grid-template-columns: repeat(2, minmax(0, 12rem)) auto; justify-content: start; }
+@media (max-width: 620px) {
+  .revenue-cash-filters { grid-template-columns: 1fr; justify-content: stretch; }
+}

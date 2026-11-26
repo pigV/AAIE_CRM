@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+from revenue.client_refunds import fee_refund_totals, payment_refund_details
 from revenue.first_year_tuition import first_year_records, school_components
 from revenue.read_models import RevenueReadModels, exception_code_label
 from revenue.visa_fee_policy import VISA_CATEGORY_LABELS, fee_display_description, fee_visa_case, visa_subclass
@@ -202,6 +203,7 @@ class RevenueWorkbench:
             self._fee_item_summary(item, scoped_billing_url) for item in fee_items
         ]
         payment_history = [self._payment_summary(item) for item in payments]
+        payment_refund_details(self.connection, [row for row in payment_history if row["refundable"]])
         receipt_records = [self._receipt_summary(item) for item in receipts]
         evidence_records = [
             {
@@ -322,6 +324,10 @@ class RevenueWorkbench:
             "base_received_cents": int(item["base_received_cents"]),
             "gst_collected_cents": int(item["gst_collected_cents"]),
             "outstanding_base_cents": int(item["outstanding_base_cents"]),
+            **({
+                "refunded_base_cents": item["refunded_base_cents"],
+                "refunded_gst_cents": item["refunded_gst_cents"],
+            } if item["refunded_base_cents"] or item["refunded_gst_cents"] else {}),
             "payment_status": str(item["payment_status"]),
             "add_payment_href": f"{billing_url}?item={quote(uid, safe='')}#revenue-action",
         }
@@ -339,6 +345,12 @@ class RevenueWorkbench:
         applicant = str(visa.get("applicant_name") or visa.get("main_applicant") or "").strip() if visa else ""
         subclass = visa_subclass(visa) if visa else None
         return {
+            "payment_uid": item["uid"],
+            "amount_cents": item["amount_cents"],
+            "received_date": item["received_date"],
+            "refundable": bool(fee_uid and item["status"] == "confirmed"
+                               and item["counterparty_kind"] == "client"
+                               and item["payment_direction"] == "received"),
             "date_display": self._melbourne_date(item.get("received_date")),
             "visa_applicant_name": applicant or None,
             "visa_category": f"{subclass} {VISA_CATEGORY_LABELS[subclass]}" if subclass else None,
@@ -518,7 +530,10 @@ class RevenueWorkbench:
                 WHERE f.commercial_case_id=? AND f.status!='cancelled' ORDER BY f.id""",
             (case_id,),
         )
+        refunds = fee_refund_totals(self.connection, (row["id"] for row in rows))
         for row in rows:
+            refunded_base, refunded_gst = refunds.get(row["id"], (0, 0))
+            row.update(refunded_base_cents=refunded_base, refunded_gst_cents=refunded_gst)
             row["description"] = fee_display_description(self.connection, row["uid"], row["description"])
             final_base = int(row["net_cents"])
             received = int(row["base_received_cents"])

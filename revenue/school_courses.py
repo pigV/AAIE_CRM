@@ -130,6 +130,33 @@ def _provider_school_key(value):
     return _school_key(name)
 
 
+
+def school_coe_course_stage(course):
+    """Map recognizable CoE course names to their school education stage."""
+    name = str(course or "").casefold()
+    if re.search(r"\b(?:elicos|english|language)\b|语言|英语", name):
+        return "language"
+    if re.search(r"\b(?:bachelor|master|diploma|degree|certificate|doctorate)\b", name):
+        return ""
+    grades = []
+    for lower, upper in re.findall(
+        r"\b(1[012]|[7-9])\s*(?:[-–—]|to)\s*(?:years?\s*)?(1[012]|[7-9])\b", name,
+    ):
+        grades.extend((int(lower), int(upper)))
+    if not grades:
+        grades = [int(value) for value in re.findall(r"\byears?\s+(1[012]|[7-9])\b", name)]
+    if grades:
+        if max(grades) <= 10:
+            return "secondary_7_10"
+        if min(grades) >= 11:
+            return "secondary_11_12"
+        return "secondary"
+    if re.search(r"\b(?:senior|upper)\s+secondary\b|高中", name):
+        return "secondary_11_12"
+    if re.search(r"\b(?:junior|lower)\s+secondary\b|初中", name):
+        return "secondary_7_10"
+    return ""
+
 def validate_coe_course_owner(connection,coe,entry,school,*,both=False):
     """An accepted Offer alone never proves this particular CoE's ownership."""
     from revenue.student_intake_tuition import _school_key
@@ -280,6 +307,8 @@ def save_coe_courses(connection, student_id, coe_id, entries, staged, actor, *, 
             raise ValueError('CoE与学生不匹配。')
         if 'document_kind' in coe.keys() and coe['document_kind'] not in {'COE','COE_CAAW'}:
             raise ValueError('请选择有效CoE课程文件。')
+        from current_coe_evidence import require_editable_course_evidence
+        require_editable_course_evidence(connection, student_id, coe_id)
         cycle=connection.execute("""SELECT * FROM application_cycles WHERE student_id=? AND id=?
             AND status='active' AND education_stream='school_education' AND cycle_type='initial'""",
             (student_id,coe['application_cycle_id'])).fetchone()

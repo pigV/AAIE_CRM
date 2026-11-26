@@ -76,6 +76,17 @@ def _adoption_guard(c,kind,record_id,record,*,reassign=False):
         if str(record.get('offer_status') or '').lower()=='accepted':
             raise ValueError('请先核对并撤回该Offer接受；不能直接作废已接受材料。')
     else:
+        from current_coe_evidence import durable_replacements_available, require_editable_course_evidence
+
+        evidence = require_editable_course_evidence(c, record["student_id"], record_id)
+        cycle_id = record.get("application_cycle_id")
+        if durable_replacements_available(c) and cycle_id is not None:
+            from final_school_coe import current_school_coe_rows
+
+            if any(row["coe_id"] == record_id for row in current_school_coe_rows(c, (cycle_id,))):
+                raise ValueError('CoE已被当前入读业务采用，请先核对对应业务。')
+            if reassign and record_id in evidence.replacements.values():
+                raise ValueError('该 CoE 已有同一课程历史，请先核对所属周期。')
         for table,field in (('final_school_coe_confirmations','coe_id'),('revenue_school_course_evidence','coe_oshc_id'),
                             ('revenue_enrolment_components','coe_oshc_id'),('progression_pathway_components','coe_record_id'),
                             ('progression_pathway_components','oshc_record_id')):

@@ -65,6 +65,46 @@ class BusinessSyncUITests(unittest.TestCase):
         self.assertEqual(2,value['data']['total']);self.assertEqual({'11_visa_result':1,'10_visa_submission':1},value['data']['counts'])
         self.assertEqual('<section>approved dashboard</section>',value['data']['fragments']['dashboard-workflow'])
 
+    def test_chart_refresh_rereads_stages_without_loading_other_dashboard_data(self):
+        conn = self.h.g['db'].c
+        conn.execute('CREATE TABLE synthetic_cycles (id INTEGER PRIMARY KEY, stage TEXT)')
+        conn.execute("INSERT INTO synthetic_cycles VALUES (1, '10_visa_submission')")
+        conn.commit()
+
+        def load_stages(connection, *, cycles_only, read_context):
+            self.assertTrue(cycles_only)
+            self.assertIs(connection, read_context.connection)
+            self.assertEqual(1, connection.execute('PRAGMA query_only').fetchone()[0])
+            return [SimpleNamespace(cycle_id=row['id'], stage=SimpleNamespace(key=row['stage']))
+                    for row in connection.execute('SELECT * FROM synthetic_cycles')]
+
+        def unrelated_read(*args, **kwargs):
+            self.fail('the chart refresh loaded an unrelated dashboard read')
+
+        self.h.g['load_application_stage_distribution'] = load_stages
+        self.h.business_change_visa_consistency_issues = unrelated_read
+        self.h._dashboard_read_snapshot = unrelated_read
+        self.h.query['view'] = ['chart']
+
+        status, before = self.h.business_change_snapshot('GET')
+        self.assertEqual(200, status)
+        self.assertEqual({'10_visa_submission': 1}, before['data']['counts'])
+
+        conn.execute("INSERT INTO synthetic_cycles VALUES (2, '11_visa_result')")
+        conn.commit()
+        status, after = self.h.business_change_snapshot('GET')
+        self.assertEqual(200, status)
+        self.assertEqual({'10_visa_submission': 1, '11_visa_result': 1}, after['data']['counts'])
+        self.assertEqual(2, after['data']['total'])
+        self.assertEqual({'dashboard-workflow'}, set(after['data']['fragments']))
+        self.assertGreater(after['as_of'], before['as_of'])
+        self.assertNotEqual(after['etag'], before['etag'])
+
+        status, unchanged = self.h.business_change_snapshot('GET')
+        self.assertEqual(200, status)
+        self.assertEqual(after['etag'], unchanged['etag'])
+        self.assertGreater(unchanged['as_of'], after['as_of'])
+
     def test_post_unknown_surface_and_invalid_revision_are_rejected(self):
         self.assertEqual(405,self.h.business_change_snapshot('POST')[0])
         self.h.query={'surface':['all_database_records']};self.assertEqual(400,self.h.business_change_snapshot('GET')[0])

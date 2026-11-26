@@ -10425,7 +10425,7 @@ def dashboard_application_stage_destination(student):
     return f"{student_path}?{urlencode(params)}" if params else student_path
 
 
-def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None):
+def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None, initial_snapshot=None):
     stage_students = tuple(stage_students)
     active_counts = active_cycle_type_counts(stage_students)
     if canonical is None:
@@ -10488,10 +10488,14 @@ def dashboard_workflow_distribution_chart_html(stage_students, *, canonical=None
           </summary>
           <div class="dashboard-workflow-distribution-chart__students">{student_links}</div>
         </details>""")
+    initial_snapshot_attribute = (
+        ' data-business-sync-initial-snapshot="' + esc(json.dumps(initial_snapshot)) + '"'
+        if initial_snapshot is not None else ''
+    )
     return f"""
       <link rel="stylesheet" href="/assets/student-lifecycle-phase6.css?v=4">
       <script defer src="/assets/student-lifecycle-phase6.js?v=2"></script>
-      <section id="dashboard-workflow-distribution-chart" class="dashboard-workflow-distribution-chart" aria-label="学生申请阶段分布横向条形图" data-lifecycle-stage-distribution data-business-sync-fragment="dashboard-workflow">
+      <section id="dashboard-workflow-distribution-chart" class="dashboard-workflow-distribution-chart" aria-label="学生申请阶段分布横向条形图" data-lifecycle-stage-distribution data-business-sync-fragment="dashboard-workflow" data-business-sync-endpoint="/api/business-changes/snapshot?surface=dashboard_workflow&amp;view=chart" data-business-sync-local-refresh{initial_snapshot_attribute}>
         <header class="dashboard-workflow-distribution-chart__header"><div><h2>学生申请阶段分布</h2><p>共 {total_count} 个在办周期 · 点击阶段查看对应流程和待办原因。</p></div>
           <div hidden data-business-sync-controls><button type="button" class="secondary compact" data-business-sync-refresh>刷新</button> <small role="status" data-business-sync-status></small></div>
           <div class="lifecycle-stage-filters" role="group" aria-label="Lifecycle Type filter" hidden>{''.join(f'<button type="button" class="secondary compact{" active" if key == "all" else ""}" data-lifecycle-stage-filter="{key}" aria-pressed="{"true" if key == "all" else "false"}">{label}</button>' for key, label in (("all", "ALL"), ("initial", "INITIAL"), ("transfer", "TRANSFER"), ("progression", "PROGRESSION")))}</div>
@@ -27723,7 +27727,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/mobile$", self.mobile_dashboard),
                 (r"^/revenue$", self.revenue_workspace),
                 (r"^/revenue/initialization$", self.revenue_initialization),
-                (r"^/revenue/(contracts/upload|contracts/manual-extraction|contracts/extraction/review|contracts/activate|contracts/school/(?:bind|register|mail-recipient|upload|preview|activate|toorak-draft|toorak-preview|toorak-activate|toorak-analyze|toorak-review|configurable-draft|configurable-analyze|configurable-review|configurable-preview|configurable-activate|stage)|master-agent/import|master-agent/match/confirm|master-agent/invoice|master-agent/payment|direct-commission/claim|direct-commission/invoice|direct-commission/payment|billing/payment|billing/receipt|historical/(?:save|confirm|cancel|evidence)|cases/tuition|cases/commencement)$", self.revenue_action),
+                (r"^/revenue/(contracts/upload|contracts/manual-extraction|contracts/extraction/review|contracts/activate|contracts/school/(?:bind|register|mail-recipient|upload|preview|activate|toorak-draft|toorak-preview|toorak-activate|toorak-analyze|toorak-review|configurable-draft|configurable-analyze|configurable-review|configurable-preview|configurable-activate|stage)|master-agent/import|master-agent/match/confirm|master-agent/invoice|master-agent/payment|direct-commission/claim|direct-commission/invoice|direct-commission/payment|billing/(?:payment|receipt|refund)|historical/(?:save|confirm|cancel|evidence)|cases/tuition|cases/commencement)$", self.revenue_action),
                 (r"^/revenue/contracts/upload-school$", self.revenue_school_contract_upload),
                 (r"^/revenue/institution-commission-drafts/([^/]+)$", self.revenue_institution_commission_draft),
                 (r"^/revenue/vic-rcti/([a-z0-9-]+)(?:/([a-z0-9-]+))?$", self.revenue_vic_rcti),
@@ -27737,7 +27741,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/revenue/cases/([^/]+)/toorak-claim/(evidence|preview|issue|invoice)$", self.revenue_case_toorak_claim),
                 (r"^/revenue/cases/([^/]+)/toorak-forecast/(preview|save)$", self.revenue_case_toorak_forecast),
                 (r"^/(?:mobile/)?revenue/historical-receipts$", self.revenue_historical_receipts),
-                (r"^/revenue/cases/([^/]+)/billing/(payment|receipt)$", self.revenue_case_billing_action),
+                (r"^/revenue/cases/([^/]+)/billing/(payment|receipt|refund)$", self.revenue_case_billing_action),
                 (r"^/revenue/cases/([^/]+)/billing$", self.revenue_case_billing),
                 (r"^/revenue/cases/([^/]+)$", self.revenue_case_workbench),
                 (r"^/revenue/(cases|billing|direct-commission|master-agent|contracts|reconciliation)$", self.revenue_workspace_page),
@@ -28108,7 +28112,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 (r"^/students/(\d+)/offer/resume-selection$", self.offer_selection_resume),
                 (r"^/students/(\d+)/coe$", self.coe_create),
                 (r"^/students/(\d+)/coe/(\d+)/update$", self.coe_update),
-                (r"^/students/(\d+)/coe/(\d+)/confirm-final-school$", self.confirm_final_school_coe),
                 (r"^/students/(\d+)/offer/final-school-submission$", self.confirm_final_school_submission),
                 (r"^/students/(\d+)/visa$", self.visa_create),
                 (r"^/students/(\d+)/visa/(\d+)/update$", self.visa_update),
@@ -30431,6 +30434,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.error_page("无权限执行该操作。", HTTPStatus.FORBIDDEN)
         except ValueError as error:
             detail = str(error)
+            if action_name == "billing/refund":
+                message = detail if any("\u4e00" <= ch <= "\u9fff" for ch in detail) else "退款未保存，请核对退款信息或刷新后重试。"
+                return self.error_page(message, HTTPStatus.BAD_REQUEST)
             if action_name == "billing/receipt" and any("\u4e00" <= ch <= "\u9fff" for ch in detail):
                 return self.error_page("收据未生成：" + detail, HTTPStatus.BAD_REQUEST)
             if action_name.startswith("historical/"):
@@ -30505,6 +30511,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 ),
                 None,
             )
+        if action_name == "billing/refund":
+            uploads = [item for item in self.files if item.field_name == "refund_evidence" and item.filename]
+            if len(uploads) != 1:
+                raise ValueError("请上传一份退款凭证。")
+            upload = uploads[0]
         connection = db.connect()
         try:
             if scoped_case_uid:
@@ -30525,7 +30536,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                             WHERE f.uid=? AND c.uid=? AND f.status!='cancelled'""",
                         (str(self.form.get("fee_item_uid") or ""), scoped_case_uid),
                     ).fetchone()
-                elif action_name == "billing/receipt":
+                elif action_name in {"billing/receipt", "billing/refund"}:
                     owned = connection.execute(
                         """SELECT 1
                              FROM revenue_payments p
@@ -30786,6 +30797,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     if scoped_case_uid else "/revenue/billing"
                 )
                 message = "客户收款已确认并分配。"
+            elif action_name == "billing/refund":
+                result = actions.record_client_refund(self.form, upload)
+                billing_url = (
+                    desktop_case_url(scoped_case_uid) + "/billing"
+                    if scoped_case_uid else "/revenue/billing"
+                )
+                destination = billing_url + "#payment-" + quote(result["payment_uid"], safe="")
+                message = "客户退款已登记。"
             elif action_name == "billing/receipt":
                 company = contract_company_payload()
                 actions.issue_client_receipt(
@@ -31458,6 +31477,16 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 db._release_connection(connection)
             if not visible:
                 return self.error_page("该学生凭证当前不可访问。", HTTPStatus.FORBIDDEN)
+        if document["document_kind"] == "client_refund_evidence":
+            from revenue.client_refunds import can_view_refund_evidence
+
+            connection = db.connect()
+            try:
+                visible = can_view_refund_evidence(connection, document_uid)
+            finally:
+                db._release_connection(connection)
+            if not visible:
+                return self.error_page("该退款凭证当前不可访问。", HTTPStatus.FORBIDDEN)
         from revenue.vic_rcti_reconciliation import DOCUMENTS as VIC_RCTI_DOCUMENTS
         if document["document_kind"] in VIC_RCTI_DOCUMENTS:
             return self.error_page("请从维州 RCTI 记录打开原件。", HTTPStatus.FORBIDDEN)
@@ -31849,9 +31878,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 ))
         finally:
             db._release_connection(stage_connection)
-        stage_chart_html = dashboard_workflow_distribution_chart_html(
-            application_stage_students, canonical=is_workflow_v2_active(db)
-        )
         recent = db.all(
             """SELECT s.student_id,s.passport_first_name,s.passport_last_name,s.created_date
                FROM students s
@@ -31900,6 +31926,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         dashboard_workflow_chart_css = '<link rel="stylesheet" href="/assets/dashboard-workflow-distribution-chart-v1.css?v=12">'
         dashboard_signed_institution_css = '<link rel="stylesheet" href="/assets/dashboard-signed-institution-structure-chart-v1.css?v=5">'
         initial_snapshot_attribute = ""
+        stage_chart_snapshot = None
         if not fragment_only:
             from business_changes.runtime import enabled
             if enabled(read_context.connection):
@@ -31911,6 +31938,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     authorization_context=read_authorization_context(read_context.connection, self.user),
                 )
                 initial_snapshot_attribute = ' data-business-sync-initial-snapshot="' + esc(json.dumps(initial_snapshot)) + '"'
+                stage_chart_snapshot = rendered_snapshot_hint(
+                    read_context.connection, (Subject('dashboard', 'workflow'),),
+                    can_read=lambda subject: can_access_module(self.user, 'dashboard'),
+                )
+        stage_chart_html = dashboard_workflow_distribution_chart_html(
+            application_stage_students, canonical=is_workflow_v2_active(db),
+            initial_snapshot=stage_chart_snapshot,
+        )
         body = f"""
         <div style="display:contents" data-business-sync-fragment="dashboard-overview" data-business-sync-endpoint="/api/business-changes/snapshot?surface=dashboard_overview"{initial_snapshot_attribute}>
         {dashboard_workflow_chart_css}
@@ -62016,6 +62051,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         from business_changes.snapshots import read_scope
         from business_changes.commands import TransactionView
         from revenue.school_courses import available, accepted_course_offers, render_course_fields, read_course_fields, save_coe_courses, course_details
+        from current_coe_evidence import require_editable_course_evidence
         if method not in {'GET','POST'}:
             return self.error_page('不支持此请求方式。',405)
         if not self._can_correct_student_tuition() or not allowed(self.user,'coe.manage'):
@@ -62024,6 +62060,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         if record is None:
             return self.error_page('CoE不存在或不属于此学生。',404)
         with read_scope(db) as connection:
+            try:
+                require_editable_course_evidence(connection, student_id, coe_id)
+            except ValueError as error:
+                return self.error_page(str(error), 409)
             if not available(connection):
                 return self.error_page('课程功能尚未完成迁移。',400)
             from revenue.student_intake_tuition import accepted_offer_context
@@ -62196,63 +62236,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 panel += "</details>"
             panels.append(panel)
         return "".join(panels)
-
-    def final_school_coe_panel_rows(self, student_id):
-        from final_school_coe import historical_school_coe_rows, school_coe_rows
-        from business_changes.snapshots import read_scope
-        with read_scope(db) as conn:
-            if not is_workflow_v2_active(conn) or not conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE name='final_school_coe_confirmations'"
-            ).fetchone():
-                return {}
-            ids = tuple(row[0] for row in conn.execute(
-                "SELECT id FROM application_cycles WHERE student_id=? AND status='active'", (student_id,)
-            ))
-            rows = {row["coe_id"]: row for row in school_coe_rows(conn, ids)}
-            if can_workflow_module_save(self.user, "COE + OSHC") and allowed(self.user, "offers.manage"):
-                for row in historical_school_coe_rows(conn, student_id):
-                    entry = rows.setdefault(row["coe_id"], {"coe_id": row["coe_id"], "historical_offers": []})
-                    if "historical_offers" in entry:
-                        entry["historical_offers"].append(row)
-            return rows
-
-    def final_school_coe_panel(self, student_id, row):
-        from final_school_coe import eligibility_reason, evidence_snapshot
-
-        if row is None:
-            return ""
-        if "historical_offers" in row:
-            options = "".join(
-                f'<option value="{item["offer_event_id"]}">{esc(item["school_name_snapshot"])}</option>'
-                for item in row["historical_offers"]
-            )
-            return f"""
-              <form method="post" action="/students/{student_id}/coe/{row['coe_id']}/confirm-final-school">
-                <input type="hidden" name="csrf" value="{esc(self.csrf)}">
-                <label>已签历史 Offer<select name="historical_offer_event_id" required>
-                  <option value="">请选择</option>{options}</select></label>
-                <label><input type="checkbox" name="reviewed" value="yes" required>
-                  已核对已签 Offer 和主课 CoE 原件，确认属于同一学校及申请
-                </label>
-                <button class="secondary">补记最终学校并确认 CoE</button>
-              </form>"""
-        school = esc(row["school_name_snapshot"])
-        reason = eligibility_reason(row)
-        if reason:
-            return f'<p>{school} · {esc(reason)}</p>'
-        if row["evidence_snapshot"] == evidence_snapshot(row):
-            return f'<p>已确认主课 CoE · {school}</p>'
-        if not can_workflow_module_save(self.user, "COE + OSHC"):
-            return f'<p>待核对主课 CoE · {school}</p>'
-        return f"""
-          <form method="post" action="/students/{student_id}/coe/{row['coe_id']}/confirm-final-school">
-            <input type="hidden" name="csrf" value="{esc(self.csrf)}">
-            <input type="hidden" name="acceptance_id" value="{row['acceptance_id']}">
-            <label><input type="checkbox" name="reviewed" value="yes" required>
-              已查阅原件，并确认此 CoE 是 {school} 当前申请的主课 CoE
-            </label>
-            <button class="secondary">确认最终学校 CoE</button>
-          </form>"""
 
     def offer_panel(self, student_id, offers):
         lifecycle_contexts = getattr(self, "_student_lifecycle_record_contexts", {})
@@ -62659,8 +62642,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
     def coe_panel(self, student_id, records):
         lifecycle_contexts = getattr(self, "_student_lifecycle_record_contexts", {})
-        records = [self.backfill_coe_record(student_id, record) for record in records]
-        final_coe_rows = self.final_school_coe_panel_rows(student_id)
+        from business_changes.snapshots import read_scope
+        from current_coe_evidence import read_course_evidence
+
+        with read_scope(db) as connection:
+            evidence = read_course_evidence(connection, student_id=student_id)
+        records = [
+            record if record["id"] in evidence.historical else self.backfill_coe_record(student_id, record)
+            for record in records
+        ]
 
         def file_cell(record):
             if not record["file_path"]:
@@ -62681,27 +62671,39 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             cards = []
             for record in selected:
                 form_id = f"coe-edit-{record['id']}-{re.sub(r'[^a-z0-9]+', '-', title.lower())}"
-                controls = [
-                    f'<input type="hidden" name="csrf" value="{esc(self.csrf)}">',
-                    getattr(self,'business_change_record_hidden_fields',lambda *args:'')('COE + OSHC',student_id,int(record['id'])),
-                    f'<input type="hidden" name="document_kind" value="{esc(record["document_kind"])}">',
-                ]
+                historical = record["id"] in evidence.historical
+                controls = []
+                if not historical:
+                    controls = [
+                        f'<input type="hidden" name="csrf" value="{esc(self.csrf)}">',
+                        getattr(self,'business_change_record_hidden_fields',lambda *args:'')('COE + OSHC',student_id,int(record['id'])),
+                        f'<input type="hidden" name="document_kind" value="{esc(record["document_kind"])}">',
+                    ]
                 for label, name, kind, fallback in fields:
                     value = record[name] or (record[fallback] if fallback and fallback in record.keys() else "")
-                    if kind == "date":
+                    if historical:
+                        shown = display_date_value(value) if kind == "date" else value
+                        controls.append(f'<div><small>{esc(label)}</small><div>{esc(shown or "")}</div></div>')
+                    elif kind == "date":
                         input_value = display_date_value(value)
                         controls.append(f'<label>{esc(label)}<input type="text" name="{esc(name)}" value="{esc(input_value)}" placeholder="dd/mm/yyyy" pattern="\\d{{2}}/\\d{{2}}/\\d{{4}}" inputmode="numeric" maxlength="10"></label>')
                     else:
                         controls.append(f'<label>{esc(label)}<input type="{esc(kind)}" name="{esc(name)}" value="{esc(value or "")}"></label>')
+                if historical:
+                    status = '<span class="status">历史 CoE</span>'
+                    details = f'<div class="coe-fields">{"".join(controls)}</div>'
+                else:
+                    status = ('<span class="status ok">当前 CoE</span>' if record["id"] in evidence.current
+                              else '<span class="status ok">已上传</span>')
+                    details = f'<form id="{form_id}" class="coe-fields" data-ajax-student-tab-form data-refresh-tab="coe" data-refresh-panel="false" method="post" action="/students/{student_id}/coe/{record["id"]}/update">{"".join(controls)}<div class="coe-save-row"><button class="secondary">保存修改</button><small class="inline-save-status" data-save-status></small></div></form>'
                 cards.append(
                     f"""<article class="coe-record-card">
                       {lifecycle_context_badge_html(lifecycle_contexts.get(int(record["id"])))}
                       <div class="coe-record-layout">
                         <div class="coe-record-main">
-                          <div class="coe-record-head"><div><span class="status ok">已上传</span><strong>{esc(record["document_kind"])}</strong></div><small>{esc(display_datetime(record["created_at"]) if "created_at" in record.keys() else "")}</small></div>
-                          <form id="{form_id}" class="coe-fields" data-ajax-student-tab-form data-refresh-tab="coe" data-refresh-panel="false" method="post" action="/students/{student_id}/coe/{record["id"]}/update">{"".join(controls)}<div class="coe-save-row"><button class="secondary">保存修改</button><small class="inline-save-status" data-save-status></small></div></form>
-                          {self.final_school_coe_panel(student_id, final_coe_rows.get(record["id"]))}
-                          {(f'<a class="secondary button-link" href="/students/{student_id}/coe/{int(record["id"])}/course-tuition">核对 / 补充课程学费</a>' if record['document_kind'] in {'COE','COE_CAAW'} and self._can_correct_student_tuition() and allowed(self.user,'coe.manage') else '')}
+                          <div class="coe-record-head"><div>{status}<strong>{esc(record["document_kind"])}</strong></div><small>{esc(display_datetime(record["created_at"]) if "created_at" in record.keys() else "")}</small></div>
+                          {details}
+                          {(f'<a class="secondary button-link" href="/students/{student_id}/coe/{int(record["id"])}/course-tuition">核对 / 补充课程学费</a>' if not historical and record['document_kind'] in {'COE','COE_CAAW'} and self._can_correct_student_tuition() and allowed(self.user,'coe.manage') else '')}
                         </div>
                         <aside class="coe-record-file">{file_cell(record)}</aside>
                       </div>
@@ -72193,6 +72195,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         lifecycle_stamp,
                     ),
                 ).lastrowid)
+                student_identity = inferred.get("_reviewed_student_identity")
+                if is_coe and student_identity:
+                    connection.execute(
+                        "UPDATE coe_oshc SET student_name_on_coe=? WHERE id=?",
+                        (f"{student_identity['given']} {student_identity['family']}", business_record_id),
+                    )
                 transfer_branch_id = (
                     self.transfer_v2_requested_branch_id(
                         connection,student_id,require_acceptance=True,
@@ -72213,6 +72221,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                         record_id=business_record_id,
                         application_cycle_id=coe_application_cycle_id,
                     )
+                    if is_coe:
+                        from current_coe_evidence import preserve_course_replacements
+                        preserve_course_replacements(connection, student_id, business_record_id)
                     if is_workflow_v2_active(connection):
                         from reviewed_upload_workflow import confirm_matching_school_coe
                         confirm_matching_school_coe(connection,student_id,business_record_id,
@@ -73600,35 +73611,6 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             return self.flash_redirect(f"/students/{student_id}?tab=offer", str(exc), "error")
         return self.flash_redirect(f"/students/{student_id}?tab=offer", "已确认递交给最终学校")
 
-    def confirm_final_school_coe(self, method, student_id, record_id):
-        from final_school_coe import confirm_historical_school_coe, confirm_school_coe
-
-        if method != "POST":
-            return self.error_page("Method Not Allowed", HTTPStatus.METHOD_NOT_ALLOWED)
-        if not can_workflow_module_save(self.user, "COE + OSHC"):
-            return self.deny_module_access("coe_oshc")
-        historical_offer = self.form.get("historical_offer_event_id")
-        if historical_offer and not allowed(self.user, "offers.manage"):
-            return self.deny_module_access("offer")
-        try:
-            if self.form.get("reviewed") != "yes":
-                raise ValueError("请先核对当前最终学校与主课 CoE")
-            with db.transaction() as conn:
-                if not is_workflow_v2_active(conn) or not conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name='final_school_coe_confirmations'"
-                ).fetchone():
-                    raise ValueError("CoE 确认功能尚未启用")
-                if historical_offer:
-                    confirm_historical_school_coe(
-                        conn, student_id, int(historical_offer), int(record_id), self.user, now_iso(),
-                    )
-                else:
-                    confirm_school_coe(conn, student_id, int(self.form.get("acceptance_id", "")),
-                                       int(record_id), self.user["id"], now_iso())
-        except ValueError as exc:
-            return self.flash_redirect(f"/students/{student_id}?tab=coe", str(exc), "error")
-        return self.flash_redirect(f"/students/{student_id}?tab=coe", "已确认最终学校主课 CoE")
-
     def coe_create(self, method, student_id):
         if method != "POST":
             return
@@ -73767,8 +73749,14 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         oshc_company = fv("oshc_company_name", "oshc_company_name") or fv("oshc_provider", "oshc_provider")
         oshc_commencement = fv("oshc_commencement_date", "oshc_commencement_date") or fv("oshc_start_date", "oshc_start_date")
         oshc_expiry = fv("oshc_expiry_date", "oshc_expiry_date") or fv("oshc_end_date", "oshc_end_date")
-        def persist_record(connection=None):
-            db.execute(
+        def persist_record(connection):
+            from current_coe_evidence import COE_KINDS, preserve_course_replacements, read_course_evidence
+
+            course_document = record["document_kind"] in COE_KINDS
+            before = preserve_course_replacements(connection, student_id, record_id) if course_document else None
+            if before is not None and int(record_id) in before.historical:
+                raise ValueError("这份 CoE 已由同一课程的新文件替代，历史记录仅供查阅。")
+            connection.execute(
                 """UPDATE coe_oshc SET document_kind=?,school_name=?,coe_start_date=?,coe_end_date=?,
                    oshc_provider=?,oshc_start_date=?,oshc_end_date=?,coe_provider=?,coe_course=?,coe_course_level=?,
                    letter_language_course_name=?,letter_language_start_date=?,letter_language_end_date=?,
@@ -73807,18 +73795,26 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     record_id, student_id,
                 ),
             )
+            if before is not None:
+                after = read_course_evidence(connection, student_id=student_id)
+                if after.historical - before.historical:
+                    raise ValueError("修改后的课程与另一份当前 CoE 重复，请核对课程归属。")
             db.audit(self.user, "update", "coe_oshc", record_id, new_value="coe_oshc_fields_updated")
-            if connection is not None:
-                process_revenue_coe_change(connection,int(record_id),int(self.user["id"]),now_iso())
+            process_revenue_coe_change(connection,int(record_id),int(self.user["id"]),now_iso())
             return int(record_id)
         atomic_result = None
-        if getattr(self,"business_changes_enabled",lambda:False)():
-            try:atomic_result = self.business_change_save_manual_record("COE + OSHC",student_id,int(record_id),persist_record)
-            except PermissionError:return self.deny_module_access("coe_oshc")
-            except ValueError as error:
-                if wants_json:return self.json_response({"ok":False,"error":str(error)},409)
-                return self.flash_redirect(f"/students/{student_id}?tab=coe",str(error),"error")
-        else:persist_record()
+        try:
+            if getattr(self,"business_changes_enabled",lambda:False)():
+                atomic_result = self.business_change_save_manual_record("COE + OSHC",student_id,int(record_id),persist_record)
+            else:
+                with db.transaction() as connection:
+                    persist_record(connection)
+        except PermissionError:
+            return self.deny_module_access("coe_oshc")
+        except ValueError as error:
+            if wants_json:
+                return self.json_response({"ok":False,"error":str(error)},409)
+            return self.flash_redirect(f"/students/{student_id}?tab=coe",str(error),"error")
         if wants_json:
             return self.json_response({
                 "ok": True,

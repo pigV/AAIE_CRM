@@ -199,6 +199,8 @@
     const pendingNavigationKey = 'aaie-business-post-navigation';
     const selector = '[data-business-sync-fragment]';
     const find = name => Array.from(doc.querySelectorAll(selector)).find(node => node.dataset.businessSyncFragment === name);
+    const ownedNodes = (fragment, query) => Array.from(fragment.querySelectorAll(query))
+      .filter(node => node.closest(selector) === fragment);
     const hint = () => {
       if (pageChannel) pageChannel.postMessage({type: 'changed'});
     };
@@ -208,13 +210,34 @@
       const endpoint = new URL(initial.dataset.businessSyncEndpoint, win.location.href);
       if (endpoint.origin !== win.location.origin) continue;
       const initialSnapshot = (() => { try { return JSON.parse(initial.dataset.businessSyncInitialSnapshot || 'null'); } catch (_) { return null; } })();
+      const localRefresh = initial.dataset.businessSyncLocalRefresh !== undefined;
+      let refreshing = false;
+      let latestStatus = {state: '', lastAppliedAsOf: initialSnapshot && initialSnapshot.as_of};
+      const showStatus = () => {
+        const current = find(name);
+        if (!current) return;
+        const {state, lastAppliedAsOf} = latestStatus;
+        for (const node of ownedNodes(current, '[data-business-sync-controls]')) node.hidden = false;
+        const labels = {current: '已同步', waiting: '有新数据，关闭预览或保存/取消编辑后更新', stale: '数据正在更新，稍后重试', busy: '同步繁忙，稍后自动重试', error: '更新未完成，点击刷新重试', login_required: '登录已过期，请重新登录后同步', forbidden: '当前账号没有查看权限，请核对账号权限'};
+        for (const node of ownedNodes(current, '[data-business-sync-discard-current]')) node.hidden = state !== 'waiting' || !current.querySelector('form[data-business-sync-dirty="1"]');
+        const stamp = lastAppliedAsOf ? new Date(lastAppliedAsOf).toLocaleTimeString('zh-CN', {hour12: false}) : '';
+        for (const node of ownedNodes(current, '[data-business-sync-status]')) {
+          node.textContent = (refreshing ? '刷新中…' : (labels[state] || '')) + (stamp ? ' · 上次同步 ' + stamp : '');
+        }
+        if (localRefresh) {
+          for (const button of ownedNodes(current, '[data-business-sync-refresh]')) {
+            button.disabled = refreshing;
+            button.textContent = refreshing ? '刷新中…' : '刷新';
+          }
+        }
+      };
       const versionEndpoint = new URL(endpoint.href);
       versionEndpoint.pathname = '/api/business-changes/versions';
       const fetchPacket = (url, request) => fetchSnapshotPacket(win.fetch.bind(win), url, request);
       const controller = createRefreshController({
         initialSnapshot,
         channel:pageChannel,
-        lightweightVisibility:name === 'dashboard-overview',
+        lightweightVisibility:localRefresh || name === 'dashboard-overview',
         intervalMs:5000,
         isVisible: () => {
           const current = find(name), panel = current && current.closest('[data-panel]');
@@ -225,7 +248,8 @@
           readSnapshot:request=>fetchPacket(endpoint.href,request)}),
         canApply: () => {
           const current = find(name);
-          return Boolean(current && !current.querySelector('form[data-business-sync-dirty="1"]') && !doc.querySelector('dialog[open]'));
+          return Boolean(current && (localRefresh ||
+            !current.querySelector('form[data-business-sync-dirty="1"]') && !doc.querySelector('dialog[open]')));
         },
         applySnapshot: packet => {
           const current = find(name);
@@ -248,36 +272,47 @@
           const detailKey = node => node.dataset.businessSyncKey || node.id ||
             (node.dataset.materialCategory ? 'material-category:' + node.dataset.materialCategory : '') ||
             (node.dataset.materialDetails ? 'material-details:' + node.dataset.materialDetails : '');
-          const open = new Map(Array.from(current.querySelectorAll(detailSelector)).map(node => [detailKey(node), node.open]).filter(([key]) => key));
-          const selected = Array.from(current.querySelectorAll('[data-lifecycle-stage-filter][aria-pressed="true"]')).map(node => node.dataset.lifecycleStageFilter).find(value => value !== 'all');
-          for (const node of incoming.querySelectorAll(detailSelector)) if (open.has(detailKey(node))) node.open = open.get(detailKey(node));
+          const open = new Map(ownedNodes(current, detailSelector).map(node => [detailKey(node), node.open]).filter(([key]) => key));
+          const selected = ownedNodes(current, '[data-lifecycle-stage-filter][aria-pressed="true"]').map(node => node.dataset.lifecycleStageFilter).find(value => value !== 'all');
+          for (const node of ownedNodes(incoming, detailSelector)) if (open.has(detailKey(node))) node.open = open.get(detailKey(node));
           const x = win.scrollX, y = win.scrollY;
-          const buttonFocused = current.contains(doc.activeElement) && doc.activeElement.hasAttribute('data-business-sync-refresh');
+          const active = doc.activeElement;
+          const buttonFocused = current.contains(active) && active.hasAttribute('data-business-sync-refresh');
+          // Independently synchronized children retain their newer snapshot and pending refresh state.
+          const localSelector = selector + '[data-business-sync-local-refresh]';
+          const localFragments = new Map(Array.from(current.querySelectorAll(localSelector))
+            .map(node => [node.dataset.businessSyncFragment, node]));
+          for (const node of incoming.querySelectorAll(localSelector)) {
+            const previous = localFragments.get(node.dataset.businessSyncFragment);
+            if (previous && controllers.has(node.dataset.businessSyncFragment)) node.replaceWith(previous);
+          }
           current.replaceWith(incoming);
           doc.dispatchEvent(new win.CustomEvent('aaie:business-fragment-rendered', {detail: {root: incoming}}));
           if (selected) {
-            const button = Array.from(incoming.querySelectorAll('[data-lifecycle-stage-filter]')).find(node => node.dataset.lifecycleStageFilter === selected);
+            const button = ownedNodes(incoming, '[data-lifecycle-stage-filter]').find(node => node.dataset.lifecycleStageFilter === selected);
             if (button) button.click();
           }
           if (buttonFocused) {
-            const button = incoming.querySelector('[data-business-sync-refresh]');
+            const button = incoming.contains(active) ? active : ownedNodes(incoming, '[data-business-sync-refresh]')[0];
             if (button) button.focus({preventScroll: true});
           }
           win.scrollTo(x, y);
         },
-        onStatus: ({state, lastAppliedAsOf}) => {
-          const current = find(name);
-          if (!current) return;
-          for (const node of current.querySelectorAll('[data-business-sync-controls]')) node.hidden = false;
-          const labels = {current: '已同步', waiting: '有新数据，关闭预览或保存/取消编辑后更新', stale: '数据正在更新，稍后重试', busy: '同步繁忙，稍后自动重试', error: '更新未完成，点击刷新重试', login_required: '登录已过期，请重新登录后同步', forbidden: '当前账号没有查看权限，请核对账号权限'};
-          for (const node of current.querySelectorAll('[data-business-sync-discard-current]')) node.hidden = state !== 'waiting' || !current.querySelector('form[data-business-sync-dirty="1"]');
-          const stamp = lastAppliedAsOf ? new Date(lastAppliedAsOf).toLocaleTimeString('zh-CN', {hour12: false}) : '';
-          for (const node of current.querySelectorAll('[data-business-sync-status]')) {
-            node.textContent = (labels[state] || '') + (stamp ? ' · 上次同步 ' + stamp : '');
-          }
+        onStatus: value => {
+          latestStatus = value;
+          showStatus();
         }
       });
-      controllers.set(name, controller);
+      controllers.set(name, {...controller, refreshFromButton() {
+        if (!localRefresh) return controller.refresh('manual');
+        if (refreshing) return;
+        refreshing = true;
+        showStatus();
+        return controller.refresh('manual').finally(() => {
+          refreshing = false;
+          showStatus();
+        });
+      }});
       controller.start();
     } };
     scan();
@@ -334,7 +369,7 @@
       if (!button) return;
       const fragment = button.closest('[data-business-sync-endpoint][data-business-sync-fragment]');
       const controller = fragment && controllers.get(fragment.dataset.businessSyncFragment);
-      if (controller) controller.refresh('manual');
+      if (controller) controller.refreshFromButton();
     };
     const committed = () => {
       if (!controllers.size) hint();
