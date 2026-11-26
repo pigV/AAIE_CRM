@@ -193,7 +193,14 @@ def check_upload(conn, case_id, digest, category=None, *, read_bytes=None, exclu
             raise ValueError('Current Visa Case already has this document; soft-delete the old file first.')
 
 
-def case_projection(conn, case_id, *, read_text=None):
+def _latest_letter_extraction(conn, case_id, document_id):
+    return _row(conn, '''
+        SELECT proposed_json FROM visa_letter_extractions
+        WHERE visa_case_id=? AND document_id=? ORDER BY id DESC LIMIT 1
+    ''', (case_id, document_id))
+
+
+def case_projection(conn, case_id, *, read_text=None, grant_date_only=False):
     case = _row(conn, 'SELECT * FROM visa_cases WHERE id=?', (case_id,))
     docs = active_documents(conn, case_id)
     present = tables(conn)
@@ -205,19 +212,32 @@ def case_projection(conn, case_id, *, read_text=None):
         category = doc['authority_category']
         if category not in {'grant_letter','immi_acknowledgment','health_examination'}:
             continue
+        if grant_date_only and category != 'grant_letter':
+            continue
+        saved_proposal = None
+        can_load_extraction = doc.get('id') and 'visa_letter_extractions' in present
+        if grant_date_only and can_load_extraction:
+            # Read the proposal for this exact active document before opening its file.
+            extraction = _latest_letter_extraction(conn, case_id, doc['id'])
+            saved_proposal = json.loads(extraction['proposed_json']) if extraction else None
+        has_saved_grant_date = (
+            saved_proposal and saved_proposal.get('document_kind') == 'grant'
+            and saved_proposal.get('decision_date')
+        )
         text = ''
-        try:
-            text = read_text(doc) if read_text else safe_text(conn,case,doc)
-        except (OSError, ValueError, UnicodeError):
-            pass
-        proposal = propose_letter(text) if text else None
-        if not proposal and doc.get('id') and 'visa_letter_extractions' in present:
-            extraction = _row(conn,'SELECT proposed_json FROM visa_letter_extractions WHERE visa_case_id=? AND document_id=? ORDER BY id DESC LIMIT 1',(case_id,doc['id']))
+        if not has_saved_grant_date:
+            try:
+                text = read_text(doc) if read_text else safe_text(conn, case, doc)
+            except (OSError, ValueError, UnicodeError):
+                pass
+        proposal = (propose_letter(text) if text else None) or saved_proposal
+        if not proposal and can_load_extraction and not grant_date_only:
+            extraction = _latest_letter_extraction(conn, case_id, doc['id'])
             proposal = json.loads(extraction['proposed_json']) if extraction else None
         if category == 'grant_letter':
             grants.append((doc,proposal if proposal and proposal.get('document_kind') == 'grant' else {}))
         ack = ack or category == 'immi_acknowledgment'
-        if text:
+        if text and not grant_date_only:
             parsed = parse_processing_dates(text)['fields']
             field_key = {'grant_letter':'grant_sent_on','immi_acknowledgment':'acknowledge_sent_on','health_examination':'health_exam_date'}.get(category)
             if field_key and parsed[field_key]['status'] != 'not_detected':
@@ -362,8 +382,8 @@ def _student_case_ids(conn, student_ids):
 
 
 def student_grant_date_map(conn, student_ids):
-    """Omit students without a current Case, retain authoritative empty dates."""
-    return {student_id: case_projection(conn, case_id)['grant_date']
+    """Read list dates from saved extractions, with an exact legacy Grant-file fallback."""
+    return {student_id: case_projection(conn, case_id, grant_date_only=True)['grant_date']
             for student_id, case_id in _student_case_ids(conn, student_ids).items()}
 
 

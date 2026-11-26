@@ -69,6 +69,7 @@ class VisaAuthorityTests(unittest.TestCase):
         from datetime import date
         from dashboard_confirmed_stages import _visa_status
         from dashboard_visa_metrics import load_student_visa_grant_counts
+        from visa_document_lifecycle import student_grant_date_map
         self.enable_sync()
         d=docs.register_document(self.c,1,file_path='/synthetic/grant.pdf',original_name='grant.pdf',version=1,sha256='d'*64,category='grant_letter',**self.f.actor)
         before=(self.case()['status'],self.case()['result_status'])
@@ -90,9 +91,11 @@ class VisaAuthorityTests(unittest.TestCase):
         docs.confirm_letter(self.c,1,extraction['id'],values=json.loads(extraction['proposed_json']),**self.f.actor)
         self.assertEqual('granted',_visa_status(self.case(),self.c))
         self.assertEqual((1,1),load_student_visa_grant_counts(self.c,today=date(2025,1,20)))
+        self.assertEqual({'S1':'2025-01-20'},student_grant_date_map(self.c,('S1',)))
         docs.set_document_archived(self.c,1,d['id'],archived=True,**self.f.actor)
         self.assertIsNone(_visa_status(self.case(),self.c))
         self.assertEqual((0,0),load_student_visa_grant_counts(self.c,today=date(2025,1,20)))
+        self.assertEqual({'S1':''},student_grant_date_map(self.c,('S1',)))
 
     def test_staff_can_confirm_a_corrected_grant_when_machine_extraction_is_unknown(self):
         self.enable_sync()

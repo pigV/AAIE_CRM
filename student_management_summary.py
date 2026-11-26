@@ -129,11 +129,43 @@ def _management_stage(
     return "no_active_lifecycle", "No Active Lifecycle", 100, lifecycle_type
 
 
+def _load_visa_grant_dates(connection, ids, placeholders, has_cycle_schema):
+    visa_dates = {}
+    if has_cycle_schema:
+        visa_date_rows = _rows(
+            connection,
+            f"""SELECT cycle.student_id,decision.decision_date AS visa_grant_date
+                  FROM visa_decision_events decision
+                  JOIN application_cycles cycle ON cycle.id=decision.application_cycle_id
+                 WHERE decision.decision_type='grant'
+                   AND cycle.student_id IN ({placeholders})
+                 ORDER BY decision.decision_date DESC,decision.id DESC""",
+            ids,
+        )
+    else:
+        visa_date_rows = _rows(
+            connection,
+            f"""SELECT student_id,visa_grant_date
+                  FROM visas
+                 WHERE student_id IN ({placeholders})
+                   AND lower(COALESCE(visa_status,'')) IN ('granted','active')
+                   AND COALESCE(visa_grant_date,'')<>''
+                 ORDER BY visa_grant_date DESC,id DESC""",
+            ids,
+        )
+    for row in visa_date_rows:
+        visa_dates.setdefault(str(row["student_id"]), str(row["visa_grant_date"] or ""))
+    from visa_document_lifecycle import student_grant_date_map
+    visa_dates.update(student_grant_date_map(connection, ids))
+    return visa_dates
+
+
 def load_student_management_summary_map(
     connection,
     student_ids: Iterable[str],
     *,
     read_context=None,
+    include_visa_grant_date=True,
 ) -> dict[str, StudentManagementSummary]:
     ids = tuple(dict.fromkeys(str(value) for value in student_ids))
     if not ids:
@@ -197,33 +229,10 @@ def load_student_management_summary_map(
     accepted = {}
     for row in accepted_rows:
         accepted.setdefault(str(row["student_id"]), row)
-    visa_dates = {}
-    if has_cycle_schema:
-        visa_date_rows = _rows(
-            connection,
-            f"""SELECT cycle.student_id,decision.decision_date AS visa_grant_date
-                  FROM visa_decision_events decision
-                  JOIN application_cycles cycle ON cycle.id=decision.application_cycle_id
-                 WHERE decision.decision_type='grant'
-                   AND cycle.student_id IN ({placeholders})
-                 ORDER BY decision.decision_date DESC,decision.id DESC""",
-            ids,
-        )
-    else:
-        visa_date_rows = _rows(
-            connection,
-            f"""SELECT student_id,visa_grant_date
-                  FROM visas
-                 WHERE student_id IN ({placeholders})
-                   AND lower(COALESCE(visa_status,'')) IN ('granted','active')
-                   AND COALESCE(visa_grant_date,'')<>''
-                 ORDER BY visa_grant_date DESC,id DESC""",
-            ids,
-        )
-    for row in visa_date_rows:
-        visa_dates.setdefault(str(row["student_id"]), str(row["visa_grant_date"] or ""))
-    from visa_document_lifecycle import student_grant_date_map
-    visa_dates.update(student_grant_date_map(connection, ids))
+    visa_dates = (
+        _load_visa_grant_dates(connection, ids, placeholders, has_cycle_schema)
+        if include_visa_grant_date else {}
+    )
     visa_case_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info('visa_cases')")}
     final_result_sql = "final_result" if "final_result" in visa_case_columns else "NULL AS final_result"
     archived_at_sql = "archived_at" if "archived_at" in visa_case_columns else "NULL AS archived_at"

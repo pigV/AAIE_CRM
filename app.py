@@ -31890,6 +31890,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                 recent_summary_connection,
                 (row["student_id"] for row in recent),
                 read_context=read_context,
+                include_visa_grant_date=False,
             )
         finally:
             db._release_connection(recent_summary_connection)

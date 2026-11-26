@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sqlite3
 import unittest
+from unittest.mock import patch
 
 from tests.test_visa_documents_candidate import SCHEMA, STAMP
 from visa_document_lifecycle import active_documents
@@ -83,3 +84,19 @@ class StudentListVisaBatchingTests(unittest.TestCase):
         """)
         self.assertEqual({'S1':'2026-08-06','S3':''},
                          student_grant_date_map(connection, ('S1','S2','S3','S1')))
+
+        connection.executescript("""
+            INSERT INTO visa_case_documents(id,visa_case_id,file_path,original_name,version,sha256,created_by,created_at)
+              VALUES(102,1,'/synthetic/ack.pdf','ack.pdf',1,'ack',1,'2026-08-01');
+            INSERT INTO visa_document_audit(visa_case_id,document_id,action,before_json,after_json,actor_user_id,occurred_at)
+              VALUES(1,102,'document_category_selected','{}','{"category":"immi_acknowledgment","confirmed":true}',1,'2026-08-01');
+        """)
+        with patch('visa_document_lifecycle.safe_text', return_value='') as reader:
+            self.assertEqual({'S1':'2026-08-06'}, student_grant_date_map(connection, ('S1',)))
+            self.assertEqual([], [call.args[2]['id'] for call in reader.call_args_list])
+
+        connection.execute('DELETE FROM visa_letter_extractions WHERE document_id=101')
+        text = 'Visa Grant Notification\nStudent (subclass 500)\nDate of grant 06 November 2026'
+        with patch('visa_document_lifecycle.safe_text', return_value=text) as reader:
+            self.assertEqual({'S1':'2026-11-06'}, student_grant_date_map(connection, ('S1',)))
+            self.assertEqual([101], [call.args[2]['id'] for call in reader.call_args_list])

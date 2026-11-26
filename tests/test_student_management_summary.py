@@ -1,6 +1,7 @@
 import sqlite3
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 class StudentManagementSummaryTests(unittest.TestCase):
@@ -68,6 +69,17 @@ class StudentManagementSummaryTests(unittest.TestCase):
         self.assertEqual({}, load_student_management_summary_map(
             self.connection, [], read_context=None
         ))
+
+    def test_recent_students_keep_display_fields_without_loading_visa_dates(self):
+        from dataclasses import replace
+        from student_management_summary import load_student_management_summary_map
+
+        full = load_student_management_summary_map(self.connection, ["S1", "S3"])
+        with patch("visa_document_lifecycle.student_grant_date_map", side_effect=AssertionError("unused on dashboard")):
+            recent = load_student_management_summary_map(
+                self.connection, ["S1", "S3"], include_visa_grant_date=False,
+            )
+        self.assertEqual({key: replace(value, visa_grant_date="") for key, value in full.items()}, recent)
 
     def test_batch_query_count_is_constant(self):
         from student_management_summary import load_student_management_summary_map
