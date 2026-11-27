@@ -69742,16 +69742,15 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         zip_export_url = f"/students/{quote(student_id)}/visa-cases/{case['id']}/materials-zip"
         material_mode = active_tab in {"material_checklist", "visa_result"}
         overview_fields = f'<a class="button-link" href="/visa-management/cases/{case["id"]}/workspace">Prepared / IMMI Submitted / Staff Confirm</a><dl class="visa-management-detail-grid">{field_cards}</dl>'
-        if material_mode:
-            overview_fields = f'<details class="visa-material-case-details"><summary>展开案件详情与更多操作</summary>{overview_fields}</details>'
         processing_entry = (f'<a class="visa-material-case-details" href="{esc(self.visa_case_return_path(student_id, case["id"], "visa_result", "visa-result-dates"))}">查看签证日期与处理信息</a>' if active_tab == "material_checklist" else "")
-        hero_title = f'{student_name} · {student_id}' if material_mode else "Visa Case 基础信息"
+        applicant_name = (case["applicant_name"] if "applicant_name" in case.keys() else "") or (case["main_applicant"] if "main_applicant" in case.keys() else "")
+        hero_title = applicant_name or student_name
         display_case=(self._visa_display_case(case) if getattr(self,"business_changes_enabled",lambda:False)() else dict(case))
         hero_status='签证材料需核实' if display_case.get('_business_needs_review') else display_case['status']
-        hero_description = (f'{case["visa_type"] or ""} · {case["case_owner"] or "未分配负责人"} · {hero_status}' if material_mode
-                            else f'{student_name} · {student_id}。本页按工作区分为 Info Collection、Material Checklist、Visa Result 和 Evidence / AI Review。')
+        hero_description = f'{case["visa_type"] or ""} · 学生 {student_name} · 学生编号 {student_id} · 案件 #{case["id"]} · {case["case_owner"] or "未分配负责人"} · {hero_status}'
         body = f"""
-        <div class="visa-management-page{' visa-material-case-page' if material_mode else ''}">
+        <link rel="stylesheet" href="/assets/visa-case-scheme-b.css?v=1">
+        <div class="visa-management-page visa-case-scheme-b{' visa-material-case-page' if material_mode else ''}">
           <section class="panel visa-management-hero">
             <div>
               <span class="eyebrow">Visa Case Detail</span>
@@ -69760,6 +69759,12 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             </div>
             <div class="row-actions"><a class="secondary button-link" href="/students/{quote(student_id)}/visa-cases">返回列表</a><a class="secondary button-link" href="/students/{quote(student_id)}">学生详情</a></div>
           </section>
+          <div class="visa-case-workspace-grid">
+          <aside class="visa-case-rail" aria-label="案件工作区与资料">
+          <p class="visa-case-rail-label">案件工作区</p>
+          <nav class="visa-case-section-nav visa-case-tabs" aria-label="Visa Case tabs">{tabs}</nav>
+          <details class="visa-case-overview-disclosure">
+          <summary>案件概览与操作</summary>
           <section class="panel visa-management-detail-panel" id="case-overview">
             <div class="panel-head">
               <div><h2>Case Overview / 案件概览</h2><p>当前 Visa Case 的核心资料，用于后续材料和证据信息管理。</p></div>
@@ -69767,9 +69772,11 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             </div>
             {overview_fields}
           </section>
+          </details>
           {processing_entry}
-          <nav class="visa-case-section-nav visa-case-tabs" aria-label="Visa Case tabs">{tabs}</nav>
+          </aside>
           <section class="visa-case-tab-content" data-visa-active-tab="{esc(active_tab)}">{tab_panels}</section>
+          </div>
         </div>
         {preview_dialog_html()}"""
         message=(self.query.get('message') or [''])[0]

@@ -113,7 +113,7 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
                 data-material-item="{item_id}" data-category-index="{index}" data-status="{escape(status)}"
                 data-required="{escape(item['required_status'])}" data-search="{escape(search_text)}"{hidden}>
                 <div class="visa-material-item-main">
-                  <div class="visa-material-item-label"><strong class="visa-material-item-name" data-search-label>{escape(name)}</strong>
+                  <div class="visa-material-item-label"><button type="button" class="visa-material-select" data-material-select="{item_id}" aria-pressed="false"><strong class="visa-material-item-name" data-search-label>{escape(name)}</strong></button>
                     <div class="visa-material-item-meta"><span>{escape(owner)}</span><span class="visa-material-requirement">{escape(required)}</span>
                     <span>{len(files)} 个文件</span></div>
                   </div>
@@ -146,6 +146,8 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
     return f'''
       <link rel="stylesheet" href="/assets/visa-material-workspace.css?v=1">
       <script src="/assets/visa-material-workspace.js?v=4" defer></script>
+      <link rel="stylesheet" href="/assets/visa-case-scheme-b.css?v=1">
+      <script src="/assets/visa-material-split-preview.js?v=1" defer></script>
       <section class="panel visa-material-checklist-panel visa-material-workspace" id="{panel}" data-visa-material-workspace data-case-id="{case_id}" data-initial-filter="{escape(active_filter)}">
         <div class="panel-head"><div><h2>{escape(title)}</h2><p>{escape(description)}</p></div><div class="row-actions">{initialize_link}{batch_link}</div></div>
         <div class="visa-material-quick-filters">{''.join(quick_filters)}</div>
@@ -164,6 +166,20 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
           <div class="visa-material-workspace-list"><p class="visa-material-search-count" data-material-matches role="status" aria-live="polite">共 {len(rows)} 项</p>
             {''.join(sections)}<p class="visa-management-empty" data-material-empty hidden>没有匹配材料，请清除搜索或切换筛选。</p>
           </div>
+          <aside class="visa-material-preview" data-material-preview aria-label="材料原件预览">
+            <header class="visa-material-preview-header"><strong data-material-preview-title>选择材料查看原件</strong>
+              <div class="row-actions"><a class="secondary button-link compact" data-material-preview-download hidden>下载文件</a>
+                <button class="secondary compact" type="button" data-material-preview-fullscreen data-preview-open hidden>全屏预览</button></div></header>
+            <div class="visa-material-preview-pagination">
+              <button class="secondary compact" type="button" data-material-preview-prev disabled>上一页</button>
+              <span data-material-preview-page>— / —</span>
+              <button class="secondary compact" type="button" data-material-preview-next disabled>下一页</button>
+            </div>
+            <div class="visa-material-preview-canvas"><p data-material-preview-message role="status" aria-live="polite">选择左侧材料，在这里对照原始文件。</p>
+              <img data-material-preview-image alt="材料原件预览" hidden></div>
+            <footer><span data-material-preview-context>状态和备注仍通过原材料清单保存。</span>
+              <button class="secondary compact" type="button" data-material-preview-retry hidden>重试预览</button></footer>
+          </aside>
         </div>
         <div class="visa-material-workspace-save"><span data-material-save-status role="status" aria-live="polite">保存状态和备注后生效</span>
           <button class="primary" form="{form_id}" type="submit" data-material-save-button>保存材料状态</button></div>
