@@ -7,6 +7,7 @@ import sqlite3
 
 
 REVENUE_MODULE_KEY = "revenue_commission"
+HISTORICAL_RECEIPT_MANAGER_ROLES = frozenset({"Manager", "Manager + Student Cases"})
 SCHOOL_COMMISSION_CONTRACT_ACTIONS = frozenset({
     "contracts/school/bind",
     "contracts/school/register",
@@ -76,6 +77,8 @@ def can_perform_revenue_action(user: dict | None, action_name: str) -> bool:
     """Authorize an exposed Revenue action without weakening Admin controls."""
     if not can_access_revenue(user):
         return False
+    if action_name in {"historical/save", "historical/confirm", "historical/evidence"}:
+        return is_revenue_admin(user) or user.get("role_name") in HISTORICAL_RECEIPT_MANAGER_ROLES
     return action_name not in REVENUE_ADMIN_ACTIONS or is_revenue_admin(user)
 
 

@@ -43,7 +43,7 @@ def _missing_facts(record):
     return missing
 
 
-def _editor(data, csrf, token, record=None):
+def _editor(data, csrf, token, record=None, *, new_label="新增历史收款核对"):
     from revenue.views import _hidden_security
     record = record or {}
     slots = {str(c['id']): [kind for kind in KINDS if not any(
@@ -88,23 +88,24 @@ def _editor(data, csrf, token, record=None):
     payment += '<p class="hcr-field-note" data-hcr-cny-note hidden>人民币按原币保存；AUD结算待单独核实，本轮不换算。</p>'
     security = _hidden_security(csrf, token, uid + 'editor')
     return f'''<details class="hcr-editor" id="{eid}"{ ' open' if editing or not data['rows'] else ''}>
-      <summary>{'补充或修改核对资料' if editing else '新增历史收款核对'}</summary>
-      <form method="post" action="/revenue/historical/save" class="hcr-form" data-hcr-editor data-hcr-slots="{_e(json.dumps(slots))}">
+      <summary>{'补充或修改核对资料' if editing else new_label}</summary>
+      <form method="post" action="/revenue/historical/save" enctype="multipart/form-data" class="hcr-form" data-hcr-editor data-hcr-slots="{_e(json.dumps(slots))}">
         {security}<input type="hidden" name="student_id" value="{_e(data['student_id'])}">
         <input type="hidden" name="expected_revision" value="{record.get('revision',0)}"><input type="hidden" name="review_uid" value="{_e(uid)}">
         <p class="hcr-form-note">资料不齐可先保存。金额按历史事实核对，不按现价重算。</p>
         <fieldset><legend>归属与合同</legend><div class="hcr-fields">{identity}</div></fieldset>
         <fieldset><legend>历史实际收款</legend><div class="hcr-fields">{payment}</div></fieldset>
         <fieldset><legend>核对来源</legend><label>核对来源说明<textarea name="source_note" minlength="10" maxlength="2000" required rows="3">{value('source_note')}</textarea></label></fieldset>
+        <label>付款凭证（可后补）<input type="file" name="historical_evidence" accept=".pdf,.png,.jpg,.jpeg"><small>支持 PDF、PNG 和 JPG/JPEG，最大 20 MB。</small></label>
         <div class="hcr-form-footer"><span>保存草稿不会产生正式收款、费用或收据。</span><button class="hcr-button hcr-button--primary">保存待核实资料</button></div>
       </form></details>'''
 
 
-def render(data, csrf, token, *, mobile=False, can_administer=False):
+def render(data, csrf, token, *, mobile=False, can_administer=False, can_record=False):
     from revenue.views import _hidden_security
     base = '/mobile/revenue/historical-receipts' if mobile else '/revenue/historical-receipts'
     sid = data['student_id']
-    editable = not mobile and can_administer
+    editable = not mobile and (can_administer or can_record)
     selected = data['selected']
     student = data['student'] or {}
     student_name = ' '.join(str(student.get(k) or '') for k in ('passport_first_name','passport_last_name')).strip()
@@ -141,10 +142,13 @@ def render(data, csrf, token, *, mobile=False, can_administer=False):
         if editable and r['status']!='cancelled':
             upload = f'''<details class="hcr-upload" id="hcr-upload-{uid}"><summary>补充付款凭证或历史收据</summary><form method="post" enctype="multipart/form-data" action="/revenue/historical/evidence" class="hcr-form">{_hidden_security(csrf,token,uid+'evidence')}<input type="hidden" name="review_uid" value="{uid}"><label>资料类型<select name="evidence_kind"><option value="payment_evidence">付款凭证</option><option value="external_receipt">历史服务费收据</option></select></label><label>PDF或图片<input type="file" name="historical_evidence" accept=".pdf,.png,.jpg,.jpeg" required></label><button class="hcr-button hcr-button--secondary">保存凭证</button></form></details>'''
         confirm = ''
+        cancel_form = ''
+        if editable and can_administer and r['status']=='draft':
+            cancel_form = f'''<form method="post" action="/revenue/historical/cancel">{_hidden_security(csrf,token,uid+'cancel')}<input type="hidden" name="review_uid" value="{uid}"><input type="hidden" name="revision" value="{r['revision']}"><button class="hcr-text-button">取消本次核对</button></form>'''
         if editable and r['status']=='draft':
             disabled = ' disabled' if missing else ''
             reason = '<p class="hcr-confirm-note">请先补齐上方待核对资料，再确认历史收款。</p>' if missing else ''
-            confirm = f'''<div class="hcr-confirm-area">{reason}<form method="post" action="/revenue/historical/confirm" class="hcr-confirm-form">{_hidden_security(csrf,token,uid+'confirm')}<input type="hidden" name="review_uid" value="{uid}"><input type="hidden" name="revision" value="{r['revision']}"><label class="hcr-ack"><input type="checkbox" name="acknowledged" value="1" required{disabled}><span>已核对原始金额、币种、日期与来源；这是历史实际收款，不是新收费。</span></label><button class="hcr-button hcr-button--primary"{disabled}>确认历史实际收款</button></form><form method="post" action="/revenue/historical/cancel">{_hidden_security(csrf,token,uid+'cancel')}<input type="hidden" name="review_uid" value="{uid}"><input type="hidden" name="revision" value="{r['revision']}"><button class="hcr-text-button">取消本次核对</button></form></div>'''
+            confirm = f'''<div class="hcr-confirm-area">{reason}<form method="post" action="/revenue/historical/confirm" class="hcr-confirm-form">{_hidden_security(csrf,token,uid+'confirm')}<input type="hidden" name="review_uid" value="{uid}"><input type="hidden" name="revision" value="{r['revision']}"><label class="hcr-ack"><input type="checkbox" name="acknowledged" value="1" required{disabled}><span>已核对原始金额、币种、日期与来源；这是历史实际收款，不是新收费。</span></label><button class="hcr-button hcr-button--primary"{disabled}>确认历史实际收款</button></form>{cancel_form}</div>'''
         editor = _editor(data,csrf,token,r) if editable and selected and selected['uid']==uid and r['status'] in ('draft','cancelled') else ''
         owner = f'<p class="hcr-record-owner">{_e(r["student_name"])} {_e(r["student_id"])}</p>' if not sid else ''
         cards.append(f'''<article class="revenue-panel hcr-record"><header class="hcr-record-heading"><div>{owner}<h2>{_e(KINDS[r['service_kind']])}</h2><p>原申请周期 #{r['application_cycle_id']}</p></div><span class="hcr-badge hcr-badge--{badge_class}">{_e(r['summary'])}</span></header><div class="hcr-record-grid"><div class="hcr-record-main">{money_html}{pending}{facts}{source}{editor}</div><aside class="hcr-record-side"><div class="hcr-side-heading"><h3>凭证与收据</h3>{edit_link}</div><dl class="hcr-documents">{''.join(document_rows)}</dl>{upload}</aside></div>{confirm}</article>''')

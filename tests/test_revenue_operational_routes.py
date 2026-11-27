@@ -43,7 +43,7 @@ class RevenueOperationalRouteTests(RevenueDatabaseFixture, unittest.TestCase):
                 "application_cycle": "首次申请 · 进行中",
                 "institution": "未关联",
                 "intake": "—",
-                "billing_status": "未建立",
+                "billing_status": "待核实（未建立收费项目）",
                 "commission_status": "未建立",
                 "case_status": "进行中",
             },
@@ -58,10 +58,10 @@ class RevenueOperationalRouteTests(RevenueDatabaseFixture, unittest.TestCase):
         html = render_revenue_case_workbench(data, mobile=False)
         self.assertIn("Test C Transfer", html)
         self.assertIn("S-REVENUE", html)
-        self.assertIn("技术信息 / 审计信息", html)
-        self.assertIn('<details class="revenue-technical-details">', html)
-        self.assertNotIn('<details class="revenue-technical-details" open', html)
-        self.assertLess(html.index("Test C Transfer"), html.index("技术信息 / 审计信息"))
+        # Technical linkage is retained in the read model, while the current
+        # business page presents the student and application fields directly.
+        self.assertNotIn('class="revenue-technical-details"', html)
+        self.assertIn('id="revenue-case-student_application"', html)
 
         mobile_html = render_revenue_case_workbench(data, mobile=True)
         self.assertIn('href="/mobile/revenue"', mobile_html)
@@ -192,7 +192,7 @@ class RevenueOperationalRouteTests(RevenueDatabaseFixture, unittest.TestCase):
                 f'href="/revenue/documents/{evidence_uid}/view">查看付款凭证</a>',
                 html,
             )
-            self.assertIn(">查看收据</a>", html)
+            self.assertIn(f'href="/revenue/documents/{receipt_uid}/view">{receipt["receipt"]["receipt_number"]}</a>', html)
         self.assertIn(f'/revenue/documents/{receipt_uid}/view', desktop)
         self.assertIn(f'/revenue/documents/{receipt_uid}/view', mobile)
         self.assertNotIn(str(self.temp_dir.name), desktop)

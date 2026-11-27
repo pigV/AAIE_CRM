@@ -1014,6 +1014,18 @@ def render_revenue_workspace_page(
             '<div class="revenue-student-list-toolbar">'
             f'{contract_search}<nav class="revenue-filters" aria-label="筛选">{filters}</nav></div>'
         )
+        refresh_fields = "".join(
+            f'<input type="hidden" name="{key}" value="{escape(str(value), quote=True)}">'
+            for key, value in (data.get("refresh_parameters") or {}).items()
+        )
+        toolbar += (
+            f'<form method="get" action="{escape(str(data.get("cases_href") or "/revenue/cases"), quote=True)}" class="revenue-refresh-form">'
+            f'{refresh_fields}<input type="hidden" name="refresh" value="1">'
+            '<button type="submit" class="secondary">刷新／同步</button>'
+            '<small>从学生档案读取最新姓名和财务数据</small></form>'
+        )
+        if data.get("refreshed"):
+            toolbar += '<p role="status">已从学生档案读取最新姓名和财务数据。</p>'
     else:
         results = table
         toolbar = (
@@ -1535,7 +1547,22 @@ def render_revenue_case_workbench(
                 f'{net}<div class="is-outstanding"><dt>未收基础服务费</dt><dd>{billing_money("outstanding_base_cents")}</dd></div>'
                 f'</dl>{add_payment}</article>'
             )
-        return "".join(cards) or '<p class="revenue-empty">暂无客户收费项目。</p>'
+        if cards:
+            return "".join(cards)
+        status = (data.get("business_summary") or {}).get("billing_status") or "待核实（未建立收费项目）"
+        pending = f'<p class="revenue-empty">收费状态：{escape(str(status))}。暂无普通收费项目。</p>'
+        if mobile or not data.get("can_record_historical_receipts", data.get("can_administer", False)):
+            return pending
+        from revenue.historical_receipt_views import _editor
+        entry = data.get("collection_entry") or {}
+        records = entry.get("rows") or []
+        if entry.get("available") and entry.get("cycles"):
+            pending += _editor(entry, csrf, action_token, new_label="添加收款记录")
+        if records:
+            from urllib.parse import urlencode
+            href = '/revenue/historical-receipts?' + urlencode({'student': data['case']['student_id']})
+            pending += f'<p><a href="{escape(href, quote=True)}">补充收款资料和付款凭证</a></p>'
+        return pending
 
     def payment_receipt_content() -> str:
         payment_cards = []
@@ -1716,6 +1743,8 @@ def render_revenue_case_workbench(
     historical_html = render_case_summary(data.get("historical_collections") or [], student_id, mobile)
     return f"""
     <link rel="stylesheet" href="/assets/revenue.css">
+    <link rel="stylesheet" href="/assets/historical-receipts.css?v=20261127">
+    <script src="/assets/historical-receipts.js?v=20261127" defer></script>
     <main class="revenue-workspace revenue-case-workbench{variant}" data-revenue-schema="{escape(str(data['schema_version']))}">
       <nav class="revenue-breadcrumb" aria-label="面包屑"><a href="{escape(home_href, quote=True)}">收入与佣金</a><span>/</span><a href="{escape(case_list_href, quote=True)}">收费与佣金档案</a></nav>
       <header class="revenue-page-heading revenue-case-identity"><div><span class="revenue-eyebrow">{access_badge}</span><h1>{escape(str(data['title']))}</h1><p><strong>{escape(student_name)}</strong><span>{escape(student_id)}</span></p></div><a class="revenue-back-link" href="{escape(case_list_href, quote=True)}">返回档案列表</a></header>

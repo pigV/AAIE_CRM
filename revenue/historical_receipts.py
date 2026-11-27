@@ -7,6 +7,7 @@ from revenue.repository import new_uid, canonical_json
 from revenue.services import RevenueService
 from revenue.operational_visibility import RevenueOperationalVisibility
 from revenue.client_payments import CLIENT_PAYMENT_METHODS
+from revenue.access_policy import HISTORICAL_RECEIPT_MANAGER_ROLES
 TABLE = 'revenue_historical_receipts'
 KINDS = {'client_service': '院校申请服务费', 'student_visa': '独立学生签证服务费'}
 
@@ -52,29 +53,38 @@ def summary(r):
     if r['status'] == 'cancelled':
         return '已取消核对'
     if r['status'] == 'draft':
-        return '已确认收款 · 资料待补' if r['claimed_received'] else '收款待核实'
+        return '已确认收款 · 资料待补（待核实）' if r['claimed_received'] else '收款待核实'
     if r['agreed_aud_cents'] is None or r['settled_aud_cents'] is None:
         return '已收款 · AUD 待核对'
     return '历史已收清' if r['settled_aud_cents'] >= r['agreed_aud_cents'] else '历史部分收款'
 
 class HistoricalReceiptService:
 
-    def __init__(self, repository, actor_user_id, actor_role):
+    def __init__(self, repository, actor_user_id, actor_role, *, actor_has_revenue_access=False):
         self.repo = repository
         self.c = repository.connection
         self.actor = int(actor_user_id)
         self.role = actor_role
+        self.actor_has_revenue_access = actor_has_revenue_access is True
 
-    def _admin(self):
-        if self.role != 'Admin':
-            raise PermissionError('历史收款须由管理员核对')
+    def _authorize(self, *, cancel=False):
+        manager = self.role in HISTORICAL_RECEIPT_MANAGER_ROLES and self.actor_has_revenue_access and not cancel
+        if self.role != 'Admin' and not manager:
+            raise PermissionError('历史收款须由管理员或已授权经理核对')
         if not self.c.execute('SELECT 1 FROM users WHERE id=?', (self.actor,)).fetchone():
             raise PermissionError('操作人不存在')
         cols = {r[1] for r in self.c.execute('PRAGMA table_info(users)')}
         if {'role_id', 'is_active'} <= cols:
-            row = self.c.execute("SELECT 1 FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=? AND u.is_active=1 AND r.name='Admin'", (self.actor,)).fetchone()
+            not_deleted = " AND u.deleted_at IS NULL" if 'deleted_at' in cols else ''
+            row = self.c.execute("SELECT r.name FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=? AND u.is_active=1" + not_deleted, (self.actor,)).fetchone()
+            if row and row[0] != self.role:
+                row = None
             if not row:
                 raise PermissionError('操作人权限已变化')
+        if manager:
+            grant = self.c.execute("SELECT 1 FROM user_module_permissions WHERE user_id=? AND module_key='revenue_commission' AND can_access=1", (self.actor,)).fetchone()
+            if not grant:
+                raise PermissionError('收入与佣金权限已撤销')
 
     def _cycle(self, sid, cid):
         cy = self.c.execute('SELECT * FROM application_cycles WHERE id=?', (cid,)).fetchone()
@@ -154,7 +164,7 @@ class HistoricalReceiptService:
         return dict(student_id=sid, application_cycle_id=cid, service_kind=kind, visa_case_id=visa, claimed_received=int(claimed), agreed_aud_cents=self._integer(data.get('agreed_aud_cents'), '历史议定', True), actual_cents=self._integer(data.get('actual_cents'), '实际到账'), currency_code=currency, settled_aud_cents=self._integer(data.get('settled_aud_cents'), '已结算AUD', True), received_date=paid, method_code=data.get('method_code') or None, contract_state=state, source_note=note)
 
     def save(self, data, key):
-        self._admin()
+        self._authorize()
         payload = self._validate(data)
         try:
             expected = int(data.get('expected_revision', 0))
@@ -207,7 +217,7 @@ class HistoricalReceiptService:
                 raise ValueError('已有签证套餐覆盖，请先核对，不能重复登记900')
 
     def confirm(self, uid, revision, key, *, acknowledged=False):
-        self._admin()
+        self._authorize()
         if acknowledged is not True:
             raise ValueError('请明确确认历史金额、币种、日期及核对来源')
 
@@ -256,7 +266,7 @@ class HistoricalReceiptService:
             return self.repo.command(idempotency_key=key, command_type='historical_collection_confirmed', aggregate_type='historical_collection', payload={'uid': uid, 'revision': int(revision), 'acknowledged': True}, actor_user_id=self.actor, operation=operation)
 
     def cancel(self, uid, revision, key):
-        self._admin()
+        self._authorize(cancel=True)
 
         def operation():
             row = self._row(uid)
@@ -268,7 +278,7 @@ class HistoricalReceiptService:
             return self.repo.command(idempotency_key=key, command_type='historical_collection_cancelled', aggregate_type='historical_collection', payload={'uid': uid, 'revision': int(revision)}, actor_user_id=self.actor, operation=operation)
 
     def attach(self, uid, document_uid, kind, key):
-        self._admin()
+        self._authorize()
         if kind not in {'payment_evidence', 'external_receipt'}:
             raise ValueError('凭证类型无效')
 

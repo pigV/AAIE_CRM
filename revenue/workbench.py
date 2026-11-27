@@ -231,9 +231,14 @@ class RevenueWorkbench:
             "timeline_audit": audit,
         }
         from revenue.historical_receipts import reviews
+        from revenue.historical_receipt_views import page_data
+        collection_entry = page_data(self.connection, case["student_id"])
+        collection_entry["cycles"] = [c for c in collection_entry["cycles"] if c["id"] == cycle["id"]]
+        collection_entry["rows"] = [r for r in collection_entry["rows"] if r["application_cycle_id"] == cycle["id"]]
         return {
             "schema_version": "revenue.v1",
             "historical_collections": reviews(self.connection, cycle["id"]),
+            "collection_entry": collection_entry,
             "case": case,
             "cycle": cycle,
             "title": "收费与佣金档案",

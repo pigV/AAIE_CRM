@@ -124,3 +124,4 @@
   .hcr-form-footer, .hcr-confirm-form { align-items: stretch; flex-direction: column; gap: 12px; }
   .hcr-workspace .hcr-button { white-space: normal; }
 }
+.hcr-form [hidden] { display: none !important; }

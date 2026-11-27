@@ -539,6 +539,13 @@ class RevenueReadModels:
                 f"{case_scope['student_name']} · {case_scope['student_id']}"
             )
             result["tabs"] = []
+        if name == "cases":
+            result["refresh_parameters"] = {
+                key: self._student_parameter(parameters, key)
+                for key in ("q", "filter", "page", "student")
+                if self._student_parameter(parameters, key)
+            }
+            result["refreshed"] = self._student_parameter(parameters, "refresh") == "1"
         return result
 
     def _workspace_coverage(self, name: str) -> list[dict[str, Any]]:
@@ -1114,7 +1121,19 @@ class RevenueReadModels:
             from revenue.historical_receipts import reviews, summary
             historical = [r for r in reviews(self.connection, student_id=sid) if r["status"] != "cancelled"]
             if historical and not cases:
-                row["billing_status"] = " / ".join(dict.fromkeys(summary(r) for r in historical))
+                cycle_ids = {r["application_cycle_id"] for r in historical}
+                row["billing_status"] = " / ".join(dict.fromkeys(
+                    (f"周期 #{r['application_cycle_id']}：" if len(cycle_ids) > 1 else "") + summary(r)
+                    for r in historical))
+            elif historical:
+                filed_cycles = {c["application_cycle_id"] for c in cases}
+                unfiled = [r for r in historical if r["application_cycle_id"] not in filed_cycles]
+                if unfiled:
+                    filed_status = row["billing_status"]
+                    if len(cases) == 1:
+                        filed_status = f"周期 #{cases[0]['application_cycle_id']}：{filed_status}"
+                    row["billing_status"] = "；".join([filed_status, *dict.fromkeys(
+                        f"周期 #{r['application_cycle_id']}：{summary(r)}" for r in unfiled)])
             rows.append(row)
         def link(number):
             return self.cases_href + "?" + urlencode({"q": q, "filter": active_filter, "page": number})
@@ -1177,7 +1196,7 @@ class RevenueReadModels:
                 year, term = str(facts.get("preferred_intake_year") or "").strip(), str(facts.get("preferred_intake_term") or "").strip()
                 intake = f"{year} 年 {int(term)} 月" if year and term.isdecimal() and 1 <= int(term) <= 12 else (year + " 年 · 月份待确认" if year else "待确认入学期")
             row["intake"] = intake if intake != "—" else "待确认入学期"
-        row.setdefault("billing_status", "待确认收费（未建立收费项目）")
+        row.setdefault("billing_status", "待核实（未建立收费项目）")
         row.setdefault("commission_status", "待确认佣金（未建财务档案）")
         if not row.get("updated_at_display") or row["updated_at_display"] == "—":
             updated = facts.get("updated_at") or cycle_facts.get("updated_at") or cycle_facts.get("created_at")
@@ -2492,7 +2511,7 @@ class RevenueReadModels:
         cycle_id = self.connection.execute("SELECT application_cycle_id FROM revenue_commercial_cases WHERE id=?", (case_id,)).fetchone()
         historical = [r for r in reviews(self.connection, cycle_id[0]) if r["status"] != "cancelled"] if cycle_id else []
         if not fee_count:
-            return " / ".join(dict.fromkeys(summary(r) for r in historical)) or "待确认收费（未建立收费项目）"
+            return " / ".join(dict.fromkeys(summary(r) for r in historical)) or "待核实（未建立收费项目）"
         if received <= 0:
             return "待收款"
         if received < final_base:

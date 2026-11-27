@@ -28917,6 +28917,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             data = model.workspace(workspace_name, self.query)
             data["can_administer"] = is_revenue_admin(self.user)
             data["can_record_client_refund"] = can_perform_revenue_action(self.user, "billing/refund")
+            data["can_record_historical_receipts"] = can_perform_revenue_action(self.user, "historical/save")
             if workspace_name=="contracts":
                 setup = school_commission_authority(self.user,"setup")
                 requested_school = self._school_commission_scope_id("school_id")
@@ -28958,6 +28959,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             data = workbench.load(case_uid)
             data["can_administer"] = is_revenue_admin(self.user)
             data["can_record_client_refund"] = can_perform_revenue_action(self.user, "billing/refund")
+            data["can_record_historical_receipts"] = can_perform_revenue_action(self.user, "historical/save")
             from revenue.first_year_tuition import COE_KIND, OFFER_KIND
 
             denied_evidence = {
@@ -29077,7 +29079,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             message_kind=message_kind,
         )
         if explicit_case_surface:
-            return self.send_html(document, presentation_surface="desktop")
+            return self.send_html(document, headers=[("Cache-Control", "private, no-store")], presentation_surface="desktop")
         return self.send_html(document)
 
     def _upload_school_contract_post(self):
@@ -29448,7 +29450,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         try:
             data = page_data(connection, (self.query.get("student") or [""])[0],
                              (self.query.get("review") or [""])[0])
-            body = render(data, self.csrf, new_token(), mobile=mobile, can_administer=is_revenue_admin(self.user))
+            body = render(data, self.csrf, new_token(), mobile=mobile, can_administer=is_revenue_admin(self.user),
+                          can_record=can_perform_revenue_action(self.user, "historical/save"))
         finally:
             db._release_connection(connection)
         if mobile:
@@ -30499,7 +30502,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             )
             if upload is None:
                 raise ValueError("请选择需要上传的文件。")
-        if action_name == "historical/evidence":
+        if action_name in {"historical/save", "historical/evidence"}:
             upload = next((f for f in self.files if f.field_name == "historical_evidence" and f.filename), None)
         if action_name == "billing/payment":
             upload = next(
