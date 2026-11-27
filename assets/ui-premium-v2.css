@@ -26790,31 +26790,207 @@
 .ui-premium-v2 .finance-contract-fields label { display:grid; gap:6px; }
 .ui-premium-v2 .finance-contract-fields input[type=checkbox] { width:auto; }
 .ui-premium-v2 .finance-contract-review .upload-review-file-card { margin:12px 0 0; }
-/* Visa overview: search and case list take priority on desktop. */
-.ui-premium-v2 .visa-management-compact { gap:14px; }
-.ui-premium-v2 .visa-management-compact .visa-management-hero { padding:16px 20px; min-height:0; }
-.ui-premium-v2 .visa-management-compact .visa-management-hero h2 { margin:0; font-size:26px; }
-.ui-premium-v2 .visa-management-compact .visa-management-hero .eyebrow { display:none; }
-.ui-premium-v2 .visa-management-compact .visa-management-hero p { margin:5px 0 0; }
-.ui-premium-v2 .visa-management-compact .visa-applicant-search { display:flex; flex-wrap:wrap; align-items:end; gap:10px 16px; padding:14px 20px; }
-.ui-premium-v2 .visa-management-compact .visa-applicant-search form { display:flex; flex:1 1 500px; align-items:end; gap:10px; margin:0; }
-.ui-premium-v2 .visa-management-compact .visa-applicant-search label { flex:1; margin:0; }
-.ui-premium-v2 .visa-management-compact .visa-applicant-search input { margin-bottom:0; }
-.ui-premium-v2 .visa-management-compact .visa-applicant-search > div { flex-basis:100%; font-size:12px; color:var(--muted); }
-.ui-premium-v2 .visa-management-compact .visa-management-kpi { padding:12px 16px; gap:3px; min-height:0; }
-.ui-premium-v2 .visa-management-compact .visa-management-kpi__value { font-size:28px; line-height:1.2; }
+/* Visa overview, approved Figma scheme A. Only presentation changes here;
+   the shared shell and all form, metric, warning and case data remain intact. */
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) {
+  min-width:0;
+  gap:20px;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > .visa-management-intro {
+  margin:0;
+  color:var(--muted);
+  font-size:13px;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > .visa-applicant-search {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px 14px;
+  padding:0;
+  border:0;
+  background:transparent;
+  box-shadow:none;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-applicant-search form {
+  display:flex;
+  flex:1 1 440px;
+  min-width:0;
+  align-items:center;
+  gap:12px;
+  margin:0;
+}
+/* Retain the existing accessible label; the placeholder supplies visual context. */
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-applicant-search label {
+  flex:1;
+  min-width:0;
+  margin:0;
+  font-size:0;
+  line-height:0;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-applicant-search input {
+  width:100%;
+  min-width:0;
+  min-height:44px;
+  margin:0;
+  padding:10px 14px;
+  border:1px solid var(--border);
+  border-radius:11px;
+  background:var(--card);
+  color:var(--foreground);
+  font-size:14px;
+  font-weight:400;
+  line-height:1.4;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-applicant-search :is(button,.button-link) {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:44px;
+  margin:0;
+  padding:10px 18px;
+  border:1px solid var(--visa-overview-blue);
+  border-radius:11px;
+  font-size:14px;
+  font-weight:600;
+  line-height:1.4;
+  text-align:center;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-applicant-search button {
+  min-width:104px;
+  background:var(--visa-overview-blue);
+  color:var(--primary-foreground);
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-applicant-search > .button-link {
+  background:var(--card);
+  color:var(--visa-overview-blue);
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-applicant-search > div {
+  flex-basis:100%;
+  color:var(--muted);
+  font-size:12px;
+  line-height:1.5;
+  overflow-wrap:anywhere;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > .visa-management-kpi-grid {
+  gap:18px;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > .visa-management-kpi-grid .visa-management-kpi {
+  min-height:112px;
+  padding:16px 20px;
+  gap:8px;
+  border:0;
+  border-radius:16px;
+  box-shadow:var(--visa-overview-shadow);
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-kpi::before { display:none; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-kpi__label {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  font-size:13px;
+  font-weight:500;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-kpi__label::before {
+  content:'';
+  display:grid;
+  place-items:center;
+  flex:0 0 30px;
+  height:30px;
+  border-radius:9px;
+  background:radial-gradient(circle at center,currentColor 0 3px,transparent 3.5px),color-mix(in srgb,currentColor 10%,var(--card));
+  color:var(--visa-overview-blue);
+  font-size:24px;
+  line-height:1;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-kpi:nth-child(2) .visa-management-kpi__label::before { color:var(--warning); }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-kpi:nth-child(3) .visa-management-kpi__label::before { color:var(--danger); }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-kpi:nth-child(4) .visa-management-kpi__label::before { color:var(--visa-overview-violet); }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-kpi__value { font-size:30px; font-weight:700; line-height:1.1; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-kpi__note { font-size:12px; font-weight:400; }
 .ui-premium-v2 .visa-management-review-details { border:1px solid #e8c78d; background:#fffaf0; border-radius:12px; padding:12px 18px; }
 .ui-premium-v2 .visa-management-review-details > summary { cursor:pointer; color:#925b15; font-weight:700; }
 .ui-premium-v2 .visa-management-review-details .panel { margin:12px 0 0; }
-.ui-premium-v2 .visa-management-compact .visa-management-list-panel { padding:16px 20px; }
-.ui-premium-v2 .visa-management-compact .visa-management-list-panel .panel-head { margin-bottom:10px; }
-@media(max-width:760px) {
- .ui-premium-v2 .visa-management-compact .visa-applicant-search form { flex-basis:100%; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > .visa-management-review-details {
+  padding:16px 20px;
+  border:0;
+  border-radius:16px;
+  background:var(--card);
+  box-shadow:var(--visa-overview-shadow);
 }
-.ui-premium-v2 .visa-management-compact .visa-management-intro { margin:0; color:var(--muted); font-size:13px; }
-.ui-premium-v2 .visa-management-compact .visa-management-list-panel .panel-head > div { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; }
-.ui-premium-v2 .visa-management-compact .visa-management-list-panel .panel-head p { flex-basis:100%; margin:0; }
-.ui-premium-v2 .visa-management-compact .visa-management-list-panel .panel-head h2 { margin:0; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > .visa-management-review-details > summary {
+  color:var(--foreground);
+  font-size:13px;
+  font-weight:600;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > .visa-management-review-details > summary::marker { color:var(--danger); }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > .visa-management-list-panel {
+  min-width:0;
+  padding:20px;
+  border:0;
+  border-radius:16px;
+  box-shadow:var(--visa-overview-shadow);
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-list-panel .panel-head { margin-bottom:16px; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-list-panel .panel-head > div { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-list-panel .panel-head p { margin:0; font-size:12px; font-weight:400; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-list-panel .panel-head h2 { margin:0; font-size:20px; font-weight:700; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-table-shell { border:0; border-radius:11px; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-table { min-width:960px; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-table-row { height:48px; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-table :is(th,td) { padding:8px 12px; vertical-align:middle; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-table th { padding-block:12px; font-size:12px; font-weight:600; background:var(--visa-overview-surface-soft); }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-table td { font-size:13px; font-weight:400; line-height:1.5; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-table td:nth-child(2) { width:20%; max-width:260px; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-row-main { display:flex; align-items:baseline; flex-wrap:wrap; gap:3px 8px; overflow-wrap:anywhere; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-row-main strong { font-weight:600; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-row-main small { margin:0; font-size:11px; font-weight:400; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-table :is(th,td):nth-child(n+6) { white-space:nowrap; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-status { min-height:24px; padding:2px 8px; border:0; font-size:12px; font-weight:500; }
+.ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) :is(a,button,input,summary):focus-visible { outline:3px solid var(--visa-overview-blue); outline-offset:3px; }
+/* One badge component for both status columns and the two category columns. */
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag {
+  --tag-color:var(--muted);
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  min-height:27px;
+  padding:3px 10px;
+  border-radius:999px;
+  background:color-mix(in srgb,var(--tag-color) 11%,var(--card));
+  color:color-mix(in srgb,var(--tag-color) 68%,var(--foreground));
+  font-size:12px;
+  font-weight:600;
+  line-height:1.5;
+  white-space:nowrap;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag::before {
+  content:'';
+  width:6px;
+  height:6px;
+  flex:0 0 6px;
+  border-radius:50%;
+  background:currentColor;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--blue { --tag-color:var(--visa-overview-blue); }
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--purple { --tag-color:var(--visa-overview-violet); }
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--cyan { --tag-color:var(--visa-overview-cyan); }
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--indigo { --tag-color:color-mix(in srgb,var(--visa-overview-blue) 50%,var(--visa-overview-violet)); }
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--amber {
+  --tag-color:var(--warning);
+  color:color-mix(in srgb,var(--warning) 55%,var(--foreground));
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--green { --tag-color:var(--success); }
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--red { --tag-color:var(--danger); }
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--gray { --tag-color:var(--muted); }
+@media(max-width:760px) {
+ .ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) { gap:14px; }
+ .ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-applicant-search form { flex-basis:100%; }
+ .ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-applicant-search > .button-link { width:100%; }
+ .ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > .visa-management-kpi-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+ .ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > .visa-management-kpi-grid .visa-management-kpi { padding:14px; }
+ .ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) .visa-management-kpi__label { font-size:12px; gap:6px; }
+ .ui-premium-v2 .visa-management-page.visa-management-compact:has(> .visa-management-kpi-grid) > :is(.visa-management-review-details,.visa-management-list-panel) { padding:14px; }
+}
 .ui-premium-v2 .finance-contract-fields label:has(input[type=checkbox]) { display:flex; align-items:center; gap:8px; }
 .ui-premium-v2 .finance-contract-fields input[type=checkbox] { width:18px!important; height:18px; min-height:0; padding:0; flex:0 0 18px; }
 

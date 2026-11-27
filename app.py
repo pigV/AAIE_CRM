@@ -71134,18 +71134,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             if str(value or "").strip()
         ) or "<span>未启用筛选参数</span>"
         if cases:
+            from visa_overview_ui import visa_overview_badge
             rows = []
             for row in cases:
-                status_class = self.visa_management_status_class(row["status"])
                 case_detail_href = f"/visa-management/cases/{row['id']}"
                 rows.append(f"""
                 <tr class="visa-management-table-row">
                   <td><a href="{case_detail_href}">#{row['id']}</a></td>
                   <td><div class="visa-management-row-main"><strong>{esc(self.visa_management_student_name(row))}</strong><small>{esc(row['student_id'])}</small></div></td>
-                  <td>{esc(self.visa_management_text(row['case_type']))}</td>
-                  <td>{esc(self.visa_management_text(row['visa_subclass']))}</td>
-                  <td><span class="visa-management-status {status_class}">{esc(self.visa_management_text(row['status']))}</span></td>
-                  <td>{esc(self.visa_management_text(row['decision_status']))}</td>
+                  <td>{visa_overview_badge(row['case_type'], 'type')}</td>
+                  <td>{visa_overview_badge(row['visa_subclass'], 'subclass')}</td>
+                  <td>{visa_overview_badge(row['status'], 'status')}</td>
+                  <td>{visa_overview_badge(row['decision_status'], 'decision')}</td>
                   <td>{esc(self.visa_management_text(row['expiry_date']))}</td>
                   <td>{esc(display_datetime(row['updated_at'] or row['created_at']))}</td>
                 </tr>""")
