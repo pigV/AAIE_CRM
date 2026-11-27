@@ -6,7 +6,7 @@ from visa_material_workspace_ui import render_material_workspace
 
 class MaterialSplitUITests(unittest.TestCase):
     def render(self):
-        return render_material_workspace(Handler(),'S1',{'id':7},rows(),panel_id='material-checklist',title='材料清单',description='材料资料',show_smart_batch=True)
+        return render_material_workspace(Handler(),'S1',{'id':7},rows(),panel_id='material-checklist',title='材料清单',description='材料资料',show_smart_batch=True, layout='split')
 
     def test_inline_preview_is_added_without_replacing_existing_controls(self):
         html=self.render()
@@ -35,3 +35,15 @@ class MaterialSplitUITests(unittest.TestCase):
         self.assertNotIn('<iframe',html)
         self.assertIn('notes_1',html)
         self.assertNotIn('src="https://',html)
+
+
+class MaterialRecordUITests(unittest.TestCase):
+    def test_record_layout_keeps_workflow_without_permanent_preview_column(self):
+        html=render_material_workspace(Handler(),'S1',{'id':7},rows(),panel_id='material-checklist',title='材料清单',description='材料资料')
+        self.assertNotIn('data-material-preview-image', html)
+        self.assertNotIn('visa-material-split-preview.js', html)
+        self.assertIn('visa-material-record', html)
+        for control in ['data-preview-open','data-download-url','data-material-save','data-material-search','data-material-clear','data-category-mobile','notes_1','data-material-upload']:
+            self.assertIn(control, html)
+        for key in ['required_unfinished','unfinished','all','uploaded','not_applicable']:
+            self.assertIn('data-quick-filter="'+key+'"', html)

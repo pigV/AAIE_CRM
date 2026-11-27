@@ -69749,8 +69749,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         hero_status='签证材料需核实' if display_case.get('_business_needs_review') else display_case['status']
         hero_description = f'{case["visa_type"] or ""} · 学生 {student_name} · 学生编号 {student_id} · 案件 #{case["id"]} · {case["case_owner"] or "未分配负责人"} · {hero_status}'
         body = f"""
-        <link rel="stylesheet" href="/assets/visa-case-scheme-b.css?v=1">
-        <div class="visa-management-page visa-case-scheme-b{' visa-material-case-page' if material_mode else ''}">
+        <link rel="stylesheet" href="/assets/visa-case-scheme-c.css?v=1">
+        <div class="visa-management-page visa-case-scheme-c{' visa-material-case-page' if material_mode else ''}">
           <section class="panel visa-management-hero">
             <div>
               <span class="eyebrow">Visa Case Detail</span>
@@ -69760,8 +69760,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             <div class="row-actions"><a class="secondary button-link" href="/students/{quote(student_id)}/visa-cases">返回列表</a><a class="secondary button-link" href="/students/{quote(student_id)}">学生详情</a></div>
           </section>
           <div class="visa-case-workspace-grid">
-          <aside class="visa-case-rail" aria-label="案件工作区与资料">
-          <p class="visa-case-rail-label">案件工作区</p>
+          <div class="visa-case-record-header">
+          <dl class="visa-case-summary">
+            <div><dt>签证类型</dt><dd>{esc(case['visa_type'] or '待核实')}</dd></div>
+            <div><dt>案件负责人</dt><dd>{esc(case['case_owner'] or '未分配')}</dd></div>
+            <div><dt>案件状态</dt><dd>{esc(hero_status)}</dd></div>
+            <div><dt>案件编号</dt><dd>#{case['id']}</dd></div>
+          </dl>
           <nav class="visa-case-section-nav visa-case-tabs" aria-label="Visa Case tabs">{tabs}</nav>
           <details class="visa-case-overview-disclosure">
           <summary>案件概览与操作</summary>
@@ -69774,7 +69779,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           </section>
           </details>
           {processing_entry}
-          </aside>
+          </div>
           <section class="visa-case-tab-content" data-visa-active-tab="{esc(active_tab)}">{tab_panels}</section>
           </div>
         </div>

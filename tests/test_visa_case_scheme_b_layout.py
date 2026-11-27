@@ -22,7 +22,7 @@ class Structure(HTMLParser):
             if self.stack[i][0]==tag: del self.stack[i:]; break
 
 
-class SchemeBLayoutTests(unittest.TestCase):
+class SchemeCLayoutTests(unittest.TestCase):
     def render(self, active='material_checklist', applicant_name=None):
         names={'student_visa_case_detail','visa_case_tab_link','visa_case_tab_panel'}
         nodes=[n for n in ast.walk(ast.parse((ROOT/'app.py').read_text())) if isinstance(n,ast.FunctionDef) and n.name in names]
@@ -48,9 +48,10 @@ class SchemeBLayoutTests(unittest.TestCase):
         for active in ('info_collection','material_checklist','visa_result','evidence_ai_review'):
             with self.subTest(active=active):
                 html=self.render(active); nodes=Structure(html).nodes
-                self.assertTrue(any('visa-case-scheme-b' in a.get('class','') for _,a,_ in nodes), 'detail needs scheme B shell')
+                self.assertTrue(any('visa-case-scheme-c' in a.get('class','') for _,a,_ in nodes), 'detail needs scheme C shell')
                 nav=next(n for n in nodes if n[0]=='nav')
-                self.assertTrue(any('visa-case-rail' in a.get('class','') for _,a in nav[2]))
+                self.assertFalse(any(t=='aside' for t,a in nav[2]))
+                self.assertIn('visa-case-summary', html)
                 links=[a for t,a,_ in nodes if t=='a' and 'visa-case-tab-link' in a.get('class','')]
                 self.assertEqual(len(links),4)
                 self.assertEqual(sum('active' in a.get('class','').split() for a in links),1)
@@ -63,7 +64,7 @@ class SchemeBLayoutTests(unittest.TestCase):
                 self.assertIn('name="original-field"',html)
                 self.assertIn('/students/S1/visa-cases/7/materials-zip',html)
                 self.assertIn('Alex &lt;Chen&gt; Test',html)
-                self.assertIn('/assets/visa-case-scheme-b.css',html)
+                self.assertIn('/assets/visa-case-scheme-c.css',html)
 
     def test_guardian_case_title_uses_the_applicant_and_keeps_student_context(self):
         html=self.render(applicant_name='Guardian <Chen>')

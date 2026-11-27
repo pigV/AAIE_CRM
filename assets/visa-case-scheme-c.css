@@ -1,0 +1,54 @@
+/* Scheme C: a compact record with full-width workspaces. */
+.visa-management-page.visa-case-scheme-c {--accent:#243e60;--accent-soft:#eef2f7;--material-blue:#243e60;--material-blue-soft:#eef2f7;display:block;max-width:1600px;margin:0 auto;color:#243247}
+.visa-case-scheme-c > * + * {margin-top:16px}
+.visa-case-scheme-c .panel {box-shadow:none;border:1px solid #dde3eb;border-radius:8px;background:#fff}
+.visa-case-scheme-c .visa-management-hero {display:flex;align-items:center;justify-content:space-between;gap:16px;padding:20px 24px;background:#fff}
+.visa-case-scheme-c .visa-management-hero .eyebrow {font-size:11px;letter-spacing:.1em;color:#63738a}
+.visa-case-scheme-c .visa-management-hero h2 {font-size:26px;color:#172b46;margin:4px 0}
+.visa-case-scheme-c .visa-management-hero p {font-size:13px;color:#58677c;margin:4px 0}
+.visa-case-scheme-c .visa-case-workspace-grid {display:block}
+.visa-case-scheme-c .visa-case-summary {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin:0;padding:16px 24px;background:#fff;border:1px solid #dde3eb;border-radius:8px;gap:20px}
+.visa-case-scheme-c .visa-case-summary dt {font-size:12px;color:#657389;margin-bottom:5px}
+.visa-case-scheme-c .visa-case-summary dd {font-size:14px;font-weight:600;margin:0;overflow-wrap:anywhere}
+.visa-case-scheme-c .visa-case-tabs {display:flex;gap:24px;padding:0 8px;margin:12px 0 0;background:transparent;border:0;border-bottom:1px solid #d9e0e9;border-radius:0;position:static;overflow-x:auto}
+.visa-case-scheme-c .visa-case-tab-link {display:block;flex:0 0 auto;padding:14px 4px;color:#5d6b7e;background:transparent;border:0;border-bottom:3px solid transparent;border-radius:0;text-decoration:none;font-weight:600;font-size:14px;box-shadow:none}
+.visa-case-scheme-c .visa-case-tab-link.active {color:#203d62;background:transparent;border-bottom-color:#243e60;box-shadow:none}
+.visa-case-scheme-c .visa-case-overview-disclosure {margin:12px 0;border:1px solid #dde3eb;border-radius:6px;background:#fff;padding:10px 16px}
+.visa-case-scheme-c .visa-case-overview-disclosure > summary {cursor:pointer;font-size:13px;font-weight:600;color:#344b67}
+.visa-case-scheme-c .visa-case-overview-disclosure #case-overview {margin-top:12px;padding:16px;max-height:none;overflow:visible}
+.visa-case-scheme-c .visa-material-case-details {display:inline-block;font-size:13px;color:#344b67;margin:0 0 12px}
+.visa-case-scheme-c .visa-case-tab-content {min-width:0}
+.visa-case-scheme-c .visa-case-tab-content .panel {padding:20px 24px}
+.visa-management-page .visa-material-record {--material-blue:#243e60;--material-blue-soft:#eef2f7}
+.visa-management-page .visa-material-record .visa-material-workspace-body {display:block}
+.visa-management-page .visa-material-record .visa-material-category-nav {display:none}
+.visa-management-page .visa-material-record .visa-material-category-mobile {display:grid;grid-template-columns:80px minmax(150px,260px);align-items:center;gap:10px;font-size:13px}
+.visa-management-page .visa-material-record .visa-material-workspace-toolbar {position:static;padding:8px 0 14px}
+.visa-management-page .visa-material-record .visa-material-quick-filter {border-radius:5px;padding:10px 14px;font-size:13px;background:#fff}
+.visa-management-page .visa-material-record .visa-material-quick-filter strong {font-size:22px;color:#1f334e}
+.visa-management-page .visa-material-record .visa-material-quick-filter[aria-current="true"] {background:#f2f5f9;outline-color:#344f71}
+.visa-management-page .visa-material-record .visa-material-category {border:1px solid #e0e5ec;border-radius:5px;overflow:hidden;margin-bottom:16px}
+.visa-management-page .visa-material-record .visa-material-category-head {background:#f5f7fa;padding:10px 16px;color:#34465e}
+.visa-management-page .visa-material-record .visa-material-category-head h3 {font-size:13px;margin:0}
+.visa-management-page .visa-material-record .visa-material-category-head > span {font-size:12px;color:#64748b}
+.visa-management-page .visa-material-record .visa-material-compact-row {padding:12px 16px;border-bottom:1px solid #e8ecf1;border-left-width:3px;background:#fff}
+.visa-management-page .visa-material-record .visa-material-compact-row[data-status="missing"] {background:#fffdf8}
+.visa-management-page .visa-material-record .visa-material-compact-row.is-dirty {background:#eef4fc}
+.visa-management-page .visa-material-record .visa-material-item-main {grid-template-columns:minmax(0,1fr) 150px 200px}
+.visa-management-page .visa-material-record .visa-material-item-name {font-size:14px;color:#20334d;font-weight:600}
+.visa-management-page .visa-material-record .visa-material-item-actions {justify-content:flex-end}
+.visa-management-page .visa-material-record .visa-material-item-status > span {font-size:11px;color:#607086}
+.visa-management-page .visa-material-record .visa-material-upload {display:inline-block;margin:6px 24px 0 0;vertical-align:top}
+.visa-management-page .visa-material-record .visa-material-item-details {margin-top:6px}
+.visa-management-page .visa-material-record .visa-material-upload > summary,.visa-management-page .visa-material-record .visa-material-item-details > summary {font-size:12px;padding:4px 0}
+.visa-management-page .visa-material-record .visa-material-upload[open] {display:block}
+.visa-management-page .visa-material-record .visa-material-workspace-save {bottom:76px;border-radius:5px;background:#fff;box-shadow:0 -4px 12px #23384f08}
+.visa-case-scheme-c .primary {background:#243e60;border-color:#243e60;color:#fff}
+.visa-case-scheme-c :is(a,button,summary,input,select,textarea):focus-visible {outline:3px solid #3869a8;outline-offset:3px}
+@media(max-width:1000px){.visa-management-page .visa-material-record .visa-material-item-main{grid-template-columns:minmax(0,1fr) 140px}.visa-management-page .visa-material-record .visa-material-item-actions{grid-column:1/-1;justify-content:flex-start}}
+@media(max-width:760px){.visa-case-scheme-c .visa-management-hero{align-items:flex-start;flex-direction:column;padding:16px}.visa-case-scheme-c .visa-case-summary{grid-template-columns:repeat(2,minmax(0,1fr));padding:16px;gap:14px}.visa-case-scheme-c .visa-case-tabs{gap:18px}.visa-case-scheme-c .visa-case-tab-content .panel{padding:14px}.visa-management-page .visa-material-record .visa-material-category-mobile{grid-template-columns:1fr}.visa-management-page .visa-material-record .visa-material-quick-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.visa-management-page .visa-material-record .visa-material-compact-row{padding:12px}.visa-management-page .visa-material-record .visa-material-item-main{grid-template-columns:minmax(0,1fr)}.visa-management-page .visa-material-record .visa-material-item-status{max-width:220px}}
+
+.visa-management-page.visa-case-scheme-c .visa-case-tabs > a {border:0;border-radius:0;background:transparent;box-shadow:none;padding:12px 4px;border-bottom:3px solid transparent;color:#5d6b7e}
+.visa-management-page.visa-case-scheme-c .visa-case-tabs > a.active {color:#203d62;border-bottom-color:#243e60;background:transparent}
+.visa-management-page.visa-case-scheme-c .visa-case-tabs {flex-direction:row;flex-wrap:nowrap;justify-content:flex-start;align-items:stretch;overflow-x:auto}
+.visa-management-page.visa-case-scheme-c .visa-case-tabs > a {flex:0 0 auto;min-width:0;width:auto;white-space:nowrap}
