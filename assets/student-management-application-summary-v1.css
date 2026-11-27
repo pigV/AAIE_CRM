@@ -494,3 +494,32 @@
     font-weight: 750;
   }
 }
+
+/* Student list: stronger recorded facts, quieter missing-data prompts. */
+[data-student-management-application-summary] .student-name-link,
+body.ui-premium-v2 .main [data-student-management-application-summary] .student-management-table .student-management-row .student-name-link {
+  color: #172033;
+  font-weight: 700;
+}
+[data-student-management-application-summary] .student-name-link:hover,
+body.ui-premium-v2 .main [data-student-management-application-summary] .student-management-table .student-management-row .student-name-link:hover {
+  color: #2563eb;
+  text-decoration: underline;
+}
+[data-student-management-application-summary] .student-management-table td:is(
+  [data-label="最终确认学校"],
+  [data-label="申请年级"],
+  [data-label="申请入学时间"],
+  [data-label="Offer开学时间"],
+  [data-label="下签时间"]
+) {
+  color: #263449;
+  font-weight: 600;
+}
+[data-student-management-application-summary] .student-lifecycle-type {
+  font-weight: 400;
+}
+[data-student-management-application-summary] .student-missing-value {
+  color: #737e8e;
+  font-weight: 400;
+}

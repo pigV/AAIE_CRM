@@ -11936,6 +11936,8 @@ def student_management_application_row_html(student, summary, csrf, can_edit, ca
             "已归档": "held_archived",
             "已完成": "held_completed",
         }.get(stage_label, stage_tone)
+    def display_value(value, missing="未记录"):
+        return esc(value) if value else f'<span class="student-missing-value">{esc(missing)}</span>'
     historical_transfer_badge = '<span class="student-transfer-name-badge" title="已确认的历史转学">转学</span>' if historical_transfer else ''
     return f"""
     <tr class="student-management-row" data-student-application-summary-row>
@@ -11943,11 +11945,11 @@ def student_management_application_row_html(student, summary, csrf, can_edit, ca
       <td data-label="学生号"><code>{esc(student['student_id'])}</code></td>
       <td data-label="学生名"><a class="student-name-link" href="/students/{esc(student['student_id'])}">{esc(summary.student_name)}</a> {student_type_badge_html(student)} {historical_transfer_badge}</td>
       <td data-label="申请阶段" aria-label="当前业务 / 申请阶段">{lifecycle_html}<span class="student-stage-badge" data-stage="{esc(stage_tone)}">{esc(stage_label)}</span></td>
-      <td data-label="最终确认学校">{esc(summary.final_school_name or '待确认')}</td>
-      <td data-label="申请年级">{esc(summary.applying_year_level or '未记录')}</td>
-      <td data-label="申请入学时间" class="nowrap-cell">{esc(summary.planned_intake_display or '未记录')}</td>
-      <td data-label="Offer开学时间" class="nowrap-cell">{esc(display_date_value(summary.offer_course_start_date) or '未记录')}</td>
-      <td data-label="下签时间" class="nowrap-cell">{esc(display_date_value(summary.visa_grant_date) or '未下签')}</td>
+      <td data-label="最终确认学校">{display_value(summary.final_school_name, "待确认")}</td>
+      <td data-label="申请年级">{display_value(summary.applying_year_level)}</td>
+      <td data-label="申请入学时间" class="nowrap-cell">{display_value(summary.planned_intake_display)}</td>
+      <td data-label="Offer开学时间" class="nowrap-cell">{display_value(display_date_value(summary.offer_course_start_date))}</td>
+      <td data-label="下签时间" class="nowrap-cell">{display_value(display_date_value(summary.visa_grant_date), "未下签")}</td>
       <td data-label="操作" class="student-actions-cell">{actions or '<span class="muted-line">—</span>'}</td>
     </tr>"""
 
@@ -55770,7 +55772,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
             ("sort", sort if sort != "recent" else "", f"排序：{sort_options[sort]}"),
         ), selected_student_id=selected_student_id)
         body = f"""
-        <link rel="stylesheet" href="/assets/student-management-application-summary-v1.css?v=5">
+        <link rel="stylesheet" href="/assets/student-management-application-summary-v1.css?v=7">
         <div data-student-management-application-summary>
         <section class="panel student-workflow-list-panel student-management-mobile-safe">
           <div class="student-workbench-header">
