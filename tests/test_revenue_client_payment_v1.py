@@ -233,7 +233,7 @@ class RevenueClientPaymentV1Tests(RevenueDatabaseFixture, unittest.TestCase):
             "SELECT COUNT(*) FROM revenue_client_payment_allocations"
         ).fetchone()[0])
 
-    def test_replay_is_idempotent_and_cash_or_unauthorized_access_is_denied(self):
+    def test_replay_is_idempotent_and_unauthorized_access_is_denied(self):
         first = self._record(
             method="au_personal_account", actual_currency="AUD", actual_amount=120_000,
             base=120_000, key="idempotent-payment",
@@ -247,11 +247,6 @@ class RevenueClientPaymentV1Tests(RevenueDatabaseFixture, unittest.TestCase):
             self._record(
                 method="wechat", actual_currency="CNY", actual_amount=1,
                 base=1, key="denied", actor_role="Staff", access=False,
-            )
-        with self.assertRaisesRegex(ValueError, "cash is not allowed"):
-            self._record(
-                method="cash", actual_currency="AUD", actual_amount=1,
-                base=1, key="forged-cash",
             )
         allowed = self._record(
             method="wechat", actual_currency="CNY", actual_amount=50_000,

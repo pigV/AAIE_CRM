@@ -799,6 +799,7 @@ class RevenueReadModels:
                     })
             payment_methods = []
             expected_currencies = {
+                "cash": "AUD",
                 "alipay": "CNY",
                 "wechat": "CNY",
                 "au_personal_account": "AUD",
@@ -809,7 +810,7 @@ class RevenueReadModels:
                      FROM revenue_payment_methods m
                      JOIN revenue_payment_method_rule_versions r ON r.payment_method_id=m.id
                     WHERE m.status='active' AND r.status='active'
-                      AND m.method_code IN ('alipay','wechat','au_personal_account','au_company_account')
+                      AND m.method_code IN ('alipay','wechat','cash','au_personal_account','au_company_account')
                       AND NOT EXISTS(
                           SELECT 1 FROM revenue_payment_method_rule_versions other
                            WHERE other.payment_method_id=m.id AND other.status='active'

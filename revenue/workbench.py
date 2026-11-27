@@ -330,6 +330,7 @@ class RevenueWorkbench:
             "gst_collected_cents": int(item["gst_collected_cents"]),
             "outstanding_base_cents": (int(item["outstanding_base_cents"])
                                        if item["outstanding_base_cents"] is not None else None),
+            "hide_base_balances": bool(item.get("hide_base_balances")),
             "allocation_pending": bool(item.get("allocation_pending")),
             "legacy_receipts": bool(item.get("legacy_receipts")),
             **({
@@ -342,6 +343,7 @@ class RevenueWorkbench:
 
     def _payment_summary(self, item):
         method_labels = {
+            "cash": "现金",
             "alipay": "支付宝",
             "wechat": "微信",
             "au_personal_account": "澳洲私人账号",
@@ -542,7 +544,11 @@ class RevenueWorkbench:
         from revenue.receipt_display import legacy_fee_receipt_totals
         case_uid = self.connection.execute("SELECT uid FROM revenue_commercial_cases WHERE id=?", (case_id,)).fetchone()[0]
         legacy = legacy_fee_receipt_totals(self.connection, case_uid)
+        from revenue.fee_corrections import hide_service_fee_balances
+        from revenue.historical_receipts import fee_kind
         for row in rows:
+            row["hide_base_balances"] = (fee_kind(row["milestone_code"]) == "client_service"
+                and hide_service_fee_balances(self.connection, row["student_id"]))
             legacy_base, legacy_gst, unverified = legacy.get(row["id"], (0, 0, 0))
             row["base_received_cents"] += legacy_base
             row["gst_collected_cents"] += legacy_gst

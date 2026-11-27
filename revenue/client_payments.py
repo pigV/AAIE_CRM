@@ -17,6 +17,7 @@ from revenue.repository import RevenueRepository, canonical_json, new_uid
 
 
 CLIENT_PAYMENT_METHODS = {
+    "cash": ("AUD", "现金"),
     "alipay": ("CNY", "支付宝"),
     "wechat": ("CNY", "微信"),
     "au_personal_account": ("AUD", "澳洲私人账号"),
@@ -206,8 +207,6 @@ class ClientPaymentService:
 
     def _payment_method(self, method_code: str, effective_date: str) -> sqlite3.Row:
         code = str(method_code or "").strip()
-        if code == "cash":
-            raise ValueError("cash is not allowed for the client Payment workflow")
         if code not in CLIENT_PAYMENT_METHODS:
             raise ValueError("unsupported client Payment method")
         rows = self.connection.execute(
@@ -224,6 +223,8 @@ class ClientPaymentService:
         ).fetchall()
         if len(rows) != 1:
             raise ValueError("client Payment method rule is missing or ambiguous")
+        if code == "cash" and rows[0]["gst_rate_basis_points"] != 0:
+            raise ValueError("Cash GST must be zero")
         return rows[0]
 
     def _validate_actual_payment(

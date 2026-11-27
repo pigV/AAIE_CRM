@@ -344,7 +344,7 @@ class RevenueReadModelTests(RevenueDatabaseFixture, unittest.TestCase):
         self.assertEqual("部分收款", row["status"])
         self.assertNotIn("invoice_groups", workspace["action"])
         self.assertEqual(
-            {"alipay", "wechat", "au_personal_account", "au_company_account"},
+            {"alipay", "wechat", "cash", "au_personal_account", "au_company_account"},
             {item["code"] for item in workspace["action"]["payment_methods"]},
         )
 

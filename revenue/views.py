@@ -139,7 +139,7 @@ def _render_client_payment_form(
         {_hidden_security(csrf, token, 'client-payment')}
         <label>收费项目<select name="fee_item_uid" required data-fee-item><option value="">请选择</option>{fee_options}</select></label>
         <label>付款方式<select name="payment_method_code" required data-payment-method><option value="">请选择</option>{method_options}</select></label>
-        <p class="revenue-payment-method-help revenue-action-form__wide">支付宝 / 微信：实际收到人民币；澳洲账户：实际收到澳元。澳洲公司账号 GST 10%。</p>
+        <p class="revenue-payment-method-help revenue-action-form__wide">支付宝 / 微信：实际收到人民币；现金 / 澳洲账户：实际收到澳元。现金 GST 0。澳洲公司账号 GST 10%。</p>
         <label>实际到账币种<input name="actual_currency_code" value="" readonly required data-actual-currency></label>
         <label><span data-actual-amount-label>实际到账金额</span>
           <span class="revenue-money-input"><span data-actual-prefix>—</span><input type="text" inputmode="decimal" autocomplete="off" data-actual-major required></span>
@@ -268,7 +268,7 @@ def _render_workspace_action(data: dict, csrf: str, token: str) -> str:
             if receipt_forms else ""
         )
         method_labels = {
-            "alipay": "支付宝", "wechat": "微信",
+            "cash": "现金", "alipay": "支付宝", "wechat": "微信",
             "au_personal_account": "澳洲私人账号", "au_company_account": "澳洲公司账号",
         }
         history_rows = "".join(
@@ -1580,15 +1580,21 @@ def render_revenue_case_workbench(
                     f'<div><dt>净收基础费</dt><dd>{_aud_money(item["base_received_cents"] - refunded_base)}</dd></div>'
                     f'<div><dt>净收 GST</dt><dd>{_aud_money(item["gst_collected_cents"] - refunded_gst)}</dd></div>'
                 )
+            received_field = "" if item.get("hide_base_balances") else (
+                f'<div><dt>基础服务费已收</dt><dd>{billing_money("base_received_cents")}</dd></div>'
+            )
+            outstanding_field = "" if item.get("hide_base_balances") else (
+                f'<div class="is-outstanding"><dt>未收基础服务费</dt><dd>{billing_money("outstanding_base_cents")}</dd></div>'
+            )
             cards.append(
                 '<article class="revenue-billing-card">'
                 f'<header><div><span class="revenue-eyebrow">基础服务费</span><h3>{escape(str(item.get("description") or "基础服务费"))}</h3></div>'
                 f'{_payment_status_badge(status)}</header>'
                 '<dl class="revenue-money-summary">'
                 f'<div><dt>基础服务费</dt><dd>{_aud_money(int(item.get("final_base_cents") or 0))}</dd></div>'
-                f'<div><dt>基础服务费已收</dt><dd>{billing_money("base_received_cents")}</dd></div>'
+                f'{received_field}'
                 f'<div><dt>GST 已收</dt><dd>{billing_money("gst_collected_cents")}</dd></div>'
-                f'{net}<div class="is-outstanding"><dt>未收基础服务费</dt><dd>{billing_money("outstanding_base_cents")}</dd></div>'
+                f'{net}{outstanding_field}'
                 f'</dl>{add_payment}</article>'
             )
         if cards:
