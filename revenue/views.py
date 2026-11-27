@@ -801,7 +801,7 @@ def _student_case_cards(rows, columns, empty_message: str, *, hidden: bool) -> s
     labels = {column["key"]: column["label"] for column in columns}
     cards = []
     for row in rows:
-        name = escape(str(row.get("student_name") or "—"))
+        name = escape(str(row.get("student_name") or "—")) + _student_education_badge(row)
         student_id = escape(str(row.get("student_id") or "—"))
         status = _student_case_status_badge(str(row.get("status") or "—"))
         financial = "".join(
@@ -828,6 +828,14 @@ def _student_case_cards(rows, columns, empty_message: str, *, hidden: bool) -> s
     content = "".join(cards) or f'<li class="revenue-empty">{escape(empty_message)}</li>'
     visibility = " hidden" if hidden else ""
     return f'<ul class="revenue-student-cards" role="list" aria-label="学生档案"{visibility}>{content}</ul>'
+
+
+def _student_education_badge(row):
+    label = row.get('student_education_label')
+    if not label:
+        return ''
+    return (' <span class="status student-education-name-badge" data-student-education-kind>'
+            + escape(str(label)) + '</span>')
 
 
 def render_revenue_workspace_page(
@@ -861,6 +869,8 @@ def render_revenue_workspace_page(
             else:
                 value = "—" if raw in (None, "") else str(raw)
             content = escape(value)
+            if key == 'student_name':
+                content += _student_education_badge(row)
             if index == 0 and row.get("href"):
                 content = (
                     f'<a class="revenue-row-link" href="{escape(str(row["href"]), quote=True)}">'

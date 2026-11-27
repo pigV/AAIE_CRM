@@ -1118,6 +1118,7 @@ class RevenueReadModels:
                 if not cases:
                     row["missing_case"] = self._missing_case_info(student["missing_case_reason"])
             self._complete_student_list_facts(row, sid, cases)
+            row['student_education_label'] = self._student_education_label(sid)
             from revenue.historical_receipts import reviews, summary
             historical = [r for r in reviews(self.connection, student_id=sid) if r["status"] != "cancelled"]
             if historical and not cases:
@@ -1314,6 +1315,7 @@ class RevenueReadModels:
                 "student_name": self._student_display_name(str(row["student_id"])),
                 "student_id": str(row["student_id"]),
                 "fee_type": fee_display_description(self.connection, row["uid"], str(row["description"])),
+                "student_education_label": self._student_education_label(str(row["student_id"])),
                 "standard_base_cents": final_base + int(row["discount_cents"]),
                 "discount_cents": int(row["discount_cents"]),
                 "final_base_cents": final_base,
@@ -2404,6 +2406,19 @@ class RevenueReadModels:
             {**dict(row), "student_name": self._student_display_name(row["student_id"])} for row in claims
         ]
         return history, claim_history
+
+    def _student_education_label(self, student_id: str) -> str:
+        from student_context_display import student_education_label
+        columns = self._columns('students')
+        if 'application_stream' not in columns:
+            return ''
+        selected = ['application_stream']
+        if 'higher_education_course_type' in columns:
+            selected.append('higher_education_course_type')
+        row = self.connection.execute(
+            'SELECT '+','.join(selected)+' FROM students WHERE student_id=?', (student_id,)
+        ).fetchone()
+        return student_education_label(row) if row else ''
 
     def _student_display_name(self, student_id: str) -> str:
         if student_id in self._student_name_cache:
