@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from visa_only_materials import VisaOnlyMaterialsMixin
+from visa_overview_ui import visa_state_tone
 
 
 AI_UNAVAILABLE_MESSAGE = 'AI-READY · AI is not enabled. Visa documents continue to use the approved deterministic workflow.'
@@ -64,16 +65,16 @@ def document_workspace_html(case_id, csrf, documents, submissions, extractions, 
     result=result or {'effective_result':'Pending','authority':'legacy','auto_detected_result':None,'manual_override':False,'conflict':False,'history':[]}
     authority='Manual / 人工' if result.get('manual_override') else 'Auto / 自动' if result.get('authority')=='auto' else 'Current record / 当前记录'
     conflict='<p class="visa-result-conflict" role="alert">Conflicting Grant and Refusal evidence requires Staff review.</p>' if result.get('conflict') else ''
-    result_card=f'<div class="visa-result-summary"><div><span>Current Result</span><strong>{escape(str(result.get("effective_result") or "Pending"))}</strong></div><div><span>Authority</span><strong>{authority}</strong></div><div><span>Auto Detected Result</span><strong>{escape(str(result.get("auto_detected_result") or "Not detected"))}</strong></div></div>{conflict}'
+    result_card=f'<div class="visa-result-summary"><div class="visa-state-surface" data-visa-tone="{visa_state_tone(result.get("effective_result") or "Pending")}"><span>Current Result</span><strong>{escape(str(result.get("effective_result") or "Pending"))}</strong></div><div><span>Authority</span><strong>{authority}</strong></div><div data-visa-tone="{visa_state_tone(result.get("auto_detected_result") or "Not detected")}"><span>Auto Detected Result</span><strong>{escape(str(result.get("auto_detected_result") or "Not detected"))}</strong></div></div>{conflict}'
     current_result=str(result.get('effective_result') or 'Pending')
     recorded=str(result.get('recorded_result') or current_result)
     if result.get('manual_override') or result.get('authority')=='legacy':
         if recorded in {'Pending','Granted','Refused','Withdrawn'}:
             if recorded!=current_result:
                 label='原人工结果记录' if result.get('manual_override') else '原结果记录'
-                result_card+=f'<p role="status">{label}：{escape(recorded)}；当前有效结果：{escape(current_result)}。原记录已保留，请核对来源后更正。</p>'
+                result_card+=f'<p role="status">{label}：<span data-visa-tone="{visa_state_tone(recorded)}">{escape(recorded)}</span>；当前有效结果：<span data-visa-tone="{visa_state_tone(current_result)}">{escape(current_result)}</span>。原记录已保留，请核对来源后更正。</p>'
             current_result=recorded
-    result_options=''.join(f'<option'+(' selected' if item==current_result else '')+f'>{item}</option>' for item in ('Pending','Granted','Refused','Withdrawn'))
+    result_options=''.join(f'<option value="{item}"'+(' selected' if item==current_result else '')+f'>{item}</option>' for item in ('Pending','Granted','Refused','Withdrawn'))
     correction=form('correct-result-status',f'<label>Correct Result<select name="result_status">{result_options}</select></label><label>Reason<input name="reason" required maxlength="500"></label><button>Save correction</button>')
     if compact_result_controls:
         correction='<details class="visa-result-correction"><summary>更正结果记录</summary>'+correction+'</details>'

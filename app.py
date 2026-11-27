@@ -65699,6 +65699,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         return self.redirect(f"/visa-information-collection/{quote(token)}", cookie=cookie)
 
     def visa_information_collection_html(self, student_id, case):
+        from visa_overview_ui import visa_state_tone
         package = self.visa_information_collection_package(case["id"])
         application_type_options = self.visa_case_select_options(
             ("New Application", "Renewal Application"),
@@ -65829,8 +65830,8 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                     <tr>
                       <td>{esc(self.visa_information_collection_form_type_label(assignment["form_type"]))}{form_note_html}</td>
                       <td>{esc(assignment["template_version"] or "")}</td>
-                      <td>{esc(self.visa_information_collection_status_label(assignment["status"] or "Not Started"))}</td>
-                      <td>{esc(assignment["progress_percent"] or 0)}%</td>
+                      <td class="visa-state-surface" data-visa-tone="{visa_state_tone(assignment["status"] or "Not Started")}">{esc(self.visa_information_collection_status_label(assignment["status"] or "Not Started"))}</td>
+                      <td data-visa-tone="{visa_state_tone(assignment["status"] or "Not Started")}">{esc(assignment["progress_percent"] or 0)}%</td>
                       <td>{esc(display_datetime(assignment["last_saved_at"]) or "—")}</td>
                       <td>{esc(display_datetime(assignment["submitted_at"]) or "—")}</td>
                       <td>{assignment_actions}</td>
@@ -65855,10 +65856,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
                   <div class="visa-information-respondent-head">
                     <div>
                       <h3>{esc(respondent["respondent_name"] or respondent["respondent_type"])}</h3>
-                      <p>填写人类型：{esc(respondent_type_label)} · 当前状态：{esc(status_label)} · 链接状态：{esc(link_label)}</p>
+                      <p>填写人类型：{esc(respondent_type_label)} · 当前状态：<span data-visa-tone="{visa_state_tone(respondent["status"] or "Not Started")}">{esc(status_label)}</span> · 链接状态：<span data-visa-tone="{visa_state_tone(link_label)}">{esc(link_label)}</span></p>
                       <p>微信绑定状态：{esc(wechat_label)} · {wechat_detail}</p>
                       <p>生成时间：{esc(generated_label)} · 到期时间：{esc(expires_label)} · 剩余：{esc(remaining_label)}</p>
-                      <p>完成度：{esc(respondent["progress_percent"] or 0)}% · 最后保存时间：{esc(last_saved_label)} · 提交时间：{esc(submitted_label)}</p>
+                      <p data-visa-tone="{visa_state_tone(respondent["status"] or "Not Started")}">完成度：{esc(respondent["progress_percent"] or 0)}% · 最后保存时间：{esc(last_saved_label)} · 提交时间：{esc(submitted_label)}</p>
                     </div>
                     <div class="row-actions">
                       {action_html}
@@ -65906,7 +65907,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
 
         package_summary = f"""
         <div class="visa-material-summary-grid">
-          <div class="visa-material-summary-card"><span>采集包状态</span><strong>{esc(self.visa_information_collection_status_label(package["status"] or "Not Started"))}</strong></div>
+          <div class="visa-material-summary-card visa-state-surface" data-visa-tone="{visa_state_tone(package["status"] or "Not Started")}"><span>采集包状态</span><strong>{esc(self.visa_information_collection_status_label(package["status"] or "Not Started"))}</strong></div>
           <div class="visa-material-summary-card"><span>填写人数</span><strong>{len(respondents)}</strong></div>
           <div class="visa-material-summary-card"><span>表单分配</span><strong>{len(assignments)}</strong></div>
           <div class="visa-material-summary-card"><span>链接有效</span><strong>{sum(1 for row in respondents if self.visa_information_collection_link_is_active(row))}</strong></div>
@@ -69037,7 +69038,9 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               </dd>
             </div>
             """
-        return f'<div class="visa-management-field-card"><dt>{esc(label)}</dt><dd>{esc(self.visa_management_text(value))}</dd></div>'
+        from visa_overview_ui import visa_state_tone
+        tone_attr = f' data-visa-tone="{visa_state_tone(value)}"' if label in {"Status", "Result Status"} else ""
+        return f'<div class="visa-management-field-card"><dt>{esc(label)}</dt><dd{tone_attr}>{esc(self.visa_management_text(value))}</dd></div>'
 
     def visa_evidence_ai_review_entry_html(self, student_id, case):
         path = self.visa_evidence_review_path(student_id, case["id"])
@@ -69747,10 +69750,13 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         hero_title = applicant_name or student_name
         display_case=(self._visa_display_case(case) if getattr(self,"business_changes_enabled",lambda:False)() else dict(case))
         hero_status='签证材料需核实' if display_case.get('_business_needs_review') else display_case['status']
+        from visa_overview_ui import visa_state_tone
         hero_description = f'学生 {student_name} · 学生编号 {student_id}'
         body = f"""
         <link rel="stylesheet" href="/assets/visa-case-scheme-c.css?v=1">
-        <div class="visa-management-page visa-case-scheme-c{' visa-material-case-page' if material_mode else ''}">
+        <link rel="stylesheet" href="/assets/visa-state-colors.css?v=1">
+        <link rel="stylesheet" href="/assets/visa-case-figma.css?v=3">
+        <div class="visa-management-page visa-case-scheme-c{' visa-case-figma' if active_tab in {'info_collection', 'material_checklist', 'visa_result'} else ''}{' visa-material-case-page' if material_mode else ''}">
           <section class="panel visa-management-hero">
             <div>
               <span class="eyebrow">Visa Case Detail</span>
@@ -69761,7 +69767,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           <dl class="visa-case-summary">
             <div><dt>签证类型</dt><dd>{esc(case['visa_type'] or '待核实')}</dd></div>
             <div><dt>案件负责人</dt><dd>{esc(case['case_owner'] or '未分配')}</dd></div>
-            <div><dt>案件状态</dt><dd><span class="visa-case-status-badge">{esc(hero_status)}</span></dd></div>
+            <div><dt>案件状态</dt><dd><span class="visa-case-status-badge" data-visa-tone="{visa_state_tone(hero_status)}">{esc(hero_status)}</span></dd></div>
             <div><dt>案件编号</dt><dd>#{case['id']}</dd></div>
           </dl>
           </section>
@@ -71163,6 +71169,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <p>当前 v1 只显示 visa_cases 中已有记录；不会从旧 VISA、Application 或文件记录自动迁移。</p>
             </div>"""
         body = f"""
+        <link rel="stylesheet" href="/assets/visa-state-colors.css?v=1">
         <div class="visa-management-page visa-management-compact">
           <p class="visa-management-intro">搜索申请人或学生，进入案件管理材料、递交记录和签证结果。</p>
           <section class="panel visa-applicant-search" aria-label="Visa applicant search">

@@ -185,6 +185,6 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
         </div>
         <div class="visa-material-workspace-save"><span data-material-save-status role="status" aria-live="polite">保存状态和备注后生效</span>
           <button class="primary" form="{form_id}" type="submit" data-material-save-button>保存材料状态</button></div>
-        <p class="visa-material-workspace-legend">橙色：未完成　蓝色：未保存修改　绿色：已收到　灰色：不适用。已收到不代表审核通过。</p>
+        <p class="visa-material-workspace-legend">{'紫色' if student_id else '橙色'}：未完成　蓝色：未保存修改　绿色：已收到　灰色：不适用。已收到不代表审核通过。</p>
         {('<p class="visa-material-phase-note">系统会从 Application / Offer / COE+OSHC / Homestay 等来源自动引用匹配文件；源文件仍保留在原模块。</p>' if student_id else '<p class="visa-material-phase-note">已确认的材料存放在当前签证案件中。</p>')}
       </section>'''

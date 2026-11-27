@@ -1,0 +1,38 @@
+/* Shared Visa state palette. Legacy amber tone key now paints the approved lavender. */
+.ui-premium-v2 {
+  --visa-state-blue-ink:#264963;
+  --visa-state-blue-surface:#edf3f6;
+  --visa-state-blue-border:#c6d3df;
+  --visa-state-amber-ink:#66527f;
+  --visa-state-amber-surface:#f1edf6;
+  --visa-state-amber-border:#c9bdd8;
+  --visa-state-green-ink:#2b6a49;
+  --visa-state-green-surface:#edf5f0;
+  --visa-state-green-border:#b4cdbd;
+  --visa-state-red-ink:#a93843;
+  --visa-state-red-surface:#f9eff0;
+  --visa-state-red-border:#d9b5ba;
+  --visa-state-gray-ink:#526173;
+  --visa-state-gray-surface:#f1f3f6;
+  --visa-state-gray-border:#c9d1dc;
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--blue[data-visa-state] {
+  color:var(--visa-state-blue-ink);
+  background:var(--visa-state-blue-surface);
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--amber[data-visa-state] {
+  color:var(--visa-state-amber-ink);
+  background:var(--visa-state-amber-surface);
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--green[data-visa-state] {
+  color:var(--visa-state-green-ink);
+  background:var(--visa-state-green-surface);
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--red[data-visa-state] {
+  color:var(--visa-state-red-ink);
+  background:var(--visa-state-red-surface);
+}
+.ui-premium-v2 .visa-management-page.visa-management-compact .visa-overview-tag--gray[data-visa-state] {
+  color:var(--visa-state-gray-ink);
+  background:var(--visa-state-gray-surface);
+}

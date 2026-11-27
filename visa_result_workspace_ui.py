@@ -1,5 +1,6 @@
 """Result-workspace presentation only. No persistence or state transitions."""
 from collections import OrderedDict
+from visa_overview_ui import visa_state_tone
 from html import escape
 from urllib.parse import quote, urlencode
 from visa_document_processing_ui import document_return_context
@@ -111,13 +112,15 @@ def render_result_materials(handler, student_id, case, rows):
 
 def render_result_workspace(case, result, materials_html, processing_html, lodgement_html='', case_documents=''):
     stage=result_stage(case,result)
+    tone = ('amber' if stage['tone'] == 'warning' else
+            visa_state_tone(dict(result or {}).get('effective_result')) if stage['key'] == 'result' else 'blue')
     target=stage['target']
     if not dict(case).get('student_id') and target=='visa-result-lodgement':target='visa-result-case-documents'
     navigation=''.join(f'<a href="#visa-result-group-{key}" data-result-jump>{label}</a>' for key,label,_ in GROUPS if key!='other')
     extra=(f'<details class="visa-result-case-documents" id="visa-result-case-documents"><summary>案件文件与递交版本 / Prepared · IMMI Submitted</summary>{case_documents}</details>' if case_documents else '')
     return f'''<link rel="stylesheet" href="/assets/visa-material-workspace.css?v=1"><link rel="stylesheet" href="/assets/visa-result-workspace.css?v=2"><script src="/assets/visa-result-workspace.js?v=5" defer></script>
       <div class="visa-result-workspace" data-visa-result-workspace data-case-id="{int(case['id'])}" data-stage="{stage['key']}">
-        <section class="visa-result-current visa-result-{stage['tone']}"><div><span>当前结果记录</span><h2>{escape(stage['label'])}</h2><p>{escape(stage['hint'])}</p></div><a class="primary button-link" href="#{target}" data-result-jump>{escape(stage['action'])}</a></section>
+        <section class="visa-result-current visa-result-{stage['tone']}" data-visa-tone="{tone}"><div><span>当前结果记录</span><h2>{escape(stage['label'])}</h2><p>{escape(stage['hint'])}</p></div><a class="primary button-link" href="#{target}" data-result-jump>{escape(stage['action'])}</a></section>
         <nav class="visa-result-nav" aria-label="结果页分区">{navigation}<a href="#visa-result-dates" data-result-jump>关键日期与结果核对</a></nav>
         <p class="visa-result-feedback" data-result-feedback role="status" aria-live="polite"></p>
         <button class="secondary compact" type="button" data-result-reset hidden>撤销当前区域未保存修改</button>

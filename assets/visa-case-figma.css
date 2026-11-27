@@ -1,0 +1,603 @@
+/* Accepted fresh Figma palette. Paint-only; existing geometry and behavior are preserved. */
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(h2,h3,h4,dt,dd):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--foreground);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-management-hero p:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--muted);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(.visa-case-tabs,.visa-case-overview-disclosure,.visa-result-aside,.visa-result-group,.visa-result-case-documents):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:var(--card);
+  border-color:var(--border);
+  border-radius:12px;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-case-tabs .visa-case-tab-link:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--muted);
+  background:transparent;
+  border-radius:10px;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(button.primary,a.primary.button-link):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:var(--accent);
+  border-color:var(--accent);
+  color:var(--primary-foreground);
+  border-radius:11px;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(input,select,textarea):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  border-color:var(--border);
+  border-radius:9px;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(.visa-information-application-type,.visa-evidence-section,.visa-information-respondent-card):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:var(--card);
+  border-color:var(--border);
+  border-radius:12px;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  --material-blue:#315bef;
+  --material-blue-soft:#eaf0ff;
+  border-color:var(--border);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record :is(.panel-head,.visa-material-category-head):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:color-mix(in srgb,var(--accent) 5%,var(--card));
+  border-color:var(--border);
+  color:var(--foreground);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-quick-filter:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  border-radius:12px;
+  border-color:#e3e8f2;
+  box-shadow:none;
+  background:#fff;
+  color:#536177;
+  outline-color:#315bef;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-compact-toolbar:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:color-mix(in srgb,var(--accent) 3%,var(--card));
+  border-color:var(--border);
+  border-radius:11px;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-category:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  border-color:var(--border);
+  border-radius:12px;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-item-name:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--foreground);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(.visa-material-workspace-save,.visa-result-save):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:var(--card);
+  border-color:var(--border);
+  border-radius:12px;
+  box-shadow:0 -4px 16px rgba(201,211,230,.2);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-workspace:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  --result-blue:#315bef;
+  --result-soft:#eaf0ff;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-aside .panel:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  box-shadow:none;
+  background:transparent;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-case-tabs a[href*="evidence_ai_review"]:not(.active):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:transparent;
+  color:#7c879b;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-case-tab-link.active:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  box-shadow:inset 0 -3px #315bef;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel .visa-material-summary-card strong:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#315bef;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-respondent-card:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  box-shadow:inset 3px 0 #315bef;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-respondent-head p:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#7c879b;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-respondent-head p:first-of-type:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#536177;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-quick-filter strong:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:inherit;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-quick-filter[data-quick-filter="required_unfinished"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff5df;
+  color:#9a6700;
+  border-color:#ebcc8d;
+  box-shadow:inset 0 3px #d69b29;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-quick-filter[data-quick-filter="unfinished"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fffaf0;
+  color:#9a6700;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-quick-filter[data-quick-filter="uploaded"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#15805a;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-compact-row[data-status="missing"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  border-left-color:#f0d8aa;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-compact-row[data-status="missing"][data-required="required"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fffcf5;
+  border-left-color:#d69b29;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-compact-row[data-status="uploaded"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  border-left-color:#1d9368;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(button.primary,a.primary.button-link):disabled:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#eef1f6;
+  color:#7c879b;
+  border-color:#e3e8f2;
+  box-shadow:none;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma [data-visa-tone]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-case-status-badge:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:color-mix(in srgb,var(--visa-state-base) 11%,var(--card));
+  border-color:color-mix(in srgb,var(--visa-state-base) 28%,var(--border));
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(button.primary,a.primary.button-link):focus-visible:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  outline:3px solid var(--accent);
+  outline-offset:3px;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-respondent-head p[data-visa-tone]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-quick-filter[data-count="0"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#f7f9fd;
+  color:var(--muted);
+  border-color:var(--border);
+  box-shadow:none;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma select[name="result_status"]:has(option[value="Closed"]:checked):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:color-mix(in srgb,var(--muted) 68%,var(--foreground));
+  background:color-mix(in srgb,var(--muted) 11%,var(--card));
+  border-color:color-mix(in srgb,var(--muted) 28%,var(--border));
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-compact-row.is-dirty[data-status]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#e0e8fb;
+  border-left-color:#2448af;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-current[data-visa-tone="amber"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:var(--formal-state-bg);
+  border-left-color:var(--visa-state-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(.visa-state-surface[data-visa-tone] strong,.visa-result-current h2):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .panel:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  border-color:#dce2ea;
+  border-radius:16px;
+  background:var(--card);
+  box-shadow:0 3px 12px rgba(35,51,74,.05);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(button.secondary,a.secondary.button-link):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  border-color:#d5dde7;
+  color:#536174;
+  border-radius:11px;
+  box-shadow:none;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel > .panel-head:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  border-color:#dce2ea;
+  box-shadow:none;
+  border-radius:3px;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel > .panel-head h2:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-blue-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel > .panel-head p:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#738094;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record > .panel-head:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  border-color:#dce2ea;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record > .panel-head h2:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-blue-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record > .panel-head p:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#738094;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel .visa-material-summary-card:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#f7f8fa;
+  border-color:#dce2ea;
+  box-shadow:none;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-respondent-card thead th:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#f2f4f7;
+  color:#536174;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-quick-filter[data-quick-filter="required_unfinished"]:not([data-count="0"]):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:var(--visa-state-amber-surface);
+  color:var(--visa-state-amber-ink);
+  border-color:#d3c9df;
+  box-shadow:inset 0 2px var(--visa-state-amber-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-compact-row[data-status="missing"][data-required="required"]:not(.is-dirty):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  border-left-color:var(--visa-state-amber-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-compact-row[data-status="missing"]:not(.is-dirty):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  border-left-color:#d5cce0;
+  background:#fff;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-compact-row[data-required="required"] .visa-material-requirement:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-amber-ink);
+  background:var(--visa-state-amber-surface);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-current p:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#738094;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-nav a:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  border-radius:9px;
+  border-color:#dce2ea;
+  color:#536174;
+  background:#fff;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-group > summary:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  border-color:#dce2ea;
+  box-shadow:none;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-group:not([open]) > summary:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  box-shadow:none;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-summary > div:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#f7f8fa;
+  border-color:#dce2ea;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-case-status-badge[data-visa-tone]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:var(--formal-state-bg);
+  border-color:var(--formal-state-border);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-state-surface[data-visa-tone]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:var(--formal-state-bg);
+  border-color:var(--formal-state-border);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma #visa-result-group-lodgement:not([open]) > summary:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  box-shadow:inset 2px 0 var(--visa-state-blue-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma #visa-result-group-lodgement > summary strong:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#344256;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma #visa-result-group-s56 > summary strong:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#344256;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma #visa-result-group-medical > summary strong:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#344256;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma #visa-result-group-bridging > summary strong:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#344256;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma #visa-result-group-outcome > summary strong:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#344256;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma [data-visa-tone="blue"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  --visa-state-base:#315bef;
+  --visa-state-ink:var(--visa-state-blue-ink);
+  --formal-state-bg:var(--visa-state-blue-surface);
+  --formal-state-border:var(--visa-state-blue-border);
+  color:var(--visa-state-blue-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma [data-visa-tone="amber"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  --visa-state-base:var(--warning);
+  --visa-state-ink:var(--visa-state-amber-ink);
+  --formal-state-bg:var(--visa-state-amber-surface);
+  --formal-state-border:var(--visa-state-amber-border);
+  color:var(--visa-state-amber-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(.visa-material-item-status,.visa-result-item-head) select:has(option[value="missing"]:checked):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-amber-ink);
+  background:var(--visa-state-amber-surface);
+  border-color:var(--visa-state-amber-border);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma select[name="result_status"]:has(option[value="Pending"]:checked):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-amber-ink);
+  background:var(--visa-state-amber-surface);
+  border-color:var(--visa-state-amber-border);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma [data-visa-tone="green"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  --visa-state-base:var(--success);
+  --visa-state-ink:var(--visa-state-green-ink);
+  --formal-state-bg:var(--visa-state-green-surface);
+  --formal-state-border:var(--visa-state-green-border);
+  color:var(--visa-state-green-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(.visa-material-item-status,.visa-result-item-head) select:has(option[value="uploaded"]:checked):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-green-ink);
+  background:var(--visa-state-green-surface);
+  border-color:var(--visa-state-green-border);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma select[name="result_status"]:has(option[value="Granted"]:checked):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-green-ink);
+  background:var(--visa-state-green-surface);
+  border-color:var(--visa-state-green-border);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma [data-visa-tone="red"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  --visa-state-base:var(--danger);
+  --visa-state-ink:var(--visa-state-red-ink);
+  --formal-state-bg:var(--visa-state-red-surface);
+  --formal-state-border:var(--visa-state-red-border);
+  color:var(--visa-state-red-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma select[name="result_status"]:has(option[value="Refused"]:checked):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-red-ink);
+  background:var(--visa-state-red-surface);
+  border-color:var(--visa-state-red-border);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma [data-visa-tone="gray"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  --visa-state-base:var(--muted);
+  --visa-state-ink:var(--visa-state-gray-ink);
+  --formal-state-bg:var(--visa-state-gray-surface);
+  --formal-state-border:var(--visa-state-gray-border);
+  color:var(--visa-state-gray-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(.visa-material-item-status,.visa-result-item-head) select:has(option[value="not_applicable"]:checked):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-gray-ink);
+  background:var(--visa-state-gray-surface);
+  border-color:var(--visa-state-gray-border);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma select[name="result_status"]:has(option[value="Withdrawn"]:checked):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-gray-ink);
+  background:var(--visa-state-gray-surface);
+  border-color:var(--visa-state-gray-border);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma {
+  --accent:#126b7a;
+  --accent-soft:#eaf5f7;
+  --material-blue:#126b7a;
+  --material-blue-soft:#eaf0ff;
+  --result-blue:#126b7a;
+  --result-soft:#eaf0ff;
+  color:var(--foreground);
+  --visa-state-ink:var(--muted);
+  --visa-state-base:var(--muted);
+  --formal-navy:#19345d;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-management-hero:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  border-color:#dce2ea;
+  border-left-color:#126b7a;
+  box-shadow:0 3px 12px rgba(35,51,74,.05);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-management-hero h2:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#244857;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-case-tabs .visa-case-tab-link.active:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#126b7a;
+  background:#e5f3f5;
+  box-shadow:inset 0 -2px #126b7a;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma :is(button.primary,a.primary.button-link):not(:disabled):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#126b7a;
+  border-color:#126b7a;
+  color:#fff;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel .visa-material-summary-card:nth-child(2):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#ebf6f9;
+  border-color:#c5dfe5;
+  box-shadow:inset 0 2px #3b93a5;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel .visa-material-summary-card:nth-child(2) strong:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#126b7a;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel .visa-material-summary-card:nth-child(3):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#f2eef8;
+  border-color:#dbd0e8;
+  box-shadow:inset 0 2px #9171b4;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel .visa-material-summary-card:nth-child(3) strong:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#76518c;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel .visa-material-summary-card:nth-child(4):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#eaf7f1;
+  border-color:#c3dfd1;
+  box-shadow:inset 0 2px #4c9c7e;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-collection-panel .visa-material-summary-card:nth-child(4) strong:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#287152;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-application-type h3:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#126b7a;
+  box-shadow:inset 2px 0 #68b4bf;
+  background:#f6fafb;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-respondent-head:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#f7faf9;
+  box-shadow:inset 2px 0 #82bba5;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-respondent-head h3:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#376959;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-information-respondent-card .row-actions a:first-child:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#126b7a;
+  background:#eaf5f7;
+  border-color:#c5dfe5;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-quick-filter[data-quick-filter="all"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#eaf5f7;
+  color:#126b7a;
+  border-color:#bfdce2;
+  outline-color:#3b93a5;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-quick-filter[data-quick-filter="unfinished"]:not([data-count="0"]):not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#f0f6fa;
+  color:#506b7f;
+  border-color:#d1dfe9;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-upload > summary:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#126b7a;
+  background:#eaf5f7;
+  border-color:#bfdce2;
+  border-radius:9px;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-category-head:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#f2f8f7;
+  border-color:#dce2ea;
+  color:#39786e;
+  box-shadow:inset 2px 0 #82bba5;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-category-head h3:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#376959;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-current:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  border-radius:16px;
+  background:#edf7f8;
+  border-color:#cfE3e6;
+  border-left-color:#126b7a;
+  box-shadow:none;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-current[data-visa-tone="blue"]:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  --visa-state-ink:#126b7a;
+  border-left-color:#126b7a;
+  color:#126b7a;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-current h2:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:var(--visa-state-ink);
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-aside > h2:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  color:#376959;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-group[open] > summary:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#f0f7f8;
+  box-shadow:inset 3px 0 #3b93a5;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma #visa-result-group-s56:not([open]) > summary:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  box-shadow:inset 2px 0 #9171b4;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma #visa-result-group-medical:not([open]) > summary:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  box-shadow:inset 2px 0 #3b93a5;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma #visa-result-group-bridging:not([open]) > summary:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  box-shadow:inset 2px 0 #4c9c7e;
+}
+
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma #visa-result-group-outcome:not([open]) > summary:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
+  background:#fff;
+  box-shadow:inset 2px 0 #8095ad;
+}
+
+/* Interactive states follow the same no-orange palette as the static page. */
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-workspace mark {
+  background:#dceef2;
+  color:#126b7a;
+}
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-workspace .visa-result-feedback:not(:empty) {
+  background:#eaf5f7;
+  color:#126b7a;
+}
+.ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-workspace .visa-result-conflict {
+  background:var(--visa-state-amber-surface);
+  color:var(--visa-state-amber-ink);
+}
