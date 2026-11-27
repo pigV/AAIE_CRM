@@ -1,4 +1,4 @@
-"""Create the independent 590 receivable after staff confirms an identified parent."""
+"""Create the independent 590 receivable for an identified parent, without payment."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -103,6 +103,20 @@ def record_parent_guardian_intake(connection, student_id, token, *, occurred_at,
         return
     with _intake_transaction(connection, student_id):
         return _record_submission(connection, student_id, token, occurred_at, actor_user_id)
+
+
+def record_submitted_parent_guardian_intake(connection, student_id, token, *, occurred_at):
+    """Use only a persisted, submitted staff-issued form as the fee authority.
+
+    No parent-supplied actor or price is accepted. The optional finance hook
+    cannot undo the authoritative submission if data or finance is unavailable.
+    """
+    if not token or not _eligible(connection, occurred_at):
+        return
+    with _intake_transaction(connection, student_id):
+        intent = _intent(connection, student_id, token)
+        if intent:
+            return _record_submission(connection, student_id, token, occurred_at, intent['actor'])
 
 
 def confirm_guardian_fee_on_profile_save(connection, student_id, actor_user_id, *, occurred_at):

@@ -941,6 +941,7 @@ def render_revenue_workspace_page(
         page_links = f'<div class="revenue-pagination__links">{links}</div>' if links else ""
         paging = f'<nav class="revenue-pagination" aria-label="学生分页"><span>{page_summary}</span>{page_links}</nav>'
     student_detail = ""
+    collection_assets = ""
     detail = data.get("student_detail")
     if detail:
         if detail["state"] == "not_found":
@@ -956,6 +957,38 @@ def render_revenue_workspace_page(
                 missing = detail.get("missing_case") or {}
                 content += (f'<p>{escape(str(missing.get("status") or "未建立财务档案"))}</p>'
                             f'<p>{escape(str(missing.get("explanation") or "请先核对申请周期与合同归属。"))}</p>')
+            entry = detail.get("collection_entry") or {}
+            can_record = data.get("can_record_historical_receipts", data.get("can_administer", False))
+            if not cases and not mobile and can_record and entry.get("available") and entry.get("cycles"):
+                from revenue.historical_receipt_views import _editor
+                editor = _editor(entry, csrf, action_token, new_label="添加收款记录", compact=True)
+                content += editor
+                if editor:
+                    collection_assets = '<link rel="stylesheet" href="/assets/historical-receipts.css?v=20261127b"><script src="/assets/historical-receipts.js?v=20261127" defer></script>'
+            historical = detail.get("historical_receipts") or []
+            if historical:
+                from revenue.historical_receipt_views import money as historical_money
+                from revenue.historical_receipts import KINDS, summary as historical_summary
+                content += '<div class="revenue-history-group"><h3>历史收款与凭证</h3>'
+                for receipt in historical:
+                    status = "已取消核对" if receipt.get("status") == "cancelled" else (receipt.get("summary") or historical_summary(receipt))
+                    amount = historical_money(receipt.get("actual_cents"), receipt.get("currency_code") or "币种待核实")
+                    proofs = ''.join(
+                        f'<a href="{escape(str(proof["view_url"]), quote=True)}" target="_blank" rel="noopener">查看{"历史服务费收据" if proof.get("evidence_kind") == "external_receipt" else "付款凭证"}</a> '
+                        for proof in receipt.get("evidence") or [] if proof.get("view_url")
+                    ) or '付款凭证待补'
+                    content += (
+                        '<article class="revenue-payment-entry">'
+                        f'<h4>{escape(KINDS.get(receipt.get("service_kind"), "历史收款"))} · 周期 #{escape(str(receipt.get("application_cycle_id") or "待核实"))}</h4>'
+                        f'<p>{escape(status)} · 原币金额：{escape(amount)}</p>'
+                        f'<p>收款日期：{escape(str(receipt.get("received_date") or "待核实"))} · {proofs}</p></article>'
+                    )
+                history_href = str(detail.get("historical_receipts_href") or "")
+                if mobile and history_href.startswith('/revenue/'):
+                    history_href = '/mobile' + history_href
+                if history_href:
+                    content += f'<p><a href="{escape(history_href, quote=True)}">查看历史收款核对资料</a></p>'
+                content += '</div>'
         student_detail = f'<section class="revenue-panel" aria-label="学生收入与佣金详情">{content}</section>'
     action_content = (
         '<aside id="revenue-action" class="revenue-action-note">'
@@ -1041,6 +1074,7 @@ def render_revenue_workspace_page(
     stylesheet = f"/assets/revenue.css?v={ASSET_VERSION}" if case_list else "/assets/revenue.css"
     return f"""
     <link rel="stylesheet" href="{stylesheet}">
+    {collection_assets}
     <script src="/assets/revenue-payment.js?v=3" defer></script>
     <main class="revenue-workspace revenue-workspace-page{mobile_variant}" data-revenue-schema="{escape(str(data['schema_version']))}" data-revenue-workspace="{escape(str(data['name']), quote=True)}">
       {breadcrumb}
@@ -1557,7 +1591,7 @@ def render_revenue_case_workbench(
         entry = data.get("collection_entry") or {}
         records = entry.get("rows") or []
         if entry.get("available") and entry.get("cycles"):
-            pending += _editor(entry, csrf, action_token, new_label="添加收款记录")
+            pending += _editor(entry, csrf, action_token, new_label="添加收款记录", compact=True)
         if records:
             from urllib.parse import urlencode
             href = '/revenue/historical-receipts?' + urlencode({'student': data['case']['student_id']})
@@ -1743,7 +1777,7 @@ def render_revenue_case_workbench(
     historical_html = render_case_summary(data.get("historical_collections") or [], student_id, mobile)
     return f"""
     <link rel="stylesheet" href="/assets/revenue.css">
-    <link rel="stylesheet" href="/assets/historical-receipts.css?v=20261127">
+    <link rel="stylesheet" href="/assets/historical-receipts.css?v=20261127b">
     <script src="/assets/historical-receipts.js?v=20261127" defer></script>
     <main class="revenue-workspace revenue-case-workbench{variant}" data-revenue-schema="{escape(str(data['schema_version']))}">
       <nav class="revenue-breadcrumb" aria-label="面包屑"><a href="{escape(home_href, quote=True)}">收入与佣金</a><span>/</span><a href="{escape(case_list_href, quote=True)}">收费与佣金档案</a></nav>

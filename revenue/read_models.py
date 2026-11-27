@@ -1148,6 +1148,15 @@ class RevenueReadModels:
                     "SELECT * FROM revenue_commercial_cases WHERE student_id=? ORDER BY application_cycle_id DESC,id DESC", (selected,)).fetchall()
                 detail = {"student_id": selected, "student_name": self._student_display_name(selected),
                           "state": "found", "cases": [self._case_projection(c) for c in case_rows]}
+                # Historical collection drafts can predate a commercial case.
+                # Keep their original amounts and evidence reachable after the
+                # application ends, without creating or repricing any finance facts.
+                detail["historical_receipts"] = self._student_historical_receipts(selected)
+                prefix = "/mobile/revenue" if self.case_surface == "mobile" else "/revenue"
+                detail["historical_receipts_href"] = prefix + "/historical-receipts?" + urlencode({"student": selected})
+                if not case_rows and self._table_exists("revenue_historical_receipts"):
+                    from revenue.historical_receipt_views import page_data
+                    detail["collection_entry"] = page_data(self.connection, selected)
                 if not case_rows:
                     detail["missing_case"] = self._missing_case_info(student["missing_case_reason"])
             else:
@@ -1156,6 +1165,22 @@ class RevenueReadModels:
             "total": total, "page": page, "pages": pages, "page_size": page_size,
             "previous": link(page-1) if page > 1 else None,
             "next": link(page+1) if page < pages else None}}
+
+    def _student_historical_receipts(self, student_id: str) -> list[dict[str, Any]]:
+        from revenue.historical_receipts import reviews, summary
+        records = reviews(self.connection, student_id=student_id)
+        for record in records:
+            record["summary"] = summary(record)
+            record["evidence"] = []
+            if self._table_exists("revenue_historical_receipt_evidence") and self._table_exists("revenue_documents"):
+                for evidence in self.connection.execute(
+                    """SELECT e.evidence_kind,d.uid document_uid
+                         FROM revenue_historical_receipt_evidence e
+                         JOIN revenue_documents d ON d.id=e.document_id
+                        WHERE e.historical_receipt_id=? ORDER BY e.id""", (record["id"],)):
+                    record["evidence"].append({**dict(evidence), "view_url":
+                        "/revenue/documents/" + quote(str(evidence["document_uid"]), safe="") + "/view"})
+        return records
 
     def _complete_student_list_facts(self, row, student_id, cases):
         """Read-only facts; a missing finance record never implies a fee or zero debt."""

@@ -4261,6 +4261,8 @@ def submit_parent_reapplication(data, token_row, draft_revision):
         from business_changes.student_records import publish_student_submission
         publish_student_submission(conn, student_id=student_id, parent_form_token=token,
             event_type='parent_form.submitted', occurred_at=stamp)
+        from revenue.parent_guardian_intake import record_submitted_parent_guardian_intake
+        record_submitted_parent_guardian_intake(conn, student_id, token, occurred_at=stamp)
     return student_id
 
 
@@ -4404,6 +4406,9 @@ def create_student_from_form(data, token_row=None, consultant_id=None, source_to
         publish_student_submission(conn, student_id=student_id,
             parent_form_token=token_row['token'] if token_row else '',
             event_type='parent_form.submitted' if token_row else 'student.created', occurred_at=created)
+        if token_row:
+            from revenue.parent_guardian_intake import record_submitted_parent_guardian_intake
+            record_submitted_parent_guardian_intake(conn, student_id, token_row['token'], occurred_at=created)
 
     folder = None
     try:

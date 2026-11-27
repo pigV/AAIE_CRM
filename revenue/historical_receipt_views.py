@@ -43,7 +43,7 @@ def _missing_facts(record):
     return missing
 
 
-def _editor(data, csrf, token, record=None, *, new_label="新增历史收款核对"):
+def _editor(data, csrf, token, record=None, *, new_label="新增历史收款核对", compact=False):
     from revenue.views import _hidden_security
     record = record or {}
     slots = {str(c['id']): [kind for kind in KINDS if not any(
@@ -55,6 +55,8 @@ def _editor(data, csrf, token, record=None, *, new_label="新增历史收款核�
             return ''
         record = {'application_cycle_id': free_cycles[0]['id'],
                   'service_kind': slots[str(free_cycles[0]['id'])][0]}
+    if compact and not record.get('uid'):
+        record = {**record, 'source_note': '从收费与佣金档案登记收款资料，收款事实与历史资料待核实。'}
     uid = record.get('uid', '')
     editing = bool(uid)
     eid = 'hcr-edit-' + (uid or 'new')
@@ -78,24 +80,35 @@ def _editor(data, csrf, token, record=None, *, new_label="新增历史收款核�
     identity += select('service_kind', '核对费用类别', list(KINDS.items()), 'client_service', editing)
     identity += select('contract_state', '历史合同情况', [('historical_missing','历史未生成 / 未找到'),('documented','原合同已记录'),('not_required','本项无需服务合同')], 'historical_missing')
     identity += f'<label data-hcr-visa>独立学生签证案件编号（签证项必填）<input name="visa_case_id" type="number" min="1" value="{value("visa_case_id")}"><small>仅关联本学生、本周期的500学生签证。</small></label>'
-    payment = select('claimed_received', '收款确认', [('0','是否收款尚待核实'),('1','用户已确认收过款')], 0)
-    payment += select('currency_code', '实际到账币种', [('', '待核实'),('AUD','AUD 澳元'),('CNY','CNY 人民币')])
+    receipt_confirmation = select('claimed_received', '收款确认', [('0','是否收款尚待核实'),('1','用户已确认收过款')], 0)
+    payment = select('currency_code', '实际到账币种', [('', '待核实'),('AUD','AUD 澳元'),('CNY','CNY 人民币')])
+    historical_amounts = ''
     for name, label in [('actual_cents','原币实际到账金额'),('agreed_aud_cents','历史议定服务费 AUD'),('settled_aud_cents','已核对的 AUD 结算金额（人民币勿填）')]:
         marker = ' data-hcr-settlement' if name == 'settled_aud_cents' else ''
-        payment += f'<label{marker}>{label}<input name="{name}" type="number" inputmode="decimal" step="0.01" min="0" value="{value(name)}"></label>'
+        field = f'<label{marker}>{label}<input name="{name}" type="number" inputmode="decimal" step="0.01" min="0" value="{value(name)}"></label>'
+        if compact and name != 'actual_cents':
+            historical_amounts += field
+        else:
+            payment += field
     payment += f'<label>实际收款日期<input name="received_date" type="date" value="{value("received_date")}"></label>'
     payment += select('method_code','付款方式',[('', '待核实'),('au_personal_account','澳洲私人账号'),('au_company_account','澳洲公司账号'),('alipay','支付宝'),('wechat','微信')])
     payment += '<p class="hcr-field-note" data-hcr-cny-note hidden>人民币按原币保存；AUD结算待单独核实，本轮不换算。</p>'
+    source = f'<fieldset><legend>核对来源</legend><label>核对来源说明<textarea name="source_note" minlength="10" maxlength="2000" required rows="3">{value("source_note")}</textarea></label></fieldset>'
+    if compact:
+        fields = f'''<fieldset><legend>收款资料</legend><div class="hcr-fields">{payment}</div></fieldset>
+        <details class="hcr-advanced"><summary>高级核对：收款确认、合同、周期与结算</summary>
+        <fieldset><legend>归属与合同</legend><div class="hcr-fields">{identity}</div></fieldset>
+        <fieldset><legend>收款事实与历史金额</legend><div class="hcr-fields">{receipt_confirmation}{historical_amounts}</div></fieldset>{source}</details>'''
+    else:
+        fields = f'<fieldset><legend>归属与合同</legend><div class="hcr-fields">{identity}</div></fieldset><fieldset><legend>历史实际收款</legend><div class="hcr-fields">{receipt_confirmation}{payment}</div></fieldset>{source}'
     security = _hidden_security(csrf, token, uid + 'editor')
-    return f'''<details class="hcr-editor" id="{eid}"{ ' open' if editing or not data['rows'] else ''}>
+    return f'''<details class="hcr-editor{ " hcr-workspace" if compact else ""}" id="{eid}"{ ' open' if editing or not data['rows'] else ''}>
       <summary>{'补充或修改核对资料' if editing else new_label}</summary>
       <form method="post" action="/revenue/historical/save" enctype="multipart/form-data" class="hcr-form" data-hcr-editor data-hcr-slots="{_e(json.dumps(slots))}">
         {security}<input type="hidden" name="student_id" value="{_e(data['student_id'])}">
         <input type="hidden" name="expected_revision" value="{record.get('revision',0)}"><input type="hidden" name="review_uid" value="{_e(uid)}">
         <p class="hcr-form-note">资料不齐可先保存。金额按历史事实核对，不按现价重算。</p>
-        <fieldset><legend>归属与合同</legend><div class="hcr-fields">{identity}</div></fieldset>
-        <fieldset><legend>历史实际收款</legend><div class="hcr-fields">{payment}</div></fieldset>
-        <fieldset><legend>核对来源</legend><label>核对来源说明<textarea name="source_note" minlength="10" maxlength="2000" required rows="3">{value('source_note')}</textarea></label></fieldset>
+        {fields}
         <label>付款凭证（可后补）<input type="file" name="historical_evidence" accept=".pdf,.png,.jpg,.jpeg"><small>支持 PDF、PNG 和 JPG/JPEG，最大 20 MB。</small></label>
         <div class="hcr-form-footer"><span>保存草稿不会产生正式收款、费用或收据。</span><button class="hcr-button hcr-button--primary">保存待核实资料</button></div>
       </form></details>'''

@@ -125,3 +125,7 @@
   .hcr-workspace .hcr-button { white-space: normal; }
 }
 .hcr-form [hidden] { display: none !important; }
+
+.hcr-advanced { border: 1px solid var(--revenue-line); border-radius: 10px; padding: 12px; }
+.hcr-advanced > summary { cursor: pointer; color: var(--revenue-muted); font-size: 13px; }
+.hcr-advanced[open] > summary { margin-bottom: 16px; }
