@@ -499,6 +499,10 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
         try:
             with self._visa_fact_read_scope() as conn:document=legacy_document_view(conn,int(case_id),int(file['id']))
         except ValueError:return ''
+        for option in document.get('material_item_options',[]):
+            option['display_label']=self.visa_material_name_label(option['label'])
+        if document.get('material_item_id'):
+            document['material_item_label']=self.visa_material_name_label(document['material_item_label'])
         html=document_edit_html(case_id,self.csrf,document)
         html=html.replace(f'<input type="hidden" name="document_id" value="{int(document["id"])}">',f'<input type="hidden" name="legacy_student_document_id" value="{int(file["id"])}">')
         html=html.replace('value="edit-document"','value="legacy-edit"').replace('value="reclassify"','value="legacy-classify"').replace('value="archive-document"','value="legacy-delete"')
@@ -552,7 +556,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                         document=register_linked_document(conn,int(case_id),int(value('legacy_student_document_id')),storage_root=g['nas'].student_folder(student),actor_user_id=actor,occurred_at=stamp,for_deletion=action=='legacy-delete')
                         did=document['id']
                         if action=='legacy-delete':service.set_document_archived(conn,int(case_id),did,archived=True,actor_user_id=actor,occurred_at=stamp)
-                        elif action=='legacy-edit':edit_document_metadata(conn,int(case_id),did,display_name=value('display_name'),category=value('category'),actor_user_id=actor,occurred_at=stamp)
+                        elif action=='legacy-edit':edit_document_metadata(conn,int(case_id),did,display_name=value('display_name'),category=value('category') or None,material_item_id=value('material_item_id') or None,actor_user_id=actor,occurred_at=stamp)
                         elif action=='legacy-classify':classify_document(conn,int(case_id),did,actor_user_id=actor,occurred_at=stamp)
                         else:
                             path=self._visa_document_path(dict(case),document)
@@ -566,7 +570,7 @@ class VisaWorkspaceCandidateMixin(VisaOnlyMaterialsMixin):
                         from visa_document_metadata import edit_document_metadata, classify_document
                         did=int(value('document_id'))
                         if action=='edit-document':
-                            edit_document_metadata(conn,int(case_id),did,display_name=value('display_name'),category=value('category'),actor_user_id=actor,occurred_at=stamp)
+                            edit_document_metadata(conn,int(case_id),did,display_name=value('display_name'),category=value('category') or None,material_item_id=value('material_item_id') or None,actor_user_id=actor,occurred_at=stamp)
                         else:classify_document(conn,int(case_id),did,actor_user_id=actor,occurred_at=stamp)
                     elif action=='archive-document':
                         from visa_documents_candidate import set_document_archived

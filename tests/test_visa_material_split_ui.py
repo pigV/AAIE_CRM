@@ -47,3 +47,14 @@ class MaterialRecordUITests(unittest.TestCase):
             self.assertIn(control, html)
         for key in ['required_unfinished','unfinished','all','uploaded','not_applicable']:
             self.assertIn('data-quick-filter="'+key+'"', html)
+
+
+class CompactMaterialRowTests(unittest.TestCase):
+    def test_upload_and_preview_share_action_column_and_metadata_is_separate(self):
+        from html.parser import HTMLParser
+        html=render_material_workspace(Handler(),'S1',{'id':7},rows(),panel_id='material-checklist',title='材料清单',description='材料资料')
+        self.assertIn('visa-material-item-identity',html)
+        self.assertIn('visa-material-item-ownership',html)
+        self.assertIn('visa-material-compact-toolbar',html)
+        self.assertIn('aria-label="搜索材料和文件名"',html)
+        self.assertIn('已收到不代表审核通过',html)

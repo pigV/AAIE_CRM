@@ -55,11 +55,18 @@ def document_edit_html(case_id, csrf, document):
     from visa_document_metadata import CATEGORIES
     d=document; did=int(d['id'])
     label=CATEGORIES.get(d.get('effective_category'),d.get('effective_category') or 'Not Detected')
-    source='Manual / 人工' if d.get('manual_override') else 'Auto / 自动'
+    placement=d.get('material_item_options') or []
+    if placement:label=d.get('material_item_label') or '未指定材料项'
+    source='Final Item / 已确认归类' if placement else 'Manual / 人工' if d.get('manual_override') else 'Auto / 自动'
     badges=f'<div class="visa-document-badges"><span class="status-pill">{escape(label)}</span><span class="status-pill">{source}</span></div>'
     if d.get('archived_at'):return badges
     hidden=f'<input type="hidden" name="document_id" value="{did}">'
-    edit=hidden+f'<label>Display Name / 显示名称<input name="display_name" required maxlength="240" value="{escape(d.get("display_name") or d.get("original_name") or "",quote=True)}"></label><label>Current Category / 当前分类<select name="category">'+_options(CATEGORIES,d.get('effective_category'))+'</select></label><button>Save / 保存</button>'
+    category_control=('<label>Current Category / 当前分类<select name="material_item_id" required>'+
+        ('<option value="">请选择当前案件材料项</option>' if not d.get('material_item_id') else '')+
+        _options({str(i['id']):i.get('display_label') or i['label'] for i in placement},str(d.get('material_item_id') or ''))+
+        '</select></label><p class="visa-material-assignment-note">与 Final Item 使用同一材料清单。修改后文件同步归入所选项，保留原文件及修改记录。</p>' if placement
+        else '<label>Current Category / 当前分类<select name="category">'+_options(CATEGORIES,d.get('effective_category'))+'</select></label>')
+    edit=hidden+f'<label>Display Name / 显示名称<input name="display_name" required maxlength="240" value="{escape(d.get("display_name") or d.get("original_name") or "",quote=True)}"></label>'+category_control+'<button>Save / 保存</button>'
     detected=CATEGORIES.get(d.get('auto_category'),d.get('auto_category') or 'Not Detected')
     evidence=f'<details class="visa-document-audit"><summary>Details / Audit</summary><p>Auto Detected Category: {escape(str(detected))}</p></details>'
     delete=_form(case_id,csrf,'archive-document',hidden+'<button class="danger" type="submit">Delete / 删除</button>')

@@ -29,7 +29,7 @@ def _set_status(conn, case_id, item_id, received):
     if row is None:return
     item=dict(zip((c[0] for c in cursor.description),row))
     state='uploaded' if received else 'missing'
-    assignments={k:state for k in ('status','document_status') if k in item
+    assignments={k:state for k in ('status','document_status','item_status') if k in item
                  and item[k] not in ({'reviewed','已审核'} if received else {'not_applicable','不适用'})}
     if assignments:
         conn.execute('UPDATE visa_checklist_items SET '+','.join(k+'=?' for k in assignments)+' WHERE id=? AND visa_case_id=?',
@@ -49,7 +49,9 @@ def independent_material_rows(conn, case_id, item_id, *, category_override=None)
     for row in rows:
         category=(category_override[1] if category_override and row['id']==category_override[0]
                   else row.get('manual_category'))
-        effective_item=_target(items,category)['id'] if category in TITLES else row['item_id']
+        from visa_material_assignment import latest_assignment
+        assigned=latest_assignment(conn,case_id,row['id'])
+        effective_item=assigned if assigned is not None else _target(items,category)['id'] if category in TITLES else row['item_id']
         if effective_item==int(item_id):result.append({'id':row['id'],'original_name':row['original_name']})
     return result
 

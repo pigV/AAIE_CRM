@@ -25,7 +25,9 @@ def legacy_document_view(conn,case_id,student_document_id):
         return dict(doc,**effective_metadata(conn,case_id,doc['id']),legacy_student_document_id=student_document_id,classification_preview=False)
     normalized=normalize_keyword(source['original_name']);matches=[r for r in list_rules(conn) if r['active'] and r['normalized_keyword'] in normalized]
     category=matches[0]['category'] if matches else LEGACY.get(source['document_type'],'other')
-    return dict(id=student_document_id,original_name=source['original_name'],display_name=source['original_name'],effective_category=category,auto_category=category,manual_override=False,archived_at=None,legacy_student_document_id=student_document_id,classification_preview=True)
+    from visa_material_assignment import material_context
+    placement=material_context(conn,case_id,source_id=student_document_id)
+    return dict(**placement,id=student_document_id,original_name=source['original_name'],display_name=source['original_name'],effective_category=category,auto_category=category,manual_override=False,archived_at=None,legacy_student_document_id=student_document_id,classification_preview=True)
 
 
 def register_linked_document(conn,case_id,student_document_id,*,storage_root,actor_user_id,occurred_at,for_deletion=False):

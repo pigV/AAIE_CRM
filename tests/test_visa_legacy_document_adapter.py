@@ -111,7 +111,7 @@ class LegacyTests(unittest.TestCase):
    def send_html(this,html):this.result=html
    def __getattr__(this,name):return lambda *a,**kw:''
   h=Handler();h.student_visa_case_detail('GET','S1',1)
-  for text in ['Date of Grant','Length of Stay','Medical Completed Date','Total Processing Days','Medical Completed to Grant Days','Info Collection','Material Checklist','Visa Result','Evidence / AI Review']:self.assertIn(text,h.result)
+  for text in ['Date of Grant','Length of Stay','Medical Completed Date','Total Processing Days','Medical Completed to Grant Days','信息采集','签证材料清单','签证结果','证据 / AI 审查']:self.assertIn(text,h.result)
  def test_official_projection_exact_cycle_never_latest_student_or_sent_on(self):
   from visa_legacy_document_adapter import official_case_projection
   self.c.executescript("ALTER TABLE visa_cases ADD COLUMN application_cycle_id INTEGER; UPDATE visa_cases SET application_cycle_id=7; CREATE TABLE visas(id INTEGER PRIMARY KEY,student_id TEXT,visa_grant_date TEXT,visa_expiry_date TEXT,visa_conditions TEXT); INSERT INTO visas VALUES(5,'S1','2026-09-01','2029-09-01','Not a length field'); CREATE TABLE visa_decision_events(visa_case_id INTEGER,student_id TEXT,application_cycle_id INTEGER,visa_record_id INTEGER,decision_type TEXT,decision_date TEXT); INSERT INTO visa_decision_events VALUES(1,'S1',7,5,'grant','2026-09-01');")

@@ -69724,10 +69724,10 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         tabs = "".join(
             self.visa_case_tab_link(student_id, case["id"], tab_key, active_tab, label)
             for tab_key, label in (
-                ("info_collection", "Info Collection"),
-                ("material_checklist", "Material Checklist"),
-                ("visa_result", "Visa Result"),
-                ("evidence_ai_review", "Evidence / AI Review"),
+                ("info_collection", "信息采集"),
+                ("material_checklist", "签证材料清单"),
+                ("visa_result", "签证结果"),
+                ("evidence_ai_review", "证据 / AI 审查"),
             )
         )
         tab_panels = "".join(
@@ -69747,7 +69747,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
         hero_title = applicant_name or student_name
         display_case=(self._visa_display_case(case) if getattr(self,"business_changes_enabled",lambda:False)() else dict(case))
         hero_status='签证材料需核实' if display_case.get('_business_needs_review') else display_case['status']
-        hero_description = f'{case["visa_type"] or ""} · 学生 {student_name} · 学生编号 {student_id} · 案件 #{case["id"]} · {case["case_owner"] or "未分配负责人"} · {hero_status}'
+        hero_description = f'学生 {student_name} · 学生编号 {student_id}'
         body = f"""
         <link rel="stylesheet" href="/assets/visa-case-scheme-c.css?v=1">
         <div class="visa-management-page visa-case-scheme-c{' visa-material-case-page' if material_mode else ''}">
@@ -69758,16 +69758,18 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
               <p>{esc(hero_description)}</p>
             </div>
             <div class="row-actions"><a class="secondary button-link" href="/students/{quote(student_id)}/visa-cases">返回列表</a><a class="secondary button-link" href="/students/{quote(student_id)}">学生详情</a></div>
-          </section>
-          <div class="visa-case-workspace-grid">
-          <div class="visa-case-record-header">
           <dl class="visa-case-summary">
             <div><dt>签证类型</dt><dd>{esc(case['visa_type'] or '待核实')}</dd></div>
             <div><dt>案件负责人</dt><dd>{esc(case['case_owner'] or '未分配')}</dd></div>
-            <div><dt>案件状态</dt><dd>{esc(hero_status)}</dd></div>
+            <div><dt>案件状态</dt><dd><span class="visa-case-status-badge">{esc(hero_status)}</span></dd></div>
             <div><dt>案件编号</dt><dd>#{case['id']}</dd></div>
           </dl>
+          </section>
+          <div class="visa-case-workspace-grid">
+          <div class="visa-case-record-header">
+
           <nav class="visa-case-section-nav visa-case-tabs" aria-label="Visa Case tabs">{tabs}</nav>
+          <div class="visa-case-utilities">
           <details class="visa-case-overview-disclosure">
           <summary>案件概览与操作</summary>
           <section class="panel visa-management-detail-panel" id="case-overview">
@@ -69779,6 +69781,7 @@ class CRMLegacyHandler(BaseHTTPRequestHandler):
           </section>
           </details>
           {processing_entry}
+          </div>
           </div>
           <section class="visa-case-tab-content" data-visa-active-tab="{esc(active_tab)}">{tab_panels}</section>
           </div>

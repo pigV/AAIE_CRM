@@ -46,7 +46,9 @@ def effective_metadata(conn,case_id,document_id):
     source=_row(conn,'SELECT document_type FROM student_documents WHERE id=?',(doc['student_document_id'],)) if doc['student_document_id'] else None
     fallback=LEGACY.get(source['document_type'],'other') if source else 'other'
     manual=meta.get('manual_category');auto=meta.get('auto_category')
-    return {'document_id':document_id,'display_name':meta.get('display_name') or doc['original_name'],'auto_category':auto,'manual_category':manual,'manual_override':manual is not None,'effective_category':manual or auto or fallback,'classification_evidence':json.loads(meta.get('classification_evidence_json') or '{}')}
+    from visa_material_assignment import material_context
+    placement=material_context(conn,case_id,document_id=document_id,source_id=doc['student_document_id'])
+    return {**placement,'document_id':document_id,'display_name':meta.get('display_name') or doc['original_name'],'auto_category':auto,'manual_category':manual,'manual_override':manual is not None,'effective_category':manual or auto or fallback,'classification_evidence':json.loads(meta.get('classification_evidence_json') or '{}')}
 
 def _audit(conn,case_id,document_id,action,before,after,actor,stamp):
     conn.execute('INSERT INTO visa_document_audit(visa_case_id,document_id,action,before_json,after_json,actor_user_id,occurred_at) VALUES(?,?,?,?,?,?,?)',(case_id,document_id,action,_json(before),_json(after),actor,stamp))
@@ -75,7 +77,7 @@ def classify_document(conn,case_id,document_id,*,actor_user_id,occurred_at):
         return result
 
 @synchronized_visa_write
-def edit_document_metadata(conn,case_id,document_id,*,display_name=None,category=None,actor_user_id,occurred_at):
+def edit_document_metadata(conn,case_id,document_id,*,display_name=None,category=None,material_item_id=None,actor_user_id,occurred_at):
     _actor(conn,actor_user_id,occurred_at)
     if display_name is not None:
         display_name=str(display_name).strip()
@@ -83,7 +85,17 @@ def edit_document_metadata(conn,case_id,document_id,*,display_name=None,category
     if category is not None:_category(category)
     with _atomic(conn):
         _document(conn,case_id,document_id,True);before=effective_metadata(conn,case_id,document_id)
-        if display_name is None and category is None:return before
+        if display_name is None and category is None and material_item_id is None:return before
+        if material_item_id is not None:
+            from visa_material_assignment import placement_document_category
+            selected_category=(None if str(before.get('material_item_id'))==str(material_item_id) else
+                placement_document_category(conn,case_id,material_item_id,before['effective_category'],document_id=document_id))
+            if selected_category is not None:
+                if category is not None and category!=selected_category:
+                    raise ValueError('文件类型与目标材料项冲突，请刷新后核对。')
+                category=selected_category
+            from visa_material_assignment import assign_material_item
+            assign_material_item(conn,case_id,document_id,material_item_id,actor_user_id=actor_user_id,occurred_at=occurred_at)
         if category is not None:
             from visa_document_lifecycle import check_upload
             check_upload(conn,case_id,'',category,exclude_document_id=document_id)

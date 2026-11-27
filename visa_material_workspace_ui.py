@@ -113,14 +113,14 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
                 data-material-item="{item_id}" data-category-index="{index}" data-status="{escape(status)}"
                 data-required="{escape(item['required_status'])}" data-search="{escape(search_text)}"{hidden}>
                 <div class="visa-material-item-main">
-                  <div class="visa-material-item-label">{('<button type="button" class="visa-material-select" data-material-select="'+str(item_id)+'" aria-pressed="false">') if layout == 'split' else ''}<strong class="visa-material-item-name" data-search-label>{escape(name)}</strong>{'</button>' if layout == 'split' else ''}
-                    <div class="visa-material-item-meta"><span>{escape(owner)}</span><span class="visa-material-requirement">{escape(required)}</span>
-                    <span>{len(files)} 个文件</span></div>
+                  <div class="visa-material-item-label visa-material-item-identity">{('<button type="button" class="visa-material-select" data-material-select="'+str(item_id)+'" aria-pressed="false">') if layout == 'split' else ''}<strong class="visa-material-item-name" data-search-label>{escape(name)}</strong>{'</button>' if layout == 'split' else ''}
                   </div>
+                    <div class="visa-material-item-meta visa-material-item-ownership"><span>{escape(owner)}</span><span class="visa-material-requirement">{escape(required)}</span>
+                    <span>{len(files)} 个文件</span></div>
                   <label class="visa-material-item-status"><span>当前状态</span>{status_select}</label>
-                  <div class="visa-material-item-actions">{preview}<button class="secondary compact" type="button" data-open-files="{item_id}">文件与备注</button></div>
+                  <div class="visa-material-item-actions">{upload if layout != "split" else ""}{preview}<button class="secondary compact" type="button" data-open-files="{item_id}">文件与备注</button></div>
                 </div>
-                {upload}
+                {upload if layout == "split" else ""}
                 <details class="visa-material-item-details" data-material-details="{item_id}">
                   <summary>展开文件、备注与材料要求</summary>
                   <div class="visa-material-item-detail-content">
@@ -165,9 +165,10 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
       <section class="panel visa-material-checklist-panel visa-material-workspace {"visa-material-record" if layout != "split" else ""}" id="{panel}" data-visa-material-workspace data-case-id="{case_id}" data-initial-filter="{escape(active_filter)}">
         <div class="panel-head"><div><h2>{escape(title)}</h2><p>{escape(description)}</p></div><div class="row-actions">{initialize_link}{batch_link}</div></div>
         <div class="visa-material-quick-filters">{''.join(quick_filters)}</div>
-        <div class="visa-material-workspace-toolbar">
+        <div class="visa-material-workspace-toolbar visa-material-compact-toolbar">
           <label class="visa-material-search-label">搜索材料<input type="search" data-material-search placeholder="护照 / Passport / 文件名" aria-label="搜索材料和文件名"></label>
           <label>材料筛选<select data-material-filter>{extra_options}</select></label>
+        <label class="visa-material-category-mobile">材料分类<select data-category-mobile><option value="">全部分类</option>{''.join(f'<option value="{index}">{escape(h.visa_material_category_label(category))}</option>' for index,category in enumerate(groups))}</select></label>
           <button type="button" class="secondary" data-material-clear>清除搜索与筛选</button>
         </div>
         <form id="{form_id}" method="post" action="{base}/material-items" data-material-save>
@@ -175,7 +176,7 @@ def render_material_workspace(handler, student_id, case, rows, *, panel_id, titl
           <input type="hidden" name="csrf" value="{escape(h.csrf)}"><input type="hidden" name="visa_tab" value="material_checklist">
           <input type="hidden" name="return_anchor" value="{panel}"><input type="hidden" name="material_filter" value="{escape(active_filter)}">
         </form>
-        <label class="visa-material-category-mobile">材料分类<select data-category-mobile><option value="">全部分类</option>{''.join(f'<option value="{index}">{escape(h.visa_material_category_label(category))}</option>' for index,category in enumerate(groups))}</select></label>
+
         <div class="visa-material-workspace-body"><nav class="visa-material-category-nav" aria-label="材料分类">{''.join(categories)}</nav>
           <div class="visa-material-workspace-list"><p class="visa-material-search-count" data-material-matches role="status" aria-live="polite">共 {len(rows)} 项</p>
             {''.join(sections)}<p class="visa-management-empty" data-material-empty hidden>没有匹配材料，请清除搜索或切换筛选。</p>
