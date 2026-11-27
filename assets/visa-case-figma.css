@@ -275,8 +275,8 @@
 }
 
 .ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-material-record .visa-material-compact-row[data-required="required"] .visa-material-requirement:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
-  color:var(--visa-state-amber-ink);
-  background:var(--visa-state-amber-surface);
+  color:var(--visa-state-red-ink);
+  background:var(--visa-state-red-surface);
 }
 
 .ui-premium-v2 .visa-management-page.visa-case-scheme-c.visa-case-figma .visa-result-current p:not(:where(#visa-tab-evidence-ai-review, #visa-tab-evidence-ai-review *)) {
